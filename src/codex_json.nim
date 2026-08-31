@@ -6,7 +6,8 @@ type
   RequestKind* = enum
     mk_initialize,
     mk_thread_start,
-    mk_turn_start
+    mk_turn_start,
+    mk_thread_goal_set
 
   ServerRequestKind* = enum
     sr_command_execution_approval,
@@ -133,6 +134,11 @@ type
     effort*: NullableOption[ReasoningEffort]
     extra_fields*: JsonObject
 
+  ThreadGoalSetParams* = object
+    thread_id*: string
+    objective*: string
+    extra_fields*: JsonObject
+
   Params* = object
     case kind*: RequestKind
     of mk_initialize:
@@ -141,6 +147,8 @@ type
       thread_start*: ThreadStartParams
     of mk_turn_start:
       turn_start*: TurnStartParams
+    of mk_thread_goal_set:
+      thread_goal_set*: ThreadGoalSetParams
 
   Request* = object
     kind*: RequestKind
@@ -242,7 +250,7 @@ type
     request_id*: RequestId
     params*: DynamicToolCallParams
 
-  DynamicToolCallback* = proc(data: pointer; context: ToolCallContext) {.closure.}
+  DynamicToolCallback* = proc(data: pointer; context: ToolCallContext) {.closure, gcsafe.}
 
   DynamicTool* = object
     name*: string
@@ -386,6 +394,8 @@ type
       turn_id*: string
       turn_status*: TurnStatus
       turn_extra_fields*: JsonObject
+    of mk_thread_goal_set:
+      discard
 
   Success* = object
     id*: RequestId
@@ -466,7 +476,7 @@ proc add_extra_fields(node: JsonNode; fields: JsonObject) =
     node[key] = value
 
 proc put_nullable_option[T](node: JsonNode; key: string;
-    value: NullableOption[T]; serialize: proc(value: T): JsonNode) =
+    value: NullableOption[T]; serialize: proc(value: T): JsonNode {.gcsafe.}) =
   case value.state:
   of nos_none:
     discard
@@ -476,7 +486,7 @@ proc put_nullable_option[T](node: JsonNode; key: string;
     node[key] = serialize(value.value)
 
 proc nullable_parsed[T](node: JsonNode; key: string;
-    parse: proc(value: JsonNode): T): NullableOption[T] =
+    parse: proc(value: JsonNode): T {.gcsafe.}): NullableOption[T] =
   if not node.contains(key):
     return NullableOption[T](state: nos_none)
   if node[key].kind == JNull:
@@ -728,11 +738,18 @@ proc serialize_turn_start_params(params: TurnStartParams): JsonNode =
   result["input"].add(serialize_text_input(TextInput(text: params.text)))
   put_nullable_option(result, "effort", params.effort, json_node)
 
+proc serialize_thread_goal_set_params(params: ThreadGoalSetParams): JsonNode =
+  result = newJObject()
+  add_extra_fields(result, params.extra_fields)
+  result["threadId"] = %params.thread_id
+  result["objective"] = %params.objective
+
 proc serialize_params(params: Params): JsonNode =
   case params.kind:
   of mk_initialize: serialize_initialize_params(params.initialize)
   of mk_thread_start: serialize_thread_start_params(params.thread_start)
   of mk_turn_start: serialize_turn_start_params(params.turn_start)
+  of mk_thread_goal_set: serialize_thread_goal_set_params(params.thread_goal_set)
 
 proc serialize_message*(message: Message): JsonNode =
   result = newJObject()
@@ -744,6 +761,7 @@ proc serialize_message*(message: Message): JsonNode =
     of mk_initialize: result["method"] = %"initialize"
     of mk_thread_start: result["method"] = %"thread/start"
     of mk_turn_start: result["method"] = %"turn/start"
+    of mk_thread_goal_set: result["method"] = %"thread/goal/set"
     result["params"] = serialize_params(message.request.params)
   of mk_server_request:
     raise newException(ValueError, "server requests are not client-sendable")
@@ -1162,6 +1180,16 @@ proc parse_message*(node: JsonNode; pending: var seq[Message]): Message =
               turn_status: parse_turn_status(raw_result["turn"]["status"]),
               turn_extra_fields: extra_fields(raw_result["turn"], "id", "status")
             ),
+            raw_result: raw_result,
+            extra_fields: extra_fields(node, "id", "result")
+          )
+        )
+      of mk_thread_goal_set:
+        result = Message(
+          kind: mk_success,
+          success: Success(
+            id: id,
+            result: ResponseResult(kind: mk_thread_goal_set),
             raw_result: raw_result,
             extra_fields: extra_fields(node, "id", "result")
           )

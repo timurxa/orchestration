@@ -51,3 +51,25 @@ Knowledge persistence is an important topic. Really though, a stigmergic artifac
 Any sort of idea selection or refinement algorithm needs to incorporate the fact that research probably needs to be done even before plan generation. So to even start having a bunch of candidates to allocate tokens between, a lot of choices need to be made. However something we're going to do here is say that the entire structure is not going to be recursive, and will in fact have proper controls. This will make hyperparameter optimization and token control easier.
 
 We're going to go for a modified tree search algorithm. We need an initial tree search size. We'll call $m_0$ the initial branching amount. 
+
+for a non blocking approach without things like continuations we need things to be done via callbacks.
+
+so something like:
+
+```nim
+proc solve(problem: Problem): Work[ArtifactID] =
+  cheap[ArtifactID] "Optimize the goal into a prompt:" % [problem.goal]
+    >>> cheap[ArtifactID] "Execute the attached prompt and write result to a file"
+```
+
+should be interpreted as
+- send a message to codex app server with a callback
+- call the callback when received the artifact
+- this callback must then continue executions
+so we shouldn't block the entire thread. we might have very parallel work, and thus the more sensible thing to do .
+
+since the above is returning a "Work", this is a composition and so really the outer part is interpreted first, where the first cheap call is viewed as a dependency. basically `>>>` should be rewriting it into something like
+
+well first, the call expects results, but actually it should just expect Work. in fact even the prompt should be Work. but this seems wrong... argg.
+
+we wanna keep artifacts in the artifact system because this allows for easy analysis by both humans and agents. however... artifacts CAN be typed. perhaps they don't just have to be ID's.

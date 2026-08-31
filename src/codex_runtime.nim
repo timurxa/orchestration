@@ -1,4 +1,4 @@
-import std/[osproc, streams, json, options, tables, posix, os]
+import std/[osproc, streams, json, options, tables, os]
 import ./codex_json
 
 type
@@ -115,6 +115,8 @@ proc apply_success*(state: var RuntimeState; success: Success) =
         agent.state = as_working
         clear_agent_error(agent)
         state.agents[agent_id] = agent
+  of mk_thread_goal_set:
+    discard
 
   state.requests[key] = outgoing
 
@@ -448,21 +450,10 @@ proc server_stdout_stream*(runtime: ptr CodexRuntime): Stream =
 proc server_stderr_stream*(runtime: ptr CodexRuntime): Stream =
   runtime.process.error_stream
 
-proc close_process_streams(codex: ptr CodexRuntime) =
-  if codex.handles_closed:
-    return
-  let output_handle = codex.process.outputHandle()
-  let error_handle = codex.process.errorHandle()
-  discard posix.close(output_handle)
-  if error_handle != output_handle:
-    discard posix.close(error_handle)
-  codex.handles_closed = true
-
 proc stop_codex_runtime*(codex: ptr CodexRuntime) =
   if codex.process.running:
     codex.process.kill()
   discard codex.process.waitForExit(3_000)
-  close_process_streams(codex)
 
 proc deinit_codex_runtime*(codex: ptr CodexRuntime) =
   stop_codex_runtime(codex)
@@ -471,6 +462,13 @@ proc deinit_codex_runtime*(codex: ptr CodexRuntime) =
   codex.state.agents.clear()
   codex.state.requests.clear()
   codex.state.server_requests.clear()
+  reset(codex.process)
+  reset(codex.pending)
+  reset(codex.cwd)
+  reset(codex.initialization_error)
+  reset(codex.state.agents)
+  reset(codex.state.requests)
+  reset(codex.state.server_requests)
   deallocShared(codex)
 
 proc init_codex_runtime*(cwd: string): ptr CodexRuntime =
@@ -516,6 +514,9 @@ proc init_codex_runtime*(cwd: string): ptr CodexRuntime =
     ),
     none(AgentId)
   )
+
+proc output_handle*(runtime: ptr CodexRuntime): cint = runtime.process.outputHandle()
+proc error_handle*(runtime: ptr CodexRuntime): cint = runtime.process.errorHandle()
 
 proc create_agent*(runtime: ptr CodexRuntime; agent_id: AgentId;
     model: string; tools: DynamicToolRegistry = @[];
@@ -620,4 +621,25 @@ proc send_agent_message*(runtime: ptr CodexRuntime; agent_id: AgentId;
     agent_id,
     text,
     runtime.state.agents[agent_id].default_effort
+  )
+
+proc set_agent_goal*(runtime: ptr CodexRuntime; agent_id: AgentId;
+    objective: string): RequestId =
+  if not runtime.state.agents.hasKey(agent_id):
+    raise newException(ValueError, "unknown agent: " & agent_id)
+  let agent = runtime.state.agents[agent_id]
+  if not agent.thread_id.has_value:
+    raise newException(ValueError, "agent has not started: " & agent_id)
+  if agent.state == as_closed:
+    raise newException(ValueError, "agent is closed: " & agent_id)
+
+  let params = ThreadGoalSetParams(
+    thread_id: agent.thread_id.value,
+    objective: objective
+  )
+  queue_request(
+    runtime,
+    mk_thread_goal_set,
+    Params(kind: mk_thread_goal_set, thread_goal_set: params),
+    some(agent_id)
   )
