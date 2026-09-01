@@ -1,5 +1,5 @@
 [objective]
-goal = "Use the `finish_work` tool to fill in the TestType; fill in some random numbers for the artifact ID's"
+goal = "Write a greeting message"
 
 [settings]
 budget = 50.0

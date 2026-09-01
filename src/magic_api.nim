@@ -1,4 +1,5 @@
 import std/[os, sugar, atomics, jsonutils, json]
+import db_connector/db_sqlite
 import results
 import schematic
 import codex_json
@@ -46,6 +47,7 @@ type
     reader_state*: ReaderState
     stop_pipe*: array[0..1, cint]
     pending_on_agent_creation_triggers*: seq[AgentCreationTrigger]
+    db*: DbConn
   Contextual*[A, B] =
     (ptr Context {.closure.} -> ((A, Consumer[B]) {.closure.} -> void))
 
@@ -96,9 +98,7 @@ proc submit[A, B](
     agent_id = agent_id,
     model = model_name(profile.model),
     tools = tools,
-    developer_instructions = """
-      Complete user task. You MUST call the `finish_work` dynamic tool to submit your response. Finishing a turn is not indicative of completion. Completion only occurs when you've called the `finish_work` tool, after which you may stop working.
-      """,
+    developer_instructions = "Complete task. Submit final result with `finish_work`. None of your responses outside of tool call response is observable.",
   )
 
   context.global[].send(AppEvent(
@@ -107,6 +107,7 @@ proc submit[A, B](
       agent_id: agent_id,
       then: proc () {.gcsafe.} =
         {.cast(gcsafe).}:
+          discard context.runtime.set_agent_goal(agent_id, "Complete task. Call `finish_work` exactly once with final result.")
           let message = prompt & "\n\ninput: " & data.toJson().pretty()
           discard context.runtime.send_agent_message(
             agent_id,
@@ -146,4 +147,3 @@ proc low*(model: Model): Profile = Profile(model: model, effort: re_low)
 proc medium*(model: Model): Profile = Profile(model: model, effort: re_medium)
 proc high*(model: Model): Profile = Profile(model: model, effort: re_high)
 proc xhigh*(model: Model): Profile = Profile(model: model, effort: re_xhigh)
-
