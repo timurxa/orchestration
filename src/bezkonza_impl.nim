@@ -34,6 +34,7 @@ type
     on_agent_creation
     codex_output
     codex_error
+    codex_stopped
     terminate
   AppEvent* = object
     case kind*: AppEventKind
@@ -43,7 +44,7 @@ type
       trigger*: AgentCreationTrigger
     of codex_output, codex_error:
       message*: string
-    of terminate: discard
+    of codex_stopped, terminate: discard
   ReaderState* = object
     output_fd*, error_fd*, stop_fd*: cint
   ArtifactStorage* = object
@@ -990,6 +991,7 @@ proc read_codex(
     TPollfd(fd: context.reader_state.stop_fd, events: POLLIN, revents: 0)
   ]
   var pending = ""
+  var reached_eof = false
 
   while true:
     if poll(addr watched[0], Tnfds(2), -1) < 0:
@@ -1002,6 +1004,7 @@ proc read_codex(
       var buffer: array[4096, char]
       let count = read(fd, addr buffer[0], buffer.len)
       if count <= 0:
+        reached_eof = true
         break
       let s = newString(count)
       copyMem(addr s[0], addr buffer[0], count)
@@ -1016,6 +1019,9 @@ proc read_codex(
           kind: event_kind,
           message: message
         ))
+
+  if reached_eof:
+    context.global[].send(AppEvent(kind: codex_stopped))
 
 proc read_codex_output(context: ptr Context) {.thread, gcsafe.} =
   read_codex(context, context.reader_state.output_fd, codex_output)
@@ -1093,7 +1099,13 @@ proc runtime[P, R](
     of on_agent_creation: context.pending_on_agent_creation_triggers.add(msg.trigger)
     of codex_output:
       let message = context.runtime.accept_json(parseJson(msg.message))
-      if message.kind == mk_notification:
+      if context.runtime.initialization_error.isSome:
+        args.outcome[] = Outcome[R].err(Error(
+          message: "codex initialization failed: " &
+            context.runtime.initialization_error.get
+        ))
+        context.global[].send(AppEvent(kind: terminate))
+      elif message.kind == mk_notification:
         let notification = message.notification
         if notification.method_name == "item/completed":
           let notif_type = notification.params.extra_fields["item"]["type"].getStr()
@@ -1117,6 +1129,17 @@ proc runtime[P, R](
           context.pending_on_agent_creation_triggers.del(i)
     of codex_error:
       echo msg.message
+      if not context.runtime.initialized and msg.message.strip.startsWith("Error:"):
+        args.outcome[] = Outcome[R].err(Error(
+          message: "codex app-server startup failed: " & msg.message.strip
+        ))
+        context.global[].send(AppEvent(kind: terminate))
+    of codex_stopped:
+      if not context.runtime.initialized:
+        args.outcome[] = Outcome[R].err(Error(
+          message: "codex app-server exited before initialization"
+        ))
+        context.global[].send(AppEvent(kind: terminate))
     of terminate:
       var signal = 'x'
       discard write(context.stop_pipe[1], addr signal, 1)

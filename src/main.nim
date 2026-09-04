@@ -1,6 +1,7 @@
 import std/[sugar, paths]
 import parsetoml
 import bezkonza
+import results
 
 {.experimental: "openSym".}
 
@@ -27,15 +28,18 @@ orchestrate:
 
   const relative_global_objective_input_path = Path("./run_settings.toml")
 
+  proc print_outcome(outcome: Outcome[Response]) =
+    echo outcome
+    if outcome.isErr:
+      quit(1)
+
   proc main*() =
     let cwd = paths.getCurrentDir()
     let global_objective_input_path = cwd / relative_global_objective_input_path
     let parsed = parsetoml.parseFile($global_objective_input_path)
 
     let problem = Problem(goal: parsed["objective"]["goal"].getStr())
-    start[Problem, Response](problem, solve, (outcome: Outcome[Response]) =>
-      echo outcome
-    )
+    start[Problem, Response](problem, solve, print_outcome)
 
   when isMainModule:
     main()
