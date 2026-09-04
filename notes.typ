@@ -1,75 +1,28 @@
-#let gradient = $nabla$
+it's true that we should abstract away some of the materialization process. say we want to properly support basically arbitrary containers for the special types, like Location. the point of this is that the type is associated with a mechanism for how to use that type at runtime.
 
-- It's bad to pretend agent will do things perfectly, interface should be designed for good human guidance
-- Self improvement is mandatory. Editing prompts, etc, should be done within a session and partially persist to future sessions as well
-- More derived autonomy
-- Self improvement is essential and in fact all problems should be recorded and be used to learn from
-- Need to narrow down infinite dimensional action space to finite dimensional options
-- Moving away from DAG is still mildly questionable, wouldn't be surprised if the structure still exists somewhere
-- Token usage limits are definitely good and something that should be cared about more
-- Need to think about human intervention substrates
-- POET seems quite interesting
-- Use automated theorem proving systems as references
-- QD reasoning archive is just a fairly simple way to keep multiple unique families alive, but still requires extra pruning and such
-- Catalyst idea is actually interesting because it improves stigmergic communication
-  - Neural cellular automata approaches this via local signals and such
-- Stigmergic decaying artifact field for information storage and management
-- Artifact hypergraph local rewrite might be part of scheduler
-- Failure detection
-- Parallel tempered reasoning replicas might be an interesting consideration
-- Epistemic value should be counted
-- sequential monte carlo strong scheduler yes
-- useful human interaction substrate still important
-- backprop
-
-A given orchestration system $cal(O)$ is in state $q_n$ and advances $q_n -> q_(n + 1)$ until reaching a final state $q_f$ from an initial state $q_i$. The initially given human prompt is just encoded via the initial state $q_i$, and human modifications are similarly just changes of state.
-
-Technically, if we only care about improving a system, we do not need to handle our own value vector $cal(V)$ if for example an LLM can determine the gradient for us. However this is prone to issues and the lack of specificity immediately discards this approach.
-
-Then, should $cal(V)$ be of the same structure for every problem? The benefits of having this consistency is easy comparison between multiple problems. However if for example the problem is some math research and we want to see if it succeeded more via proving a theorem, gaining genuine deeper knowledge, etc, those are different criteria than if code structure fits a certain desired architecture for a code synthesis problem. Thus, $cal(V)$ will be of a different shape for every problem. This means it also has additional semantic data attached to it.
-
-We can denote an orchestration system $cal(O)_alpha$ as one with hyperparameters $alpha$. Then essentially we're doing gradient descent:
-$
-  alpha_(n + 1) = alpha + eta dot.o gradient_alpha cal(V)
-$
-which clearly uses very abstract notions of multiplication and differentiation, as some of the hyperparameters are prompts, which do not have a standard notion of multiplication on them.
-
-So what is the actual system we will use? Our prompts are mostly difficult research or engineering type problems, and thus we need some sort of mechanism for proposing, testing, choosing solutions. We also want to have token restrictions, at the very least on the granularity of a single run. Human input is again also important.
-
-Human input is important partially because we want to make sure the model isn't destroying our computer, but it also may genuinely be a blocker. If the model realizes it doesn't actually know what it's doing then that's going to lead to huge issues. Essentially this is an alignment problem.
-
-Going guns blazing and detecting misalignment is token expensive and not really a scalable solution. Instead, having authority data which tells the model what it can and can't do is almost certaily the best path forward. This can be tuned via the top level optimizer, which also means the top level optimizer is going to need human input.
-
-To get rid of this multilayer structure, perhaps the top level optimizer should just be viewed as a run of this model? It wouldn't really be that hard; the same diagnostic data that the model saves as it runs is just passed to itself and it makes the right changes. Seems like most consistent path forward. Idk we'll see.
-
-Authority doesn't just mean what files can be edited, it defines what decisions have been made by the user and what decisions the model itself needs to make. This is basically also an instruction clarification. This part is relatively the same from my work graph implementation idea, which isn't particularly surprising since it's a fairly basic assumption.
-
-So human intervention is needed if the model needs to make a decision outside of its authority (underspecification) or finds a contradition. This blocks that and its dependencies. So in the final orchestration system we will still have something that lets us have human input, which is again not surprising because it's a fairly generic concept.
-
-Knowledge persistence is an important topic. Really though, a stigmergic artifact graph seems like the first basic storage unit. It should just be a DAG and be pretty pointer heavy.
-
-Any sort of idea selection or refinement algorithm needs to incorporate the fact that research probably needs to be done even before plan generation. So to even start having a bunch of candidates to allocate tokens between, a lot of choices need to be made. However something we're going to do here is say that the entire structure is not going to be recursive, and will in fact have proper controls. This will make hyperparameter optimization and token control easier.
-
-We're going to go for a modified tree search algorithm. We need an initial tree search size. We'll call $m_0$ the initial branching amount. 
-
-for a non blocking approach without things like continuations we need things to be done via callbacks.
-
-so something like:
-
+so for instance, say we have an object like:
 ```nim
-proc solve(problem: Problem): Work[ArtifactID] =
-  cheap[ArtifactID] "Optimize the goal into a prompt:" % [problem.goal]
-    >>> cheap[ArtifactID] "Execute the attached prompt and write result to a file"
+type
+  Problem* = object
+    goal*: string
+    further_description*: Location
 ```
+what does this actually mean? well we say that `goal` is an object that's passed around in memory simply. it's sent to an LLM via a simple inclusion in the instructions, and it's received via direct input in a dynamic tool call.
 
-should be interpreted as
-- send a message to codex app server with a callback
-- call the callback when received the artifact
-- this callback must then continue executions
-so we shouldn't block the entire thread. we might have very parallel work, and thus the more sensible thing to do .
+`Location` is different. it's an object stored in the file system, and `Location` is just a reference to it. how is it "sent" to the LLM? in the case of a file or a directory, it can be copied into its artifact directory. even though we have the guarantee that the data is immutable, optimizations may mean that old data still needs to be materialized. a question here is whether simply viewing the data should be separate from for example copying it into the artifact directory. for simplicity sake and since it'll probably cover most cases, viewing data will be the same as materializing it. for things like `string`'s this is trivial while for `Location`, materialization potentially means applying $Delta$'s and forming the file or directory. then, submission for a `Location` means creating a file or directory. the point of submission is to give enough information for future materializations.
 
-since the above is returning a "Work", this is a composition and so really the outer part is interpreted first, where the first cheap call is viewed as a dependency. basically `>>>` should be rewriting it into something like
+one question is what if we want to pass a whole codebase around? this is a situation for a directory `Location`. for inputs, it should be that we implicitly materialize them for the LLM.
 
-well first, the call expects results, but actually it should just expect Work. in fact even the prompt should be Work. but this seems wrong... argg.
+then, do we need any more abstractions? an interesting question is what if we want to for example pass a specific git commit around. here materialization might look like checking out a branch and submitting would be like pushing a git commit. this is quite interesting and is a fair abstraction over the concept of artifacts.
 
-we wanna keep artifacts in the artifact system because this allows for easy analysis by both humans and agents. however... artifacts CAN be typed. perhaps they don't just have to be ID's.
+what if we have something like
+```nim
+type
+  Problem* = object
+    goal*: string
+    further_description*: Location
+  ProblemSet* = object
+    a*: Problem
+    b*: Problem
+    c*: Problem
+```

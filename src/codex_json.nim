@@ -7,7 +7,8 @@ type
     mk_initialize,
     mk_thread_start,
     mk_turn_start,
-    mk_thread_goal_set
+    mk_thread_goal_set,
+    mk_thread_stop
 
   ServerRequestKind* = enum
     sr_command_execution_approval,
@@ -139,6 +140,10 @@ type
     objective*: string
     extra_fields*: JsonObject
 
+  ThreadStopParams* = object
+    thread_id*: string
+    extra_fields*: JsonObject
+
   Params* = object
     case kind*: RequestKind
     of mk_initialize:
@@ -149,6 +154,8 @@ type
       turn_start*: TurnStartParams
     of mk_thread_goal_set:
       thread_goal_set*: ThreadGoalSetParams
+    of mk_thread_stop:
+      thread_stop*: ThreadStopParams
 
   Request* = object
     kind*: RequestKind
@@ -395,6 +402,8 @@ type
       turn_status*: TurnStatus
       turn_extra_fields*: JsonObject
     of mk_thread_goal_set:
+      discard
+    of mk_thread_stop:
       discard
 
   Success* = object
@@ -744,12 +753,18 @@ proc serialize_thread_goal_set_params(params: ThreadGoalSetParams): JsonNode =
   result["threadId"] = %params.thread_id
   result["objective"] = %params.objective
 
+proc serialize_thread_stop_params(params: ThreadStopParams): JsonNode =
+  result = newJObject()
+  add_extra_fields(result, params.extra_fields)
+  result["threadId"] = %params.thread_id
+
 proc serialize_params(params: Params): JsonNode =
   case params.kind:
   of mk_initialize: serialize_initialize_params(params.initialize)
   of mk_thread_start: serialize_thread_start_params(params.thread_start)
   of mk_turn_start: serialize_turn_start_params(params.turn_start)
   of mk_thread_goal_set: serialize_thread_goal_set_params(params.thread_goal_set)
+  of mk_thread_stop: serialize_thread_stop_params(params.thread_stop)
 
 proc serialize_message*(message: Message): JsonNode =
   result = newJObject()
@@ -762,6 +777,7 @@ proc serialize_message*(message: Message): JsonNode =
     of mk_thread_start: result["method"] = %"thread/start"
     of mk_turn_start: result["method"] = %"turn/start"
     of mk_thread_goal_set: result["method"] = %"thread/goal/set"
+    of mk_thread_stop: result["method"] = %"thread/stop"
     result["params"] = serialize_params(message.request.params)
   of mk_server_request:
     raise newException(ValueError, "server requests are not client-sendable")
@@ -1190,6 +1206,16 @@ proc parse_message*(node: JsonNode; pending: var seq[Message]): Message =
           success: Success(
             id: id,
             result: ResponseResult(kind: mk_thread_goal_set),
+            raw_result: raw_result,
+            extra_fields: extra_fields(node, "id", "result")
+          )
+        )
+      of mk_thread_stop:
+        result = Message(
+          kind: mk_success,
+          success: Success(
+            id: id,
+            result: ResponseResult(kind: mk_thread_stop),
             raw_result: raw_result,
             extra_fields: extra_fields(node, "id", "result")
           )

@@ -117,6 +117,8 @@ proc apply_success*(state: var RuntimeState; success: Success) =
         state.agents[agent_id] = agent
   of mk_thread_goal_set:
     discard
+  of mk_thread_stop:
+    discard
 
   state.requests[key] = outgoing
 
@@ -450,12 +452,29 @@ proc server_stdout_stream*(runtime: ptr CodexRuntime): Stream =
 proc server_stderr_stream*(runtime: ptr CodexRuntime): Stream =
   runtime.process.error_stream
 
+proc stop_codex_threads(codex: ptr CodexRuntime) =
+  if not codex.process.running:
+    return
+  for agent in codex.state.agents.values:
+    if agent.state == as_closed or not agent.thread_id.has_value:
+      continue
+    discard queue_request(
+      codex,
+      mk_thread_stop,
+      Params(
+        kind: mk_thread_stop,
+        thread_stop: ThreadStopParams(thread_id: agent.thread_id.value)
+      ),
+      some(agent.id)
+    )
+
 proc stop_codex_runtime*(codex: ptr CodexRuntime) =
   if codex.process.running:
     codex.process.kill()
   discard codex.process.waitForExit(3_000)
 
 proc deinit_codex_runtime*(codex: ptr CodexRuntime) =
+  stop_codex_threads(codex)
   stop_codex_runtime(codex)
   codex.process.close()
   codex.pending.setLen(0)
