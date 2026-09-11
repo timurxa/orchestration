@@ -23,8 +23,12 @@ orchestrate:
   const cheap = luna.low
 
   let solve*: Problem ~> Response =
-    cheap[Problem, Variations]("Create multiple variations of the possible solution to this problem.") >>>
-      cheap[Variations, Response]("Choose the best variation to answer the problem and write the message greeting.")
+    cheap[Problem, Variations]("""
+      Create multiple variations of the possible solution to this problem.
+    """) >>>
+      cheap[Variations, Response]("""
+        Choose the best variation to answer the problem and write the message greeting.
+      """)
 
   const relative_global_objective_input_path = Path("./run_settings.toml")
 

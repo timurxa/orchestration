@@ -60,7 +60,7 @@ type
     pending_on_agent_creation_triggers*: seq[AgentCreationTrigger]
     db*: DbConn
   Contextual*[A, B] =
-    (ptr Context {.closure.} -> ((ArtifactData, Consumer[B]) {.closure.} -> void))
+    ((ptr Context, ArtifactData, Consumer[B]) {.closure.} -> void)
 
 const short_id_alphabet = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 var artifact_id_counter: Atomic[uint64]
@@ -931,7 +931,7 @@ proc submit[B](
             = Output
             finish_work input schema:
             $output_schema
-          """.unindent() % [
+          """.dedent() % [
             "prompt", prompt,
             "input", instructions,
             "location_contract", location_contract,
@@ -948,23 +948,15 @@ proc `>>>`*[A, B, C](
   left: Contextual[A, B];
   right: Contextual[B, C]
 ): Contextual[A, C] =
-  proc composed(ctx: ptr Context): (ArtifactData, Consumer[C]) -> void =
-    let left_step = left(ctx)
-    let right_step = right(ctx)
-    proc apply(value: ArtifactData; consumer: Consumer[C]) =
-      left_step(value, (outcome: Outcome[B],) => (
-        if outcome.isErr:
-          consumer(Outcome[C].err(outcome.error))
-        else:
-          right_step(outcome.get, consumer)))
-    apply
-  composed
+  (ctx: ptr Context, value: ArtifactData, consumer: Consumer[C]) =>
+    left(ctx, value, (outcome: Outcome[B]) => (
+      if outcome.isErr: consumer(Outcome[C].err(outcome.error))
+      else: right(ctx, outcome.get, consumer)))
 
 proc `[]`*[A, B](profile: Profile; _: typedesc[A]; _: typedesc[B]): (Prompt -> Contextual[A, B]) =
   result = (prompt: Prompt,) =>
-    ((context: ptr Context,) {.closure.} =>
-      ((value: ArtifactData, consumer: Consumer[B]) {.closure.} =>
-        submit(context, profile, prompt, value, consumer)))
+    ((ctx: ptr Context, value: ArtifactData, consumer: Consumer[B]) {.closure.} =>
+      submit(ctx, profile, prompt.dedent(), value, consumer))
 
 proc minimal*(model: Model): Profile = Profile(model: model, effort: re_minimal)
 proc low*(model: Model): Profile = Profile(model: model, effort: re_low)
@@ -1088,7 +1080,7 @@ proc runtime[P, R](
     kind: runtime_work,
     work: proc () {.gcsafe.} =
       {.cast(gcsafe).}:
-        args.solver[](addr context)(problem_artifact, proc (local_outcome: Outcome[R]) =
+        args.solver[](addr context, problem_artifact, proc (local_outcome: Outcome[R]) =
           outcome[] = local_outcome
           context.global[].send(AppEvent(kind: terminate)))))
 
