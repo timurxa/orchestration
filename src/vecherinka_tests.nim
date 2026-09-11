@@ -1,8 +1,9 @@
 {.experimental: "callOperator".}
 
 import std/[macros, options]
-import vecherinka
+import vecherinka_ir
 import it_projection
+import lift_pattern_typed
 
 type
   First = object
@@ -10,9 +11,9 @@ type
   Third = object
     first: First
 
-let cheap = Profile()
+let cheap = ProfileSpec()
 
-vecherinka:
+expandMacros: vecherinka:
   > first_second First ~> Second:
     cheap[First, Second]("")
 
@@ -41,221 +42,237 @@ vecherinka:
   > lens_multiple (First, Third) ~> First:
     it((First, Third))[1][first]
 
-  > lift_identity (First, First) ~> (First, Second):
-    lift((First, here))[first_second]
+  > lift_identity (First, Second) ~> (First, Second):
+    lift((here, Second))[it(First)]
 
-# type
-#   ProjectionLeaf = object
-#     name: string
-#     `field-name`: string
-#   ProjectionRecord = object
-#     leaf, backup: ProjectionLeaf
-#   ProjectionPair = tuple[first, second: ProjectionRecord]
-#   ProjectionNames = tuple[first, second: string]
-#
-# let projectionIdentity = it(ProjectionPair)
-# doAssert projectionIdentity is Flow[ProjectionPair, ProjectionPair]
-# doAssert projectionIdentity.itAction.path.groups.len == 0
-#
-# const projectionName = it(ProjectionPair)[0][leaf][name]
-# doAssert projectionName is Flow[ProjectionPair, string]
-# doAssert projectionName.itAction.path.groups.len == 3
-# for group in projectionName.itAction.path.groups:
-#   doAssert group.selectors.len == 1
-# doAssert projectionName.itAction.path.groups[0].selectors[0].kind == itsIndex
-# doAssert projectionName.itAction.path.groups[0].selectors[0].index == 0
-# doAssert projectionName.itAction.path.groups[1].selectors[0].kind == itsField
-# doAssert projectionName.itAction.path.groups[1].selectors[0].field == "leaf"
-# doAssert projectionName.itAction.path.groups[2].selectors[0].kind == itsField
-# doAssert projectionName.itAction.path.groups[2].selectors[0].field == "name"
-#
-# let projectionFields = it(ProjectionPair)[0, 1][leaf, backup][name]
-# doAssert projectionFields is Flow[ProjectionPair,
-#   ((string, string), (string, string))]
-#
-# let projectionRange = it(ProjectionPair)[0 .. 1][leaf][`field-name`]
-# doAssert projectionRange is Flow[ProjectionPair, (string, string)]
-# doAssert projectionRange.itAction.path.groups[0].selectors[0].kind == itsRange
-# doAssert projectionRange.itAction.path.groups[0].selectors[0].first == 0
-# doAssert projectionRange.itAction.path.groups[0].selectors[0].last == 1
-# doAssert projectionRange.itAction.path.groups[2].selectors[0].kind == itsField
-# doAssert projectionRange.itAction.path.groups[2].selectors[0].field == "field-name"
-#
-# let projectionSingleton = it(ProjectionPair)[0 .. 0][leaf][name]
-# doAssert projectionSingleton is Flow[ProjectionPair, (string,)]
-#
-# let projectionDuplicates = it(ProjectionPair)[1, 0, 1][leaf][name]
-# doAssert projectionDuplicates is Flow[ProjectionPair, (string, string, string)]
-#
-# let projectionNamed: Flow[ProjectionPair, ProjectionNames] =
-#   it(ProjectionPair)[0, 1][leaf][name]
-# let projectionLength = so(string, int, value): value.len
-# let projectionComposed = projectionName >>> projectionLength
-# doAssert projectionComposed is Flow[ProjectionPair, int]
-# doAssert projectionComposed.node.kind == fnode_compose
-#
-# let projectionFan = fan(projectionName, projectionNamed)
-# doAssert projectionFan is Flow[ProjectionPair, (string, ProjectionNames)]
-# doAssert projectionFan.node.kind == fnode_fanout
-# doAssert projectionFan.node.children.len == 2
-# doAssert projectionFan.node.children[0].kind == fnode_it
-# doAssert projectionFan.node.children[1].kind == fnode_it
-#
-# vecherinka:
-#   > projection_in_flow ProjectionPair ~> string:
-#     it(ProjectionPair)[0][leaf][name]
-#
-# static:
-#   doAssert not compiles(it(ProjectionPair)[])
-#   doAssert not compiles(it(ProjectionPair)[-1])
-#   doAssert not compiles(it(ProjectionPair)[2])
-#   doAssert not compiles(it(ProjectionPair)[missing])
-#   doAssert not compiles(it(ProjectionPair)[0, leaf])
-#   doAssert not compiles(it(ProjectionPair)[0 .. 1, 0])
-#   doAssert not compiles(it(ProjectionPair)[1 .. 0])
-#   doAssert not compiles(it(ProjectionPair)[-1 .. 0])
-#   doAssert not compiles(it(ProjectionPair)[0 .. 2])
-#   doAssert not compiles(it(ProjectionPair)[0 .. 9223372036854775807])
-#   doAssert not compiles(it(ProjectionRecord)[0 .. 0])
-#   doAssert not compiles(projectionIdentity[0])
-#
-# let stringify = so(int, string, input): $input
-# proc genericIdentity[T](): Flow[T, T] = it(T)
-# let genericIdentityInt = genericIdentity[int]()
-# doAssert genericIdentityInt is Flow[int, int]
-# proc genericSequenceLift[A, B](step: Flow[A, B]): Flow[seq[A], seq[B]] =
-#   lift[seq[B], seq[here]](step)
-# type FlowAlias[A, B] = Flow[A, B]
-# let aliasStringify: FlowAlias[int, string] = stringify
-# let aliasFan = fan(aliasStringify, stringify)
-# doAssert aliasFan is Flow[int, (string, string)]
-# let genericSequenceLiftValue = genericSequenceLift(stringify)
-# doAssert genericSequenceLiftValue is Flow[seq[int], seq[string]]
-# type
-#   Box[T] = object
-#     value: T
-#   Wrapper[T] = seq[Option[T]]
-#   LiftRecord = object
-#     name: string
-#     count: int
-#   LiftMessageKind = enum lmText, lmCode
-#   LiftMessage = object
-#     case kind: LiftMessageKind
-#     of lmText: text: string
-#     of lmCode: code: int
-#   LiftNestedMessage = object
-#     case outer: bool
-#     of true:
-#       case inner: bool
-#       of true: text: string
-#       of false: code: int
-#     of false: fallback: string
-#   LiftRangeMessage = object
-#     case tag: range[0 .. 1]
-#     of 0: text: string
-#     of 1: code: int
-# let decorate = so(string, string, input): "[" & input & "]"
-# let boxLift = lift[Box[string], Box[string](value: here)](decorate)
-# doAssert boxLift is Flow[Box[string], Box[string]]
-# let wrappedAliasLift = lift[Wrapper[string], seq[Option[here]]](stringify)
-# doAssert wrappedAliasLift is Flow[seq[Option[int]], Wrapper[string]]
-# let objectLift = lift[LiftRecord, LiftRecord(name: here, count: _)](decorate)
-# doAssert objectLift is Flow[LiftRecord, LiftRecord]
-# doAssert objectLift.liftAction.pattern == "LiftRecord(name: here, count: _)"
-# doAssert objectLift.liftAction.step.kind == fnode_so
-# let variantLift = lift[LiftMessage, LiftMessage(kind: lmText, text: here)](decorate)
-# doAssert variantLift is Flow[LiftMessage, LiftMessage]
-# doAssert variantLift.liftAction.pattern ==
-#   "LiftMessage(kind: lmText, text: here)"
-# let nestedVariantLift = lift[LiftNestedMessage,
-#   LiftNestedMessage(inner: true, outer: true, text: here)](decorate)
-# doAssert nestedVariantLift is Flow[LiftNestedMessage, LiftNestedMessage]
-# let keepObjectLift = lift[LiftRecord, LiftRecord(count: _)](decorate)
-# doAssert keepObjectLift is Flow[LiftRecord, LiftRecord]
-# let rangeVariantLift = lift[LiftRangeMessage, LiftRangeMessage(tag: 0, text: here)](decorate)
-# doAssert rangeVariantLift is Flow[LiftRangeMessage, LiftRangeMessage]
-# static:
-#   doAssert not compiles(lift[LiftRecord, LiftRecord(name: here)](stringify))
-#   doAssert not compiles(lift[LiftRecord, LiftRecord(missing: here)](decorate))
-#   doAssert not compiles(lift[LiftRecord, LiftRecord(count: lmCode)](decorate))
-#   doAssert not compiles(lift[LiftMessage, LiftMessage(text: here)](decorate))
-#   doAssert not compiles(lift[LiftMessage, LiftMessage(kind: lmCode, text: here)](decorate))
-#   doAssert not compiles(lift[LiftMessage, LiftMessage(kind: _, text: here)](decorate))
-#   doAssert not compiles(lift[LiftNestedMessage, LiftNestedMessage(inner: true)](decorate))
-#
-# let pairLift = lift[(bool, string), (_, here)](stringify)
-# doAssert pairLift is Flow[(bool, int), (bool, string)]
-# doAssert pairLift.liftAction.pattern == "(_, here)"
-# doAssert pairLift.liftAction.step.kind == fnode_so
-# let aliasLift = lift[seq[string], seq[here]](aliasStringify)
-# doAssert aliasLift is Flow[seq[int], seq[string]]
-# let referenceLift = lift[seq[Second], seq[here]](first_second)
-# doAssert referenceLift is Flow[seq[First], seq[Second]]
-# doAssert referenceLift.liftAction.pattern == "seq[here]"
-# doAssert referenceLift.liftAction.step.kind == fnode_reference
-#
-# let nestedLift = lift[((bool, string), char), ((_, here), _)](stringify)
-# doAssert nestedLift is Flow[((bool, int), char), ((bool, string), char)]
-#
-# let sequenceLift = lift[seq[Option[string]], seq[Option[here]]](stringify)
-# doAssert sequenceLift is Flow[seq[Option[int]], seq[Option[string]]]
-#
-# let bothLift = lift[(string, string), (here, here)](stringify)
-# doAssert bothLift is Flow[(int, int), (string, string)]
-#
-# let innerActionLift = lift[seq[string], seq[here]](stringify)
-# let outerActionLift = lift[Option[seq[string]], Option[here]](innerActionLift)
-# doAssert outerActionLift is Flow[Option[seq[int]], Option[seq[string]]]
-# doAssert outerActionLift.liftAction.step.kind == fnode_lift
-# doAssert outerActionLift.liftAction.step.children.len == 1
-# doAssert outerActionLift.liftAction.step.children[0].kind == fnode_so
-#
-# static:
-#   doAssert not compiles(lift[(int, string), (here, here)](stringify))
-#   doAssert not compiles(lift[string, seq[here]](stringify))
-#   doAssert not compiles(lift[(string, string), (here,)](stringify))
-#   doAssert not compiles(12 >>> stringify)
-#
-# type
-#   AddedNamedOutput = tuple[keep: bool, chosen: string, tail: char]
-#   AddedNamedInput = tuple[keep: bool, chosen: int, tail: char]
-#   AddedOptionAlias = Option[string]
-#   AddedSequenceAlias = seq[AddedOptionAlias]
-#   AddedSequenceAliasChain = AddedSequenceAlias
-#
-# let addedNamedLift = lift[AddedNamedOutput,
-#   (keep: _, chosen: here, tail: _)](stringify)
-# doAssert addedNamedLift is Flow[AddedNamedInput, AddedNamedOutput]
-# doAssert addedNamedLift.liftAction.pattern ==
-#   "(keep: _, chosen: here, tail: _)"
-#
-# let addedAliasLift = lift[AddedSequenceAliasChain,
-#   seq[Option[here]]](stringify)
-# doAssert addedAliasLift is Flow[seq[Option[int]], AddedSequenceAliasChain]
-# doAssert addedAliasLift.liftAction.pattern == "seq[Option[here]]"
-#
-# let addedOptionLift = lift[Option[string], Option[here]](stringify)
-# doAssert addedOptionLift is Flow[Option[int], Option[string]]
-#
-# let addedComposition = it(AddedNamedInput) >>> addedNamedLift
-# doAssert addedComposition is Flow[AddedNamedInput, AddedNamedOutput]
-# doAssert addedComposition.node.kind == fnode_compose
-# doAssert addedComposition.node.children[0].kind == fnode_it
-# doAssert addedComposition.node.children[1].kind == fnode_lift
-# doAssert addedNamedLift.liftAction.step.kind == fnode_so
-#
-# static:
-#   doAssert not compiles(lift[string, unknownPattern](stringify))
-#   doAssert not compiles(lift[string, 12](stringify))
-#   doAssert not compiles(lift[Option[string], seq[here]](stringify))
-#   doAssert not compiles(lift[seq[string], Option[here]](stringify))
-#   doAssert not compiles(lift[Option[int], Option[here]](stringify))
-#   doAssert not compiles(lift[AddedNamedOutput,
-#     (chosen: _, keep: here, tail: _)](stringify))
-#   doAssert not compiles(lift[AddedNamedOutput,
-#     (keep: _, chosen: here, chosen: _)](stringify))
-#   doAssert not compiles(lift[string, here](12))
-#   doAssert not compiles((true, 12) >>> pairLift)
-#   doAssert not compiles(@[1] >>> addedOptionLift)
-#   doAssert not compiles(12 >>> it(int))
+  > entry_flow First ~> Second {.entry.}:
+    cheap[First, Second]("entry")
 
+type
+  Box[T] = object
+    value: T
+  LiftRecord = object
+    name: string
+    count: int
+  LiftEnvelope = object
+    payload: LiftRecord
+  MessageKind = enum
+    textMessage
+    codeMessage
+  Message = object
+    case kind: MessageKind
+    of textMessage:
+      text: string
+    of codeMessage:
+      code: int
+
+  ProjectionLeaf = object
+    name: string
+    `field-name`: string
+  ProjectionRecord = object
+    leaf: ProjectionLeaf
+    backup: ProjectionLeaf
+  ProjectionPair = tuple[first, second: ProjectionRecord]
+  ProjectionTriple = tuple[first, second, third: ProjectionRecord]
+  ProjectionLeafPair = tuple[first, second: ProjectionLeaf]
+  ProjectionStringPair = tuple[first, second: string]
+
+macro parse_it_only(path: untyped): untyped =
+  discard parseItPath(path)
+  result = new_empty_node()
+
+macro parse_lift_only(pattern: untyped): untyped =
+  discard parse_lift_pattern(pattern)
+  result = new_empty_node()
+
+macro assert_lift_types(
+    pattern, flow_domain, flow_codomain, expected_input, expected_output: untyped
+): untyped =
+  let tree = parse_lift_pattern(pattern)
+  let types = lift_types(tree, flow_domain, flow_codomain)
+  doAssert types.input_type.repr == expected_input.str_val
+  doAssert types.output_type.repr == expected_output.str_val
+  result = new_empty_node()
+
+# Positive section: vecherinka expansion, flow typing, projections, lifts.
+
+doAssert first_second is FlowSpec[First, Second]
+doAssert first_second.ir.id == 0
+doAssert first_third.ir.id == 1
+doAssert second_third.ir.id == 2
+doAssert first_third_1 is FlowSpec[First, Third]
+doAssert first_third_2 is FlowSpec[First, Third]
+doAssert first_second_third_fanout_2 is FlowSpec[First, (Second, Third)]
+doAssert so_test is FlowSpec[First, Second]
+doAssert lens_multiple is FlowSpec[(First, Third), First]
+doAssert lift_identity is FlowSpec[(First, Second), (First, Second)]
+doAssert entry_flow.ir.id == 9
+
+let composed = first_second >>> second_third
+doAssert composed is FlowSpec[First, Third]
+
+let fanned = fan(first_second, first_third)
+doAssert fanned is FlowSpec[First, (Second, Third)]
+let fanned_three = fan(first_second, first_third, first_third_2)
+doAssert fanned_three is FlowSpec[First, (Second, Third, Third)]
+
+let direct_so = so(int, string, value): $value
+doAssert direct_so is FlowSpec[int, string]
+doAssert direct_so.ir.fn != nil
+
+let projection_identity = it(ProjectionPair)
+doAssert projection_identity is FlowSpec[ProjectionPair, ProjectionPair]
+doAssert projection_identity.ir.path.groups.len == 0
+
+let projection_name = it(ProjectionPair)[0][leaf][name]
+doAssert projection_name is FlowSpec[ProjectionPair, string]
+doAssert projection_name.ir.path.groups.len == 3
+doAssert projection_name.ir.path.groups[0].selectors[0].kind == itsIndex
+doAssert projection_name.ir.path.groups[0].selectors[0].index == 0
+doAssert projection_name.ir.path.groups[1].selectors[0].kind == itsField
+doAssert projection_name.ir.path.groups[1].selectors[0].field == "leaf"
+doAssert projection_name.ir.path.groups[2].selectors[0].field == "name"
+
+let projection_fields = it(ProjectionPair)[0, 1][leaf, backup][name]
+doAssert projection_fields is FlowSpec[ProjectionPair,
+  ((string, string), (string, string))]
+doAssert projection_fields.ir.path.groups[0].selectors.len == 2
+doAssert projection_fields.ir.path.groups[0].selectors[1].index == 1
+doAssert projection_fields.ir.path.groups[1].selectors[1].field == "backup"
+
+let projection_leafs = it(ProjectionPair)[0, 1][leaf]
+doAssert projection_leafs is FlowSpec[ProjectionPair, ProjectionLeafPair]
+
+let projection_range = it(ProjectionTriple)[1 .. 2][leaf][`field-name`]
+doAssert projection_range is FlowSpec[ProjectionTriple, (string, string)]
+doAssert projection_range.ir.path.groups[0].selectors[0].kind == itsRange
+doAssert projection_range.ir.path.groups[0].selectors[0].first == 1
+doAssert projection_range.ir.path.groups[0].selectors[0].last == 2
+doAssert projection_range.ir.path.groups[2].selectors[0].field == "field-name"
+
+let projection_named: FlowSpec[ProjectionPair, ProjectionStringPair] =
+  it(ProjectionPair)[0, 1][leaf][name]
+doAssert projection_named.ir.path.groups[0].selectors.len == 2
+
+let projection_duplicates = it(ProjectionPair)[1, 0, 1][leaf][name]
+doAssert projection_duplicates is FlowSpec[ProjectionPair,
+  (string, string, string)]
+
+let projection_quoted = it(ProjectionLeaf)[`field-name`]
+doAssert projection_quoted is FlowSpec[ProjectionLeaf, string]
+
+let stringify = so(int, string, input): $input
+let wrapper_lift = lift(seq[Option[here]])[stringify]
+doAssert wrapper_lift is FlowSpec[seq[Option[int]], seq[Option[string]]]
+doAssert wrapper_lift.ir.pattern == "seq[Option[here]]"
+doAssert wrapper_lift.ir.inner.fn != nil
+
+let object_step = so(LiftRecord, LiftRecord, input): input
+let object_lift = lift(LiftRecord(name: here, count: int))[object_step]
+doAssert object_lift is FlowSpec[LiftRecord, LiftRecord]
+doAssert object_lift.ir.inner.fn != nil
+
+let envelope_step = so(LiftEnvelope, LiftEnvelope, input): input
+let nested_object_lift = lift(
+  LiftEnvelope(payload: LiftRecord(name: here, count: int)))[envelope_step]
+doAssert nested_object_lift is FlowSpec[LiftEnvelope, LiftEnvelope]
+
+let variant_step = so(Message, Message, input): input
+let variant_lift = lift(Message(kind: textMessage, text: here))[variant_step]
+doAssert variant_lift is FlowSpec[Message, Message]
+
+let reference_lift = lift(seq[here])[first_second]
+doAssert reference_lift is FlowSpec[seq[First], seq[Second]]
+doAssert reference_lift.ir.inner.id == 0
+
+let second_to_record = so(Second, LiftRecord, input): LiftRecord()
+let lift_composed = first_second >>> lift(here)[second_to_record]
+doAssert lift_composed is FlowSpec[First, LiftRecord]
+
+assert_lift_types(string, int, bool, "string", "string")
+assert_lift_types(here, int, bool, "int", "bool")
+assert_lift_types((string, here), int, bool, "(string, int)", "(string, bool)")
+assert_lift_types((left: string, right: here), int, bool,
+  "(left: string, right: int)", "(left: string, right: bool)")
+assert_lift_types(seq[Option[(string, here)]], int, bool,
+  "seq[Option[(string, int)]]", "seq[Option[(string, bool)]]")
+assert_lift_types(Box[int], int, bool, "Box[int]", "Box[int]")
+assert_lift_types(LiftRecord(name: here, count: int), int, bool,
+  "LiftRecord", "LiftRecord")
+
+macro assert_lift_shape(pattern: untyped; expected_kind: static[string];
+    expected_here_count: static[int]): untyped =
+  let tree = parse_lift_pattern(pattern)
+  doAssert $tree.node(tree.root_id).kind == expected_kind
+  doAssert tree.here_count == expected_here_count
+  result = new_empty_node()
+
+assert_lift_shape(seq[Option[(string, here)]], "lpk_seq", 1)
+assert_lift_shape(LiftRecord(name: here, count: int), "lpk_object", 1)
+assert_lift_shape(LiftRecord(name: "literal", count: -1), "lpk_object", 0)
+assert_lift_shape(Message(kind: textMessage, text: here), "lpk_object", 1)
+assert_lift_shape(Message(kind: MessageKind.textMessage, text: "literal"),
+  "lpk_object", 0)
+assert_lift_shape(LiftEnvelope(
+  payload: LiftRecord(name: here, count: int)), "lpk_object", 1)
+
+# Negative section: parser rejection and typed projection rejection.
+
+static:
+  doAssert compiles(parse_it_only([[0]]))
+  doAssert compiles(parse_it_only([[field_name]]))
+  doAssert compiles(parse_it_only([[`field-name`]]))
+  doAssert compiles(parse_it_only([[0, 1], [leaf]]))
+  doAssert compiles(parse_it_only([[1 .. 2]]))
+  doAssert compiles(parse_it_only([[1'i64]]))
+  doAssert not compiles(parse_it_only([]))
+  doAssert not compiles(parse_it_only([[]]))
+  doAssert not compiles(parse_it_only([[0, leaf]]))
+  doAssert not compiles(parse_it_only([[0 .. 1, 2]]))
+  doAssert not compiles(parse_it_only([[1 .. 0]]))
+  doAssert not compiles(parse_it_only([[1'u64]]))
+  doAssert not compiles(parse_it_only([[0 .. -1]]))
+  doAssert not compiles(parse_it_only([[0.5]]))
+  doAssert not compiles(parse_it_only([[0 .. 1.5]]))
+
+  doAssert not compiles(it(ProjectionPair)[])
+  doAssert not compiles(it(ProjectionPair)[-1])
+  doAssert not compiles(it(ProjectionPair)[2])
+  doAssert not compiles(it(ProjectionPair)[missing])
+  doAssert not compiles(it(ProjectionPair)[0, leaf])
+  doAssert not compiles(it(ProjectionPair)[0 .. 1, 0])
+  doAssert not compiles(it(ProjectionPair)[1 .. 0])
+  doAssert not compiles(it(ProjectionPair)[0 .. 2])
+  doAssert not compiles(it(ProjectionPair)[0 .. 9223372036854775807])
+  doAssert not compiles(it(ProjectionRecord)[0 .. 0])
+
+  doAssert compiles(parse_lift_only(string))
+  doAssert compiles(parse_lift_only(here))
+  doAssert compiles(parse_lift_only((string, here)))
+  doAssert compiles(parse_lift_only((left: string, right: here)))
+  doAssert compiles(parse_lift_only(seq[Option[(string, here)]]))
+  doAssert compiles(parse_lift_only(Box[int]))
+  doAssert compiles(parse_lift_only(LiftRecord(name: here, count: int)))
+  doAssert compiles(parse_lift_only(Message(kind: textMessage, text: here)))
+  doAssert not compiles(parse_lift_only(_))
+  doAssert not compiles(parse_lift_only(()))
+  doAssert not compiles(parse_lift_only(seq[string, int]))
+  doAssert not compiles(parse_lift_only(Option[string, int]))
+  doAssert not compiles(parse_lift_only((left: here, string)))
+  doAssert not compiles(parse_lift_only((left: here, left: string)))
+  doAssert not compiles(parse_lift_only(LiftRecord()))
+  doAssert not compiles(parse_lift_only(LiftRecord(name = here)))
+  doAssert not compiles(parse_lift_only(LiftRecord(name: _)))
+  doAssert not compiles(parse_lift_only(LiftRecord(name: string(1))))
+  doAssert not compiles(parse_lift_only(seq[here, string]))
+  doAssert not compiles(parse_lift_only(seq[]))
+  doAssert not compiles(parse_lift_only(string + here))
+
+  doAssert not compiles(lift(_)[stringify])
+  doAssert not compiles(lift(seq[string, int])[stringify])
+  doAssert not compiles(lift((left: here, left: string))[stringify])
+  doAssert not compiles(lift(string)[12])
+  doAssert not compiles(fan())
+  doAssert not compiles(fan(first_second, second_third))
+  doAssert not compiles(first_second >>> first_third)
+  doAssert not compiles(12 >>> first_second)
