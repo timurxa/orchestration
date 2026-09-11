@@ -1,66 +1,112 @@
 {.experimental: "callOperator".}
 
-import std/[macros, assertions, sugar]
+import std/[macros, assertions, sugar, options]
 import fusion/matching
+import it_projection, lift_pattern
 
 type
+  FlowNodeKind* = enum
+    fnode_reference
+    fnode_empty
+    fnode_so
+    fnode_it
+    fnode_lift
+    fnode_compose
+    fnode_fanout
+  FlowNode* = object
+    kind*: FlowNodeKind
+    id*: int
+    text*: string
+    path*: ItPath
+    children*: seq[FlowNode]
+  ItAction* = object
+    path*: ItPath
+  LiftAction* = object
+    pattern*: string
+    step*: FlowNode
   FlowKind = enum
     fk_ref,
     fk_empty,
     fk_so,
-    fk_it
+    fk_it,
+    fk_lift
   Flow*[A, B] = object
+    node*: FlowNode
     case kind: FlowKind:
     of fk_ref:
       id: int
       entry: bool
     of fk_so:
       fn*: proc (a: A): B {.nimcall.}
-    of fk_it: discard
+    of fk_it:
+      itAction*: ItAction
+    of fk_lift:
+      liftAction*: LiftAction
     of fk_empty: discard
   Profile* = object
   PartialModelCallSyntax*[A, B] = object
+  here* = object
+  LiftSyntax = object
+  LiftSpec[Output; Pattern: static[string]] = object
+
+const lift* = LiftSyntax()
+
+proc isFlowType(typ: NimNode): bool =
+  if typ.kind != nnkBracketExpr or typ.len != 3 or
+      not typ[0].eqIdent("Flow"):
+    return false
+  sameType(typ[0], bindSym("Flow"))
+
+proc isWrapperShape(shape: NimNode; wrapper: string): bool =
+  if shape.kind != nnkBracketExpr or shape.len != 2 or
+      not shape[0].eqIdent(wrapper):
+    return false
+  if wrapper == "Option":
+    return sameType(shape[0], bindSym("Option"))
+  true
+
+proc resolveFlowType(typ: NimNode): NimNode
 
 template flow*(id: int, entry: bool) {.pragma.}
 template `~>`*(A, B: untyped): untyped = Flow[A, B]
 proc `[]`*[A, B](profile: Profile; _: typedesc[A]; _: typedesc[B]): PartialModelCallSyntax[A, B] = PartialModelCallSyntax[A, B]()
-proc `()`*[A, B](partial: PartialModelCallSyntax[A, B]; prompt: string): Flow[A, B] = Flow[A, B](kind: fk_empty)
-proc `>>>`*[A, B, C](lf: Flow[A, B]; rt: Flow[B, C]): Flow[A, C] = Flow[A, C](kind: fk_empty)
-proc fanout*[A, B; C: tuple](c: C): Flow[A, B] = Flow[A, B](kind: fk_empty)
+proc `()`*[A, B](partial: PartialModelCallSyntax[A, B]; prompt: string): Flow[A, B] =
+  Flow[A, B](kind: fk_empty, node: FlowNode(kind: fnode_empty, text: prompt))
+proc `>>>`*[A, B, C](lf: Flow[A, B]; rt: Flow[B, C]): Flow[A, C] =
+  Flow[A, C](kind: fk_empty,
+    node: FlowNode(kind: fnode_compose, children: @[lf.node, rt.node]))
+proc fanout*[A, B; C: tuple](c: C): Flow[A, B] =
+  Flow[A, B](kind: fk_empty, node: FlowNode(kind: fnode_fanout))
 macro fan*(args: varargs[typed]): untyped =
   if args.len < 1: error("args.len must be >= 1")
-  args[0].getTypeInst.assertMatch(
-    BracketExpr([
-      _ is Sym(),
-      @input,
-      _
-  ]))
-
-  var tuple_args = newTree(nnkTupleConstr)
-  var tuple_type = newTree(nnkTupleConstr)
-  var return_type = newTree(nnkTupleConstr)
+  var input: NimNode
+  var returnType = newTree(nnkTupleConstr)
+  var nodes = newTree(nnkBracket)
 
   for arg in args:
-    arg.getTypeInst.assertMatch(
-      @full is BracketExpr([
-        @sym is Sym(),
-        @domain,
-        @codomain
-      ]))
-    doAssert sym.strVal == "Flow"
-    doAssert domain == input
-    tuple_args.add arg
-    tuple_type.add full
-    return_type.add codomain
+    let flowType = resolveFlowType(arg.getTypeInst)
+    if not isFlowType(flowType):
+      error("fan expects Flow values", arg)
+    let domain = flowType[1]
+    if input.isNil:
+      input = domain
+    elif not sameType(input, domain):
+      error("fan values must share an input type", arg)
+    nodes.add newDotExpr(arg, ident("node"))
+    returnType.add flowType[2]
 
+  let nodeList = newTree(nnkPrefix, ident("@"), nodes)
   result = quote do:
-    fanout[`input`, `return_type`, `tuple_type`](`tuple_args`)
+    Flow[`input`, `returnType`](kind: fk_empty,
+      node: FlowNode(kind: fnode_fanout, children: `nodeList`))
 
 proc make_so_flow(domain, codomain, pattern, body: NimNode): NimNode =
   let parameter = ident(pattern.strVal)
+  let bodyText = newLit(body.repr)
   result = quote do:
     Flow[`domain`, `codomain`](
       kind: fk_so,
+      node: FlowNode(kind: fnode_so, text: `bodyText`),
       fn: proc (`parameter`: `domain`): `codomain` =
         `body`
     )
@@ -68,11 +114,333 @@ proc make_so_flow(domain, codomain, pattern, body: NimNode): NimNode =
 macro so*(domain, codomain, pattern, body: untyped): untyped =
   result = make_so_flow(domain, codomain, pattern, body)
 
-macro it*(T: untyped): untyped =
+macro `[]`*(_: LiftSyntax; output, pattern: untyped): untyped =
+  ## Explicit output supplies every independent `_` type; `here` reverses
+  ## the inner flow's endpoints. Object patterns retain their nominal type.
+  let spelling = newLit(pattern.repr)
   result = quote do:
-    Flow[`T`, `T`](
-      kind: fk_it
+    LiftSpec[`output`, `spelling`]()
+
+proc substituteType(node: NimNode; names: seq[string];
+    values: seq[NimNode]): NimNode
+
+proc liftShape(typ: NimNode): NimNode =
+  ## Follow aliases, retaining instantiated wrapper arguments.
+  result = typ
+  for _ in 0 .. 8:
+    if result.kind == nnkBracketExpr:
+      if result.len == 2 and result[0].eqIdent("seq"):
+        return
+      if result.len == 2 and result[0].eqIdent("Option"):
+        return
+      let head = result[0]
+      if head.kind notin {nnkIdent, nnkSym}:
+        return
+      let definition = head.getImpl
+      if definition.kind != nnkTypeDef:
+        return
+      var names: seq[string]
+      var values: seq[NimNode]
+      for parameter in definition[1]:
+        if parameter.kind in {nnkIdent, nnkSym}:
+          names.add parameter.strVal
+        elif parameter.kind == nnkIdentDefs:
+          names.add parameter[0].strVal
+      for index in 1 ..< result.len:
+        values.add result[index]
+      result = substituteType(definition[2], names, values)
+    elif result.kind == nnkSym:
+      let definition = result.getImpl
+      if definition.kind != nnkTypeDef:
+        return
+      let body = definition[2]
+      if body.kind == nnkObjectTy:
+        result = body
+        return
+      result = body
+    else:
+      return
+
+proc liftTag(pattern: LiftPattern; name: NimNode): NimNode =
+  for index in 0 ..< pattern.objectMemberCount:
+    let member = pattern.objectMember(index)
+    if name.eqIdent(member.name) and member.kind == lomTag:
+      return member.tag.tagExpression
+
+proc objectField(schema: NimNode; name: string; pattern: LiftPattern;
+    checks: var NimNode; accessed: bool): NimNode =
+  case schema.kind
+  of nnkIdentDefs:
+    for index in 0 ..< schema.len - 2:
+      if schema[index].eqIdent(name): return schema[^2]
+  of nnkRecList:
+    for child in schema:
+      result = objectField(child, name, pattern, checks, accessed)
+      if not result.isNil: return
+  of nnkRecCase:
+    result = objectField(schema[0], name, pattern, checks, accessed)
+    if not result.isNil: return
+    for index in 1 ..< schema.len:
+      let branch = schema[index]
+      result = objectField(branch[^1], name, pattern, checks, accessed)
+      if result.isNil: continue
+      if accessed:
+        let tag = liftTag(pattern, schema[0][0])
+        if tag.isNil:
+          error("lift variant field requires an explicit discriminator tag", schema)
+        # Prove the selected field belongs to this tag before generating access.
+        var accepted = newTree(nnkCaseStmt, tag)
+        for branchIndex in 1 ..< schema.len:
+          let sourceBranch = schema[branchIndex]
+          if sourceBranch.kind == nnkElse:
+            accepted.add(newTree(nnkElse,
+              newStmtList(newLit(branchIndex == index))))
+            continue
+          var testBranch = newNimNode(sourceBranch.kind)
+          for label in 0 ..< sourceBranch.len - 1:
+            testBranch.add(sourceBranch[label])
+          testBranch.add(newStmtList(newLit(branchIndex == index)))
+          accepted.add(testBranch)
+        if schema[^1].kind != nnkElse:
+          accepted.add(newTree(nnkElse, newStmtList(newLit(false))))
+        checks.add quote do:
+          static:
+            doAssert `accepted`, "lift tag does not contain the selected field"
+      return
+  else: discard
+
+proc objectDiscriminator(schema: NimNode; name: string): bool =
+  if schema.kind == nnkRecCase and schema[0][0].eqIdent(name): return true
+  if schema.kind in {nnkRecList, nnkRecCase, nnkOfBranch, nnkElse}:
+    for child in schema:
+      if objectDiscriminator(child, name): return true
+
+proc deriveLift(tree: LiftPatternTree; id: LiftPatternId;
+    output, innerInput, innerOutput: NimNode):
+    tuple[inputType, checks: NimNode] =
+  let pattern = tree.node(id)
+  case pattern.patternKind
+  of lpkKeep:
+    (output, newStmtList())
+  of lpkHere:
+    if not sameType(output, innerOutput):
+      error("lift `here` output must match the inner flow output", output)
+    (innerInput, newStmtList())
+  of lpkSeq, lpkOption:
+    let shape = liftShape(output)
+    let wrapper = if pattern.patternKind == lpkSeq: "seq" else: "Option"
+    if not isWrapperShape(shape, wrapper):
+      error("lift " & wrapper & " pattern requires matching output wrapper", output)
+    let child = deriveLift(tree, pattern.childId, shape[1],
+      innerInput, innerOutput)
+    let sourceType = newTree(nnkBracketExpr, shape[0], child.inputType)
+    (sourceType, child.checks)
+  of lpkTuple:
+    let fields = output.getTypeImpl
+    if fields.kind notin {nnkTupleTy, nnkTupleConstr} or
+        fields.len != pattern.tupleItemCount:
+      error("lift tuple pattern must cover every output tuple field", output)
+    let named = fields.kind == nnkTupleTy
+    var sourceType = newNimNode(fields.kind)
+    var checks = newStmtList()
+    for index in 0 ..< pattern.tupleItemCount:
+      let item = pattern.tupleItem(index)
+      let field = fields[index]
+      if item.name.len > 0 and (not named or not field[0].eqIdent(item.name)):
+        error("lift tuple labels must match output field order", output)
+      let fieldType = if named: field[^2] else: field
+      let child = deriveLift(tree, item.patternId, fieldType,
+        innerInput, innerOutput)
+      checks.add child.checks
+      if named:
+        sourceType.add(newIdentDefs(ident(field[0].strVal), child.inputType))
+      else:
+        sourceType.add(child.inputType)
+    (sourceType, checks)
+  of lpkObject:
+    let shape = liftShape(output)
+    if shape.kind != nnkObjectTy or shape[1].kind != nnkEmpty:
+      error("lift object pattern requires a non-inherited value object", output)
+    let head = pattern.objectTypeExpr
+    var checks = newStmtList()
+    checks.add quote do:
+      when not (`head` is `output`) or not (`output` is `head`):
+        {.error: "lift object head must match its output type".}
+    for index in 0 ..< pattern.objectMemberCount:
+      let member = pattern.objectMember(index)
+      let accessed = member.kind == lomPattern and
+        tree.node(member.patternId).patternKind != lpkKeep
+      let fieldType = objectField(shape[2], member.name, pattern, checks,
+        accessed or member.kind == lomTag)
+      if fieldType.isNil:
+        error("unknown lift object field: " & member.name, output)
+      case member.kind
+      of lomWildcard: discard
+      of lomTag:
+        if not objectDiscriminator(shape[2], member.name):
+          error("lift tags are only valid on variant discriminators", output)
+        let tag = member.tag.tagExpression
+        checks.add quote do:
+          static:
+            let checkedTag: `fieldType` = `tag`
+            discard checkedTag
+      of lomPattern:
+        if objectDiscriminator(shape[2], member.name):
+          error("lift cannot transform a variant discriminator", output)
+        let child = deriveLift(tree, member.patternId, fieldType,
+          innerInput, innerOutput)
+        checks.add child.checks
+        let required = child.inputType
+        checks.add quote do:
+          when not (`fieldType` is `required`) or not (`required` is `fieldType`):
+            {.error: "lift cannot change a nominal object field type".}
+    (output, checks)
+
+proc substituteType(node: NimNode; names: seq[string];
+    values: seq[NimNode]): NimNode =
+  if node.kind in {nnkIdent, nnkSym}:
+    for index, name in names:
+      if node.eqIdent(name):
+        return copyNimTree(values[index])
+    return copyNimTree(node)
+  result = newNimNode(node.kind)
+  for child in node:
+    result.add substituteType(child, names, values)
+
+proc resolveFlowType(typ: NimNode): NimNode =
+  result = typ
+  for _ in 0 .. 8:
+    if isFlowType(result):
+      return
+    let head = if result.kind == nnkBracketExpr: result[0] else: result
+    if head.kind notin {nnkIdent, nnkSym}:
+      return
+    let definition = head.getImpl
+    if definition.kind != nnkTypeDef:
+      return
+    let body = definition[2]
+    if result.kind == nnkBracketExpr:
+      var names: seq[string]
+      var values: seq[NimNode]
+      for parameter in definition[1]:
+        if parameter.kind in {nnkIdent, nnkSym}:
+          names.add parameter.strVal
+        elif parameter.kind == nnkIdentDefs:
+          names.add parameter[0].strVal
+      for index in 1 ..< result.len:
+        values.add result[index]
+      if body.kind == nnkBracketExpr and body.len == 3 and
+          body[0].eqIdent("Flow"):
+        result = newNimNode(nnkBracketExpr)
+        result.add copyNimTree(body[0])
+        result.add substituteType(body[1], names, values)
+        result.add substituteType(body[2], names, values)
+      else:
+        result = substituteType(body, names, values)
+    else:
+      result = body
+
+macro makeLift(output: typedesc; spelling: static[string]; step: typed): untyped =
+  let flowType = resolveFlowType(step.getTypeInst)
+  if not isFlowType(flowType):
+    error("lift expects a Flow value", step)
+  let tree = parseLiftPattern(parseExpr(spelling))
+  let target = output.getTypeInst[1]
+  let derived = deriveLift(tree, tree.rootId, target,
+    flowType[1], flowType[2])
+  let source = derived.inputType
+  let checks = derived.checks
+  let patternText = newLit(spelling)
+  let savedStep = genSym(nskLet, "liftStep")
+  let stepNode = newDotExpr(savedStep, ident("node"))
+  let childNodes = newTree(nnkPrefix, ident("@"),
+    newTree(nnkBracket, stepNode))
+  result = quote do:
+    block:
+      static:
+        `checks`
+      let `savedStep` = `step`
+      Flow[`source`, `target`](kind: fk_lift,
+        node: FlowNode(kind: fnode_lift, text: `patternText`,
+          children: `childNodes`),
+        liftAction: LiftAction(pattern: `patternText`, step: `stepNode`))
+
+template `()`*[Output; Pattern: static[string]](
+    spec: LiftSpec[Output, Pattern]; step: untyped): untyped =
+  makeLift(Output, Pattern, step)
+
+macro project_it(value: typed; path: static[ItPath]; depth: static[int]): untyped =
+  let group = path.groups[depth]
+  result = newTree(nnkTupleConstr)
+
+  template select(selector: NimNode) =
+    # Every later group acts on each selected item, retaining tuple nesting.
+    if depth + 1 < path.groups.len:
+      result.add newCall(bindSym"project_it", selector, newLit(path), newLit(depth + 1))
+    else:
+      result.add selector
+
+  for selector in group.selectors:
+    case selector.kind
+    of itsIndex:
+      select(newTree(nnkBracketExpr, value, newLit(selector.index)))
+    of itsField:
+      select(newTree(nnkDotExpr, value, ident(selector.field)))
+    of itsRange:
+      let shape = value.getTypeImpl
+      if shape.kind != nnkTupleTy:
+        error("it range requires a tuple", value)
+      var arity = 0
+      for field in shape:
+        arity += field.len - 2
+      if selector.first < 0 or selector.last >= arity:
+        error("it range is outside tuple bounds", value)
+      for index in selector.first .. selector.last:
+        select(newTree(nnkBracketExpr, value, newLit(index)))
+
+  if group.selectors.len == 1 and group.selectors[0].kind != itsRange:
+    result = result[0]
+
+proc make_it_flow(domain: NimNode; path: ItPath): NimNode =
+  let parameter = ident("itInput")
+  let pathLiteral = newLit(path)
+  let body = if path.groups.len == 0: parameter
+             else: newCall(bindSym"project_it", parameter, pathLiteral, newLit(0))
+  let codomain = quote do:
+    typeof((block:
+      var `parameter`: `domain`
+      `body`))
+  result = quote do:
+    Flow[`domain`, `codomain`](
+      kind: fk_it,
+      node: FlowNode(kind: fnode_it, path: `pathLiteral`),
+      itAction: ItAction(path: `pathLiteral`)
     )
+
+  dump result.repr
+
+macro it*(T: untyped): untyped =
+  make_it_flow(T, ItPath())
+
+macro append_it(T: untyped; prior: static[ItPath]; selectors: untyped): untyped =
+  var path = prior
+  path.groups.add parseItPath(newTree(nnkBracket, selectors)).groups[0]
+  make_it_flow(T, path)
+
+macro `[]`*(base: Flow; selectors: varargs[untyped]): untyped =
+  if base.kind == nnkObjConstr:
+    for field in base:
+      if field.kind == nnkExprColonExpr and field[0].eqIdent("itAction") and
+          field[1].kind == nnkObjConstr:
+        for actionField in field[1]:
+          if actionField.kind == nnkExprColonExpr and
+              actionField[0].eqIdent("path"):
+            let group = newTree(nnkBracket)
+            for selector in selectors:
+              group.add selector
+            return newCall(bindSym"append_it", base.getTypeInst[1],
+              actionField[1], group)
+  error("it selectors require direct syntax: it(Input)[selectors]", base)
 
 macro vecherinka*(body: untyped): untyped =
   result = newEmptyNode()
@@ -91,7 +459,8 @@ macro vecherinka*(body: untyped): untyped =
         else: (raw_codomain, false)
 
       refs.add quote do:
-        const `name` = Flow[`domain`, `codomain`](kind: fk_ref, id: `id`)
+        const `name` = Flow[`domain`, `codomain`](kind: fk_ref, id: `id`,
+          node: FlowNode(kind: fnode_reference, id: `id`))
 
       let proc_name = genSym(nskProc, "flow")
       procs.add quote do:
@@ -105,4 +474,4 @@ macro vecherinka*(body: untyped): untyped =
   result = quote do:
     `refs`
 
-  dump result.repr
+  # dump result.repr
