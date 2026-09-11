@@ -40,8 +40,12 @@ proc `()`*[A, B](partial: PartialModelCallSyntax[A, B]; prompt: string): FlowSpe
   FlowSpec[A, B](ir: FlowIR(kind: firk_empty))
 proc `>>>`*[A, B, C](lf: FlowSpec[A, B]; rt: FlowSpec[B, C]): FlowSpec[A, C] =
   FlowSpec[A, C](ir: FlowIR(kind: firk_empty))
+proc `>>>`*[A, B](lf: A; rt: FlowSpec[A, B]): FlowSpec[void, B] =
+  FlowSpec[void, B](ir: FlowIR(kind: firk_empty))
 proc fanout*[A, B; C: tuple](c: C): FlowSpec[A, B] =
   FlowSpec[A, B](ir: FlowIR(kind: firk_empty))
+proc pure*[A](v: A): FlowSpec[void, A] =
+  FlowSpec[void, A](ir: FlowIR(kind: firk_empty))
 macro fan*(args: varargs[typed]): untyped =
   if args.len < 1: error("args.len must be >= 1")
   args[0].getTypeInst.assertMatch(
@@ -78,7 +82,7 @@ proc make_so_flow(domain, codomain, pattern, body: NimNode): NimNode =
     FlowSpec[`domain`, `codomain`](
       ir: FlowIR(
         kind: firk_so,
-        fn: cast[pointer](proc (`parameter`: `domain`): `codomain` =
+        fn: cast[pointer](proc (`parameter`: `domain`): FlowSpec[void, `codomain`] =
         `body`)
       )
     )
