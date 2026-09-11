@@ -2,7 +2,7 @@
 
 import std/[macros, assertions, sugar, options, genasts]
 import fusion/matching
-import it_projection, lift_pattern
+import it_projection, lift_pattern_typed
 
 type
   FlowNodeKind* = enum
@@ -41,7 +41,8 @@ type
     of fk_it:
       it_action*: ItAction
     of fk_lift:
-      liftAction*: LiftAction
+      pattern*: string
+      step*: 
     of fk_empty: discard
   Profile* = object
   PartialModelCallSyntax*[A, B] = object
@@ -463,6 +464,21 @@ macro make_lift(spelling: static string; step: typed): untyped =
       @step_domain,
       @step_codomain
   ]) := flow_type
+
+  let pattern = parseExpr(spelling)
+  dump pattern.repr
+  let lift_pattern = parse_lift_pattern(pattern)
+  debug_lift_pattern(lift_pattern)
+  let (input_type, output_type) = lift_types(
+    lift_pattern, step_domain, step_codomain)
+  dump input_type.repr
+  dump output_type.repr
+
+  result = quote do:
+    Flow[`domain`, `codomain`](
+      kind: fk_lift,
+
+    )
 
   result = newEmptyNode()
 

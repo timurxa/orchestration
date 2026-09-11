@@ -41,8 +41,8 @@ vecherinka:
   > lens_multiple (First, Third) ~> First:
     it((First, Third))[1][first]
 
-  > lift_identity First ~> Second:
-    lift(here)[first_second]
+  > lift_identity (First, First) ~> (First, Second):
+    lift((First, here))[first_second]
 
 # type
 #   ProjectionLeaf = object
