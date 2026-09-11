@@ -8,6 +8,7 @@ type
   First = object
   Second = object
   Third = object
+    first: First
 
 let cheap = Profile()
 
@@ -37,8 +38,11 @@ vecherinka:
       discard input
       Second()
   
-  > lens_identity (First, First) ~> First:
-    it((First, First))[0]
+  > lens_multiple (First, Third) ~> First:
+    it((First, Third))[1][first]
+
+  > lift_identity First ~> Second:
+    lift(here)[first_second]
 
 # type
 #   ProjectionLeaf = object
@@ -254,3 +258,4 @@ vecherinka:
 #   doAssert not compiles((true, 12) >>> pairLift)
 #   doAssert not compiles(@[1] >>> addedOptionLift)
 #   doAssert not compiles(12 >>> it(int))
+
