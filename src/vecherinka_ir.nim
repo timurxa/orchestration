@@ -233,8 +233,9 @@ proc flow_spec_type(node, flow_spec_symbol: NimNode): NimNode =
   ## `getTypeInst` is only safe on typed expression nodes. Type syntax,
   ## pragmas, and some macro/template calls have no type and fail hard.
   if node.kind == nnkSym and node.symKind notin {
-      nskParam, nskTemp, nskVar, nskLet, nskConst, nskResult, nskField,
-      nskForVar}:
+      nskParam, nskTemp, nskVar, nskLet, nskConst, nskResult, nskForVar}:
+    return nil
+  if node.kind == nnkCommand:
     return nil
   if node.kind in nnkCallKinds and node.len > 0 and
       node[0].kind == nnkSym and node[0].symKind in {nskTemplate, nskMacro}:

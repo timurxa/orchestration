@@ -44,10 +44,11 @@ macro check_object(pattern: untyped): untyped =
   let object_node = tree.node(tree.root_id)
   doAssert object_node.kind == lpk_object
   doAssert object_node.object_member_count == 2
-  doAssert object_node.object_member(0).kind == lom_atom
-  doAssert object_member_expression(object_node.object_member(0)).repr ==
-    "String"
-  doAssert object_node.object_member(1).kind == lom_pattern
+  let first = tree.node(object_node.object_member(0).pattern_id)
+  doAssert first.kind == lpk_type
+  doAssert first.type_expression.repr == "String"
+  let second = tree.node(object_node.object_member(1).pattern_id)
+  doAssert second.kind == lpk_here
   doAssert tree.here_count == 1
   result = new_empty_node()
 

@@ -11,21 +11,9 @@ type
 
   LiftPatternId* = distinct int
 
-  LiftTupleItem* = object
+  LiftPatternItem* = object
     name*: string
     pattern_id*: LiftPatternId
-
-  LiftObjectMemberKind* = enum
-    lom_pattern
-    lom_atom
-
-  LiftObjectMember* = object
-    name*: string
-    case kind*: LiftObjectMemberKind
-    of lom_pattern:
-      pattern_id: LiftPatternId
-    of lom_atom:
-      expression: NimNode
 
   LiftPattern* = object
     case kind*: LiftPatternKind
@@ -36,10 +24,10 @@ type
     of lpk_seq, lpk_option:
       child_id: LiftPatternId
     of lpk_tuple:
-      items: seq[LiftTupleItem]
+      items: seq[LiftPatternItem]
     of lpk_object:
       object_type_expr: NimNode
-      members: seq[LiftObjectMember]
+      members: seq[LiftPatternItem]
 
   LiftPatternTree* = object
     root_id: LiftPatternId
@@ -115,29 +103,6 @@ proc is_signed_numeric(node: NimNode): bool =
   node.len == 2 and
     (node[0].is_operator("+") or node[0].is_operator("-")) and
     node[1].is_numeric_literal
-
-proc is_qualified_name(node: NimNode): bool =
-  case node.kind
-  of nnk_ident, nnk_sym, nnk_acc_quoted:
-    node.is_name
-  of nnk_dot_expr:
-    node.len == 2 and node[0].is_qualified_name and node[1].is_name
-  else:
-    false
-
-proc is_tag_atom(node: NimNode): bool =
-  if node.is_literal:
-    return true
-  case node.kind
-  of nnk_ident, nnk_sym, nnk_acc_quoted, nnk_dot_expr:
-    node.is_qualified_name and not node.is_here and not node.is_underscore
-  of nnk_prefix:
-    node.is_signed_numeric
-  of nnk_par:
-    node.len == 1 and not node[0].is_here and
-      not node[0].is_underscore and node[0].is_tag_atom
-  else:
-    false
 
 proc is_type_name(node: NimNode): bool =
   node.is_name and not node.is_here and not node.is_underscore
@@ -225,7 +190,7 @@ proc new_unary(
 
 proc new_tuple(
     tree: var LiftPatternTree;
-    items: seq[LiftTupleItem]
+    items: seq[LiftPatternItem]
 ): LiftPatternId =
   assert items.len > 0
   for item in items:
@@ -238,12 +203,11 @@ proc new_tuple(
 proc new_object(
     tree: var LiftPatternTree;
     type_expr: NimNode;
-    members: seq[LiftObjectMember]
+    members: seq[LiftPatternItem]
 ): LiftPatternId =
   assert members.len > 0
   for member in members:
-    if member.kind == lom_pattern:
-      assert tree.has_node(member.pattern_id)
+    assert tree.has_node(member.pattern_id)
   var value: LiftPattern
   value.kind = lpk_object
   value.object_type_expr = copyNimTree(type_expr)
@@ -263,23 +227,10 @@ proc parse_wrapper(
   let child_id = parse_pattern_node(child, tree)
   new_unary(tree, if head.repr == "seq": lpk_seq else: lpk_option, child_id)
 
-proc is_structural_pattern(node: NimNode): bool =
-  let value = node.without_parens
-  if value.kind in {nnk_tuple_constr, nnk_obj_constr}:
-    return true
-  case value.kind
-  of nnk_bracket_expr:
-    value.len > 0 and value[0].is_wrapper_head
-  of nnk_call:
-    value.len > 1 and value[0].is_bracket_operator and
-      value[1].is_wrapper_head
-  else:
-    false
-
 proc parse_tuple(node: NimNode; tree: var LiftPatternTree): LiftPatternId =
   if node.len == 0:
     error("lift tuple pattern cannot be empty", node)
-  var items: seq[LiftTupleItem]
+  var items: seq[LiftPatternItem]
   var named = false
   for child in node:
     if child.kind == nnk_expr_colon_expr:
@@ -290,12 +241,12 @@ proc parse_tuple(node: NimNode; tree: var LiftPatternTree): LiftPatternId =
       for item in items:
         if item.name.same_name(name):
           error("duplicate lift tuple label: " & name, child[0])
-      items.add LiftTupleItem(name: name,
+      items.add LiftPatternItem(name: name,
         pattern_id: parse_pattern_node(child[1], tree))
     else:
       if named:
         error("lift tuple names must be used consistently", child)
-      items.add LiftTupleItem(pattern_id: parse_pattern_node(child, tree))
+      items.add LiftPatternItem(pattern_id: parse_pattern_node(child, tree))
   new_tuple(tree, items)
 
 proc parse_object(node: NimNode; tree: var LiftPatternTree): LiftPatternId =
@@ -303,7 +254,7 @@ proc parse_object(node: NimNode; tree: var LiftPatternTree): LiftPatternId =
     error("lift object pattern needs at least one field", node)
   if not node[0].is_type_expr:
     error("lift object head must be a type expression", node[0])
-  var members: seq[LiftObjectMember]
+  var members: seq[LiftPatternItem]
   for index in 1 ..< node.len:
     let member = node[index]
     if member.kind != nnk_expr_colon_expr or member.len != 2:
@@ -313,16 +264,8 @@ proc parse_object(node: NimNode; tree: var LiftPatternTree): LiftPatternId =
       if prior.name.same_name(name):
         error("duplicate lift object field: " & name, member[0])
     let value = member[1].without_parens
-    if value.is_underscore:
-      error("lift patterns no longer accept `_`", value)
-    if value.is_here or value.is_structural_pattern:
-      members.add LiftObjectMember(name: name, kind: lom_pattern,
-        pattern_id: parse_pattern_node(value, tree))
-    elif value.is_type_expr or value.is_tag_atom:
-      members.add LiftObjectMember(name: name, kind: lom_atom,
-        expression: copyNimTree(value))
-    else:
-      error("invalid lift object field pattern", value)
+    members.add LiftPatternItem(name: name,
+      pattern_id: parse_pattern_node(value, tree))
   new_object(tree, node[0], members)
 
 proc parse_pattern_node(node: NimNode; tree: var LiftPatternTree): LiftPatternId =
@@ -392,7 +335,7 @@ proc tuple_item_count*(pattern: LiftPattern): int =
   assert pattern.kind == lpk_tuple
   pattern.items.len
 
-proc tuple_item*(pattern: LiftPattern; index: int): LiftTupleItem =
+proc tuple_item*(pattern: LiftPattern; index: int): LiftPatternItem =
   assert pattern.kind == lpk_tuple and index in 0 ..< pattern.items.len
   pattern.items[index]
 
@@ -400,17 +343,12 @@ proc object_member_count*(pattern: LiftPattern): int =
   assert pattern.kind == lpk_object
   pattern.members.len
 
-proc object_member*(pattern: LiftPattern; index: int): LiftObjectMember =
+proc object_member*(pattern: LiftPattern; index: int): LiftPatternItem =
   assert pattern.kind == lpk_object and index in 0 ..< pattern.members.len
   pattern.members[index]
 
-proc object_member_pattern_id*(member: LiftObjectMember): LiftPatternId =
-  assert member.kind == lom_pattern
+proc object_member_pattern_id*(member: LiftPatternItem): LiftPatternId =
   member.pattern_id
-
-proc object_member_expression*(member: LiftObjectMember): NimNode =
-  assert member.kind == lom_atom
-  copyNimTree(member.expression)
 
 proc count_here(tree: LiftPatternTree; id: LiftPatternId): int =
   let pattern = tree.node(id)
@@ -426,8 +364,7 @@ proc count_here(tree: LiftPatternTree; id: LiftPatternId): int =
       result += tree.count_here(item.pattern_id)
   of lpk_object:
     for member in pattern.members:
-      if member.kind == lom_pattern:
-        result += tree.count_here(member.pattern_id)
+      result += tree.count_here(member.pattern_id)
 
 proc here_count*(tree: LiftPatternTree): int =
   tree.count_here(tree.root_id)
@@ -507,12 +444,8 @@ proc debug_lift_pattern_node(
     for index in 0 ..< pattern.object_member_count:
       let member = pattern.object_member(index)
       echo indent, "  ", member.name, ":"
-      case member.kind
-      of lom_pattern:
-        debug_lift_pattern_node(tree, member.object_member_pattern_id,
-          depth + 2)
-      of lom_atom:
-        echo indent, "    atom ", member.object_member_expression.repr
+      debug_lift_pattern_node(tree, member.object_member_pattern_id,
+        depth + 2)
 
 proc debug_lift_pattern*(tree: LiftPatternTree) {.compileTime.} =
   echo "lift_pattern nodes=", tree.node_count,
@@ -530,4 +463,4 @@ when is_main_module:
   check((String, here))
   check(seq[Option[(String, here)]])
   check(Record(left: String, right: here))
-  check(Message(kind: textMessage, text: here))
+  check(Message(kind: MessageKind, text: here))
