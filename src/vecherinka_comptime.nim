@@ -1,49 +1,11 @@
-{.experimental: "callOperator".}
-
-## Typed flow declarations and IR descriptors. Runtime values belong elsewhere.
+## Typed source syntax, compile-time IR, and lowering.
+## Included by `vecherinka.nim`; import the façade for public use.
 
 import std/[macros, assertions, options]
 import fusion/matching
-import codex_json
 import it_projection, lift_pattern_typed
 
 type
-  ## Lowered runtime tree. `FlowSpec` remains the typed source-side syntax.
-  FlowKind* = enum
-    fk_top,
-    fk_model,
-    fk_raw,
-    fk_ref,
-    fk_it,
-    fk_fanout,
-    fk_so,
-    fk_lift
-  Flow*[A] = ref object
-    continuation*: Flow[A]
-    case kind*: FlowKind
-    of fk_top:
-      root*: string
-      body*: Flow[A]
-    of fk_model:
-      profile*: ProfileSpec
-      prompt*: string
-    of fk_raw:
-      value*: A
-    of fk_ref:
-      name*: string
-    of fk_it:
-      projector*: proc(input: A): A {.nimcall.}
-    of fk_fanout:
-      branches*: seq[Flow[A]]
-      coalesce*: proc(values: seq[A]): A {.nimcall.}
-    of fk_so:
-      execute*: proc(input: A): Flow[A] {.nimcall.}
-    of fk_lift:
-      inner*: Flow[A]
-      destructure*: proc(input: A):
-        seq[tuple[result_index: int, input: A]] {.nimcall.}
-      construct*: proc(results: seq[A]; input: A): A {.nimcall.}
-
   FlowIRKind* = enum
     firk_ref,
     firk_empty,
@@ -63,19 +25,10 @@ type
     else: discard
   FlowSpec*[A, B] = object
     ir*: FlowIR
-  ProfileSpec* = object
-    model*: string
-    effort*: ReasoningEffort
   PartialModelCallSyntax*[A, B] = object
   here* = object
   PartialLiftSyntax*[Pattern: static string] = object
   Location* = distinct string
-
-proc minimal*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_minimal)
-proc low*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_low)
-proc medium*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_medium)
-proc high*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_high)
-proc xhigh*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_xhigh)
 
 template flow_ir*(id: int, entry: bool) {.pragma.}
 template `~>`*(A, B: untyped): untyped = FlowSpec[A, B]
@@ -596,18 +549,60 @@ proc so_lambda_parts(
     return true
   false
 
+proc emit_artifact_pack(
+    registry: ArtifactRegistry;
+    type_expr, value: NimNode
+): NimNode
+
+proc emit_artifact_unpack(
+    registry: ArtifactRegistry;
+    type_expr, artifact: NimNode
+): NimNode
+
+proc artifact_info(
+    registry: ArtifactRegistry;
+    type_expr: NimNode
+): ArtifactTypeInfo
+
+proc is_void_type(type_expr: NimNode): bool
+
 proc lower_model_call(
     registry: ArtifactRegistry;
-    profile, prompt: NimNode
+    flow_type, profile, prompt: NimNode
 ): NimNode =
   let artifact_name = registry.artifact_name
   let profile_expr = copyNimTree(profile)
   let prompt_expr = copyNimTree(prompt)
+  let input_type = copyNimTree(flow_type[1])
+  let output_type = copyNimTree(flow_type[2])
+  let input = genSym(nskParam, "model_artifact")
+  let output = genSym(nskParam, "model_value")
+  let unpacked = if input_type.is_void_type:
+    newEmptyNode()
+  else:
+    registry.emit_artifact_unpack(input_type, input)
+  let unpacker = if input_type.is_void_type:
+    quote do:
+      (proc (`input`: `artifact_name`): void {.nimcall.} =
+        discard `input`
+      )
+  else:
+    quote do:
+      (proc (`input`: `artifact_name`): `input_type` {.nimcall.} =
+        `unpacked`
+      )
+  let packed = registry.emit_artifact_pack(output_type, output)
+  let packer = quote do:
+    (proc (`output`: `output_type`): `artifact_name` {.nimcall.} =
+      `packed`
+    )
   quote do:
     Flow[`artifact_name`](
       kind: fk_model,
       profile: `profile_expr`,
-      prompt: `prompt_expr`
+      prompt: `prompt_expr`,
+      packer: cast[pointer](`packer`),
+      unpacker: cast[pointer](`unpacker`)
     )
 
 proc lower_it(
@@ -846,7 +841,8 @@ proc lower_flow_expr(
         context.partial_model_call_symbol, profile, prompt):
       error("unsupported FlowSpec expression; expected model call, pure, " &
         "lift, or >>>", node)
-    result.head = lower_model_call(context.artifact_registry, profile, prompt)
+    result.head = lower_model_call(
+      context.artifact_registry, flow_type, profile, prompt)
   result.tail = result.head
 
 proc lower_flow_pair(

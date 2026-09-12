@@ -3,7 +3,7 @@
 Date: 2026-09-12
 Compiler: Nim 2.3.1 arm64; also checked 2.2.6, 2.2.10, `#devel`
 
-Scope: confirm `vecherinka_ir` `so` callback problem; test workarounds. No
+Scope: confirm `vecherinka` `so` callback problem; test workarounds. No
 production source edits. Disposable probe: `so_call_probe.nim`; compile output
 and Nim caches under `/tmp`.
 
@@ -49,7 +49,7 @@ bug, not user type mismatch.
 | Existing `run_projector[A]` using `default(A)` | Pass for projector path |
 | Generated plain/non-variant callback container with generic call | Pass |
 | Generated tagged artifact plus simple variant callback container | Pass |
-| Full `vecherinka_ir` generated artifact plus `so` callback plus `default(A)` | Crash |
+| Full `vecherinka` generated artifact plus `so` callback plus `default(A)` | Crash |
 
 Strong conclusion: `default(A)` alone fails for this generated Artifact inside
 generic `default_for[A](flow: Flow[A]): A`; callback call is not root trigger.
@@ -71,7 +71,7 @@ Compile and `-r` run pass; callback returns expected `fk_ref`.
 
 ### 1. Pass ambient `A` input — preferred
 
-Status: compile pass against actual `vecherinka_ir` output.
+Status: compile pass against actual `vecherinka` output.
 
 Evaluator already has ambient input while evaluating a flow. API should accept
 that value. `so` domains are non-void, so no legitimate evaluator call needs
@@ -111,7 +111,7 @@ escape hatch, not evaluator design.
 ### 3. Store callback as `pointer`, cast at invocation
 
 Status: pass in generated tagged-artifact + variant-container probe and actual
-`vecherinka_ir` callback view (`-r`).
+`vecherinka` callback view (`-r`).
 
 Shape:
 

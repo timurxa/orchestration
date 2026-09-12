@@ -435,7 +435,7 @@ composition. Lift callbacks reject malformed IR and void inner endpoints.
 - Lift object patterns still depend on source-level field type compatibility;
   no runtime workaround was added because the typed pattern itself rejects
   incompatible field changes.
-- Existing `-d:vecherinka_ir_tests` fixture contains commented declarations
+- Existing `-d:vecherinka_tests` fixture contains commented declarations
   with live assertions; unrelated stale harness failure must not drive fan
   design.
 

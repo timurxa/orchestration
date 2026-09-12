@@ -1,6 +1,6 @@
 {.experimental: "callOperator".}
 
-import vecherinka_ir
+import vecherinka
 import codex_json
 import std/options
 
@@ -31,6 +31,8 @@ doAssert model_flow.body.kind == fk_model
 doAssert model_flow.body.profile.model == "gpt-5.6-luna"
 doAssert model_flow.body.profile.effort == re_minimal
 doAssert model_flow.body.prompt == "hello"
+doAssert model_flow.body.packer != nil
+doAssert model_flow.body.unpacker != nil
 doAssert model_flow_2.kind == fk_top
 doAssert model_flow_2.root == "model_flow_2"
 doAssert model_flow_2.body.kind == fk_ref

@@ -1,6 +1,6 @@
 {.experimental: "callOperator".}
 
-import vecherinka_ir
+import vecherinka
 
 type
   Input = object
