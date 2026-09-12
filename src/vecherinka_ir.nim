@@ -282,6 +282,27 @@ proc walk_flow_specs(node: NimNode; context: var FlowWalkContext) =
   for child in node:
     walk_flow_specs(child, context)
 
+proc make_vecherinka_artifact_type(flow_types: seq[NimNode]): NimNode =
+  let kind_name = ident("VecherinkaArtifactKind")
+  let artifact_name = ident("VecherinkaArtifact")
+  let kind_type = newTree(nnkEnumTy, newEmptyNode())
+  let variant = newTree(nnkRecCase,
+    newTree(nnkIdentDefs, ident("kind"), kind_name, newEmptyNode()))
+
+  for index, flow_type in flow_types:
+    let kind = ident("vak_" & $index)
+    let value = ident("value_" & $index)
+    kind_type.add(kind)
+    variant.add(newTree(nnkOfBranch, kind,
+      newTree(nnkRecList,
+        newTree(nnkIdentDefs, value, flow_type, newEmptyNode()))))
+
+  newTree(nnkTypeSection,
+    newTree(nnkTypeDef, kind_name, newEmptyNode(), kind_type),
+    newTree(nnkTypeDef, artifact_name, newEmptyNode(),
+      newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(),
+        newTree(nnkRecList, variant))))
+
 macro vecherinka_runtime*(body: typed): untyped =
   dump body.repr
   var context = FlowWalkContext(
@@ -295,7 +316,10 @@ macro vecherinka_runtime*(body: typed): untyped =
   walk_flow_specs(body, context)
   echo "FlowSpec nodes processed=", context.encountered
 
-  result = body
+  result = newStmtList(make_vecherinka_artifact_type(context.flow_types))
+  result.add(body)
+
+  dump result.repr
 
 macro vecherinka*(body: untyped): untyped =
   result = newEmptyNode()
