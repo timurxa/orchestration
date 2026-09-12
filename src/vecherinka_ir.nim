@@ -2,12 +2,48 @@
 
 ## Typed flow declarations and IR descriptors. Runtime values belong elsewhere.
 
-import std/[macros, assertions, options, sugar]
+import std/[macros, assertions, options]
 import fusion/matching
 import codex_json
 import it_projection, lift_pattern_typed
 
 type
+  ## Lowered runtime tree. `FlowSpec` remains the typed source-side syntax.
+  FlowKind* = enum
+    fk_top,
+    fk_model,
+    fk_raw,
+    fk_ref,
+    fk_it,
+    fk_fanout,
+    fk_so,
+    fk_lift
+  Flow*[A] = ref object
+    continuation*: Flow[A]
+    case kind*: FlowKind
+    of fk_top:
+      root*: string
+      body*: Flow[A]
+    of fk_model:
+      profile*: ProfileSpec
+      prompt*: string
+    of fk_raw:
+      value*: A
+    of fk_ref:
+      name*: string
+    of fk_it:
+      projector*: proc(input: A): A {.nimcall.}
+    of fk_fanout:
+      branches*: seq[Flow[A]]
+      coalesce*: proc(values: seq[A]): A {.nimcall.}
+    of fk_so:
+      execute*: proc(input: A): Flow[A] {.nimcall.}
+    of fk_lift:
+      inner*: Flow[A]
+      destructure*: proc(input: A):
+        seq[tuple[result_index: int, input: A]] {.nimcall.}
+      construct*: proc(results: seq[A]; input: A): A {.nimcall.}
+
   FlowIRKind* = enum
     firk_ref,
     firk_empty,
@@ -15,12 +51,10 @@ type
     firk_it,
     firk_lift
   FlowIR* = ref object
-    case kind: FlowIRKind:
+    case kind*: FlowIRKind:
     of firk_ref:
       id*: int
       entry*: bool
-    of firk_so:
-      fn*: pointer
     of firk_it:
       path*: ItPath
     of firk_lift:
@@ -85,22 +119,20 @@ macro fan*(args: varargs[typed]): untyped =
   result = quote do:
     fanout[`input`, `returnType`, `tupleType`](`tupleArgs`)
 
-proc make_so_flow(domain, codomain, pattern, body: NimNode): NimNode =
-  let parameter = ident(pattern.strVal)
-  let bodyText = newLit(body.repr)
-  result = quote do:
-    FlowSpec[`domain`, `codomain`](
-      ir: FlowIR(
-        kind: firk_so,
-        fn: cast[pointer](proc (`parameter`: `domain`): FlowSpec[void, `codomain`] =
-        `body`)
-      )
-    )
+proc so_syntax*[A, B](
+    fn: proc(input: A): FlowSpec[void, B]
+): FlowSpec[A, B] =
+  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
 
 macro so*(domain, codomain, pattern, body: untyped): untyped =
-  result = make_so_flow(domain, codomain, pattern, body)
+  let parameter = ident(pattern.strVal)
+  result = quote do:
+    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`):
+      FlowSpec[void, `codomain`] = `body`)
 
 macro project_it(value: typed; path: static[ItPath]; depth: static[int] = 0): untyped =
+  if path.groups.len == 0:
+    return value
   let group = path.groups[depth]
   result = newTree(nnkTupleConstr)
 
@@ -216,15 +248,6 @@ macro lift*(pattern: untyped): untyped =
     PartialLiftSyntax[`spelling`]()
 
 type
-  FlowWalkPhase = enum
-    fwpGatherTypes,
-    fwpProcess
-  FlowWalkContext = object
-    phase: FlowWalkPhase
-    flow_spec_symbol: NimNode
-    flow_types: seq[NimNode]
-    encountered: int
-
   ArtifactTypeInfo = object
     type_expr: NimNode
     kind_name: NimNode
@@ -233,17 +256,64 @@ type
   ArtifactRegistry = object
     kind_name: NimNode
     artifact_name: NimNode
-    work_name: NimNode
     types: seq[ArtifactTypeInfo]
 
-  LiftOccurrence = object
-    pattern: string
-    tree: LiftPatternTree
-    outer_domain: NimNode
-    outer_codomain: NimNode
-    inner_domain: NimNode
-    inner_codomain: NimNode
+  FlowWalkContext = object
+    flow_spec_symbol: NimNode
+    partial_model_call_symbol: NimNode
+    flow_types: seq[NimNode]
+    flow_refs: seq[FlowRefInfo]
+    flow_procs: seq[FlowProcInfo]
+    flow_pairs: seq[FlowPair]
+    artifact_registry: ArtifactRegistry
 
+  FlowRefInfo = object
+    id: int
+    name: string
+    symbol: NimNode
+    flow_type: NimNode
+    entry: bool
+
+  FlowProcInfo = object
+    id: int
+    body: NimNode
+    flow_type: NimNode
+
+  FlowPair = object
+    ref_info: FlowRefInfo
+    proc_info: FlowProcInfo
+
+  LoweredFlow = object
+    head: NimNode
+    tail: NimNode
+
+  TreeRewriter[T] = proc(node: NimNode; state: var T): NimNode
+
+proc map_nim_tree[T](
+    node: NimNode;
+    state: var T;
+    rewrite: TreeRewriter[T]
+): NimNode =
+  ## A non-nil rewrite is terminal: its subtree is already complete.
+  let replacement = rewrite(node, state)
+  if not replacement.isNil:
+    return replacement
+
+  result = copyNimNode(node)
+  for child in node:
+    result.add map_nim_tree(child, state, rewrite)
+
+proc replace_symbol(
+    node, original, replacement: NimNode
+): NimNode =
+  ## Replace only references bound to original symbol; same-spelled locals stay intact.
+  if node.kind == nnkSym and node == original:
+    return copyNimTree(replacement)
+  result = copyNimTree(node)
+  for index in 0 ..< node.len:
+    result[index] = replace_symbol(node[index], original, replacement)
+
+type
   LiftEmitState = object
     ## Both emitters advance one shared preorder cursor per `here`.
     next_index: NimNode
@@ -253,6 +323,10 @@ type
 proc flow_spec_type(node, flow_spec_symbol: NimNode): NimNode =
   ## `getTypeInst` is only safe on typed expression nodes. Type syntax,
   ## pragmas, and some macro/template calls have no type and fail hard.
+  if node.kind == nnkInfix and node.len > 0 and eqIdent(node[0], "~>"):
+    return nil
+  if node.kind == nnkSym and node.symKind == nskResult:
+    return nil
   if node.kind == nnkSym and node.symKind notin {
       nskParam, nskTemp, nskVar, nskLet, nskConst, nskResult, nskForVar}:
     return nil
@@ -278,6 +352,13 @@ proc flow_spec_type(node, flow_spec_symbol: NimNode): NimNode =
     discard
   nil
 
+proc type_inst_or_nil(node: NimNode): NimNode =
+  ## Type queries are valid only for semantically typed expressions.
+  try:
+    result = node.getTypeInst
+  except CatchableError:
+    result = nil
+
 proc register_flow_type(types: var seq[NimNode]; type_node: NimNode) =
   for known in types:
     if sameType(known, type_node):
@@ -296,17 +377,77 @@ proc field_value(node: NimNode; name: string): NimNode =
 proc is_named(node: NimNode; name: string): bool =
   node.kind in {nnkIdent, nnkSym, nnkAccQuoted} and node.repr == name
 
-proc is_flow_ir_lift(node: NimNode): bool =
+proc is_flow_ir_kind(node: NimNode; expected: FlowIRKind): bool =
   if node.kind notin {nnkObjConstr, nnkCall}:
     return false
   let kind = node.field_value("kind")
   if kind.isNil:
     return false
-  if kind.is_named("firk_lift"):
+  if kind.is_named($expected):
     return true
   kind.kind in {
     nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit
-  } and kind.intVal == ord(firk_lift)
+  } and kind.intVal == ord(expected)
+
+proc is_flow_ir_lift(node: NimNode): bool =
+  is_flow_ir_kind(node, firk_lift)
+
+proc is_flow_ir_it(node: NimNode): bool =
+  is_flow_ir_kind(node, firk_it)
+
+proc flow_ir_ref_id(node: NimNode; id: var int): bool =
+  if node.kind notin {nnkObjConstr, nnkCall}:
+    return false
+  let kind = node.field_value("kind")
+  let id_node = node.field_value("id")
+  if kind.isNil or id_node.isNil or
+      (not kind.is_named("firk_ref") and
+       (kind.kind notin {
+          nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit
+        } or kind.intVal != ord(firk_ref))) or
+      id_node.kind notin {
+        nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit
+      }:
+    return false
+  id = id_node.intVal
+  true
+
+proc flow_ref_info(
+    node, flow_spec_symbol: NimNode;
+    info: var FlowRefInfo
+): bool =
+  if (IdentDefs([
+      @name is Sym(),
+      _,
+      @initializer
+    ]) ?= node):
+    let flow_type = flow_spec_type(initializer, flow_spec_symbol)
+    let ir = initializer.field_value("ir")
+    var id: int
+    if not flow_type.isNil and not ir.isNil and flow_ir_ref_id(ir, id):
+      let entry_node = ir.field_value("entry")
+      let entry = not entry_node.isNil and entry_node.repr == "true"
+      info = FlowRefInfo(id: id, name: name.strVal, symbol: name,
+        flow_type: copyNimTree(flow_type), entry: entry)
+      return true
+  false
+
+proc flow_ir_proc_id(node: NimNode; id: var int): bool =
+  if node.kind != nnkProcDef:
+    return false
+  for child in node:
+    if child.kind != nnkPragma:
+      continue
+    for pragma in child:
+      if pragma.kind notin {nnkCall, nnkCommand} or pragma.len < 2 or
+          not eqIdent(pragma[0], "flow_ir") or
+          pragma[1].kind notin {
+            nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit
+          }:
+        continue
+      id = pragma[1].intVal
+      return true
+  false
 
 proc first_flow_spec_type(node, flow_spec_symbol: NimNode): NimNode =
   let direct = flow_spec_type(node, flow_spec_symbol)
@@ -317,74 +458,441 @@ proc first_flow_spec_type(node, flow_spec_symbol: NimNode): NimNode =
     if not result.isNil:
       return
 
-proc same_lift(left, right: LiftOccurrence): bool =
-  left.pattern == right.pattern and
-    sameType(left.outer_domain, right.outer_domain) and
-    sameType(left.outer_codomain, right.outer_codomain) and
-    sameType(left.inner_domain, right.inner_domain) and
-    sameType(left.inner_codomain, right.inner_codomain)
-
-proc collect_lifts(
-    node: NimNode;
-    flow_spec_symbol: NimNode;
-    lifts: var seq[LiftOccurrence]
-) =
-  let flow_type = flow_spec_type(node, flow_spec_symbol)
-  if not flow_type.isNil:
-    let ir = node.field_value("ir")
-    if not ir.isNil and ir.is_flow_ir_lift:
-      let pattern_node = ir.field_value("pattern")
-      let inner = ir.field_value("inner")
-      if pattern_node.isNil or inner.isNil or pattern_node.kind notin {
-          nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-        error("malformed lift IR", node)
-      let inner_type = first_flow_spec_type(inner, flow_spec_symbol)
-      if inner_type.isNil:
-        error("lift inner flow type is unavailable", inner)
-      let occurrence = LiftOccurrence(
-        pattern: pattern_node.strVal,
-        tree: parse_lift_pattern(parseExpr(pattern_node.strVal)),
-        outer_domain: copyNimTree(flow_type[1]),
-        outer_codomain: copyNimTree(flow_type[2]),
-        inner_domain: copyNimTree(inner_type[1]),
-        inner_codomain: copyNimTree(inner_type[2]))
-      var known = false
-      for prior in lifts:
-        if prior.same_lift(occurrence):
-          known = true
-          break
-      if not known:
-        lifts.add occurrence
-
-  for child in node:
-    collect_lifts(child, flow_spec_symbol, lifts)
-
 proc walk_flow_specs(node: NimNode; context: var FlowWalkContext) =
   let flow_type = flow_spec_type(node, context.flow_spec_symbol)
   if not flow_type.isNil:
-    inc context.encountered
-    case context.phase
-    of fwpGatherTypes:
-      register_flow_type(context.flow_types, flow_type[1])
-      register_flow_type(context.flow_types, flow_type[2])
-      echo "FlowSpec node=", $node.kind,
-        " type=", flow_type.repr,
-        " domain=", flow_type[1].repr,
-        " codomain=", flow_type[2].repr
-    of fwpProcess:
-      # Lowering will consume canonical expression roots. Typed AST wrappers
-      # can expose one source occurrence as Sym, ObjConstr, and Call.
-      discard
+    register_flow_type(context.flow_types, flow_type[1])
+    register_flow_type(context.flow_types, flow_type[2])
 
   for child in node:
     walk_flow_specs(child, context)
+
+proc model_call_parts(
+    node, flow_type, partial_model_call_symbol: NimNode;
+    profile, prompt: var NimNode
+): bool =
+  ## Fusion matching handles the stable typed call-tree shape. Compiler type
+  ## identity validates the generic endpoints and prompt overload.
+  if (Call([
+      @head_node is Sym(),
+      Call([
+        @partial_head_node is Sym(),
+        @matched_profile,
+        _,
+        _
+      ]),
+      @matched_prompt
+    ]) ?= node):
+    if head_node.symKind != nskProc or not eqIdent(head_node, "()"):
+      return false
+    if partial_head_node.symKind != nskProc or
+        not eqIdent(partial_head_node, "[]"):
+      return false
+    if flow_type.isNil or flow_type.kind != nnkBracketExpr or
+        flow_type.len != 3:
+      return false
+
+    let partial_type = type_inst_or_nil(node[1])
+    if partial_type.isNil or partial_type.kind != nnkBracketExpr or
+        partial_type.len != 3 or partial_type[0].kind != nnkSym or
+        partial_type[0] != partial_model_call_symbol:
+      return false
+
+    if not sameType(partial_type[1], flow_type[1]) or
+        not sameType(partial_type[2], flow_type[2]):
+      return false
+
+    let prompt_type = type_inst_or_nil(matched_prompt)
+    if prompt_type.isNil or not sameType(prompt_type, bindSym("string")):
+      return false
+
+    profile = matched_profile
+    prompt = matched_prompt
+    true
+  else:
+    false
+
+proc fanout_parts(
+    node, flow_type: NimNode;
+    branches: var NimNode
+): bool =
+  if (Call([
+      @head_node is Sym(),
+      @matched_branches
+    ]) ?= node):
+    if head_node.symKind != nskProc or not eqIdent(head_node, "fanout") or
+        matched_branches.kind != nnkTupleConstr:
+      return false
+    if matched_branches.len == 0 or flow_type.kind != nnkBracketExpr:
+      error("fanout requires non-empty typed FlowSpec branches", node)
+    branches = matched_branches
+    return true
+  false
+
+proc pure_parts(
+    node, flow_type: NimNode;
+    value: var NimNode
+): bool =
+  if (Call([
+      @head_node is Sym(),
+      @matched_value
+    ]) ?= node):
+    if head_node.symKind != nskProc or not eqIdent(head_node, "pure"):
+      return false
+    if flow_type.kind != nnkBracketExpr or flow_type.len != 3 or
+        not flow_type[1].is_named("void"):
+      return false
+    value = matched_value
+    return true
+  false
+
+proc so_parts(
+    node, flow_type: NimNode;
+    lambda: var NimNode
+): bool =
+  if (Call([
+      @head_node is Sym(),
+      @matched_lambda
+    ]) ?= node):
+    if head_node.symKind != nskProc or not eqIdent(head_node, "so_syntax"):
+      return false
+    if flow_type.kind != nnkBracketExpr or flow_type.len != 3:
+      return false
+    var candidate = matched_lambda
+    while candidate.kind in {nnkHiddenStdConv, nnkHiddenCallConv}:
+      if candidate.len != 2:
+        error("malformed so callback conversion", candidate)
+      candidate = candidate[1]
+    if candidate.kind != nnkLambda:
+      error("so_syntax requires callback proc", matched_lambda)
+    lambda = candidate
+    return true
+  false
+
+proc so_lambda_parts(
+    lambda: NimNode;
+    parameter, input_type, body: var NimNode
+): bool =
+  if (Lambda([
+      _,
+      _,
+      _,
+      FormalParams([
+        _,
+        IdentDefs([
+          @matched_parameter is Sym(),
+          @matched_input_type,
+          _
+        ])
+      ]),
+      _,
+      _,
+      Asgn([_, @matched_body]),
+      _
+    ]) ?= lambda):
+    parameter = matched_parameter
+    input_type = matched_input_type
+    body = matched_body
+    return true
+  false
+
+proc lower_model_call(
+    registry: ArtifactRegistry;
+    profile, prompt: NimNode
+): NimNode =
+  let artifact_name = registry.artifact_name
+  let profile_expr = copyNimTree(profile)
+  let prompt_expr = copyNimTree(prompt)
+  quote do:
+    Flow[`artifact_name`](
+      kind: fk_model,
+      profile: `profile_expr`,
+      prompt: `prompt_expr`
+    )
+
+proc lower_it(
+    flow_type, ir: NimNode;
+    registry: ArtifactRegistry
+): NimNode
+
+proc lower_fanout(
+    flow_type, branches: NimNode;
+    context: var FlowWalkContext
+): NimNode
+
+proc lower_so(
+    flow_type, lambda: NimNode;
+    context: var FlowWalkContext
+): NimNode
+
+proc lower_lift(
+    flow_type, ir: NimNode;
+    context: var FlowWalkContext
+): NimNode
+
+proc lower_raw_value(
+    value_type, value: NimNode;
+    registry: ArtifactRegistry
+): NimNode
+
+proc rewrite_flow_node(node: NimNode; context: var FlowWalkContext): NimNode
+
+proc flow_proc_parts(node: NimNode; name, body: var NimNode): bool =
+  if (ProcDef([
+      @proc_name is Sym(),
+      _,
+      _,
+      _,
+      _,
+      _,
+      Asgn([_, @proc_body]),
+      _
+    ]) ?= node):
+    name = proc_name
+    body = proc_body
+    true
+  else:
+    false
+
+proc flow_proc_info(
+    node, flow_spec_symbol: NimNode;
+    info: var FlowProcInfo
+): bool =
+  var id: int
+  var name, body: NimNode
+  if not flow_ir_proc_id(node, id) or not flow_proc_parts(node, name, body):
+    return false
+  info = FlowProcInfo(
+    id: id,
+    body: body,
+    flow_type: first_flow_spec_type(body, flow_spec_symbol))
+  true
+
+proc collect_flow_declarations(
+    node: NimNode;
+    context: var FlowWalkContext
+) =
+  var ref_info: FlowRefInfo
+  if flow_ref_info(node, context.flow_spec_symbol, ref_info):
+    context.flow_refs.add ref_info
+
+  var proc_info: FlowProcInfo
+  if flow_proc_info(node, context.flow_spec_symbol, proc_info):
+    context.flow_procs.add proc_info
+
+  for child in node:
+    collect_flow_declarations(child, context)
+
+proc find_flow_ref(
+    refs: seq[FlowRefInfo]; id: int
+): int =
+  result = -1
+  for index, ref_info in refs:
+    if ref_info.id == id:
+      if result >= 0:
+        error("duplicate FlowSpec reference id: " & $id)
+      result = index
+
+proc find_flow_proc(
+    procs: seq[FlowProcInfo]; id: int
+): int =
+  result = -1
+  for index, proc_info in procs:
+    if proc_info.id == id:
+      if result >= 0:
+        error("duplicate flow_ir id: " & $id)
+      result = index
+
+proc join_flow_declarations(context: var FlowWalkContext) =
+  for ref_info in context.flow_refs:
+    let proc_index = find_flow_proc(context.flow_procs, ref_info.id)
+    if proc_index < 0:
+      error("missing flow_ir proc for FlowSpec reference id: " &
+        $ref_info.id)
+    let proc_info = context.flow_procs[proc_index]
+    if proc_info.flow_type.isNil or
+        not sameType(ref_info.flow_type, proc_info.flow_type):
+      error("FlowSpec reference/proc endpoint mismatch for id: " &
+        $ref_info.id)
+    context.flow_pairs.add FlowPair(
+      ref_info: ref_info,
+      proc_info: proc_info)
+
+  for proc_info in context.flow_procs:
+    if find_flow_ref(context.flow_refs, proc_info.id) < 0:
+      error("missing FlowSpec reference for flow_ir id: " & $proc_info.id)
+
+proc find_flow_pair(pairs: seq[FlowPair]; id: int): int =
+  for index, pair in pairs:
+    if pair.ref_info.id == id:
+      return index
+  -1
+
+proc find_flow_ref_symbol(refs: seq[FlowRefInfo]; node: NimNode): int =
+  for index, ref_info in refs:
+    if ref_info.symbol == node:
+      return index
+  -1
+
+proc lower_flow_ref(
+    ref_info: FlowRefInfo;
+    registry: ArtifactRegistry
+): NimNode =
+  let artifact_name = registry.artifact_name
+  let name = newLit(ref_info.name)
+  quote do:
+    Flow[`artifact_name`](
+      kind: fk_ref,
+      name: `name`
+    )
+
+proc flow_composition_parts(
+    node: NimNode;
+    left, right: var NimNode
+): bool =
+  if (Infix([
+      @infix_operator is Sym(),
+      @infix_left,
+      @infix_right
+    ]) ?= node):
+    if eqIdent(infix_operator, ">>>"):
+      left = infix_left
+      right = infix_right
+      return true
+  if (Call([
+      @call_operator is Sym(),
+      @call_left,
+      @call_right
+    ]) ?= node):
+    if eqIdent(call_operator, ">>>"):
+      left = call_left
+      right = call_right
+      return true
+  false
+
+proc append_continuation(flow, continuation: NimNode) =
+  if not flow.field_value("continuation").isNil:
+    error("flow already has a continuation", flow)
+  flow.add newTree(nnkExprColonExpr, ident("continuation"), continuation)
+
+proc lower_flow_expr(
+    node: NimNode;
+    context: var FlowWalkContext
+): LoweredFlow =
+  let flow_type = flow_spec_type(node, context.flow_spec_symbol)
+  if flow_type.isNil:
+    error("expected FlowSpec expression", node)
+  if node.kind == nnkPar and node.len == 1:
+    return lower_flow_expr(node[0], context)
+
+  var pure_value: NimNode
+  if pure_parts(node, flow_type, pure_value):
+    let value_type = type_inst_or_nil(pure_value)
+    if value_type.isNil:
+      error("pure value has no type", pure_value)
+    result.head = lower_raw_value(
+      value_type, pure_value, context.artifact_registry)
+    result.tail = result.head
+    return
+
+  var left, right: NimNode
+  if flow_composition_parts(node, left, right):
+    if flow_spec_type(left, context.flow_spec_symbol).isNil:
+      ## Typed `A >>> FlowSpec[A, B]` already checked endpoint compatibility;
+      ## retain its value as a local Artifact seed, then use normal chaining.
+      let value_type = type_inst_or_nil(left)
+      if value_type.isNil:
+        error("value-seeded >>> left operand has no type", left)
+      let value_flow = lower_raw_value(
+        value_type, left, context.artifact_registry)
+      let right_flow = lower_flow_expr(right, context)
+      value_flow.append_continuation(right_flow.head)
+      return LoweredFlow(head: value_flow, tail: right_flow.tail)
+
+    let left_flow = lower_flow_expr(left, context)
+    let right_flow = lower_flow_expr(right, context)
+    left_flow.tail.append_continuation(right_flow.head)
+    return LoweredFlow(head: left_flow.head, tail: right_flow.tail)
+
+  var branches: NimNode
+  if fanout_parts(node, flow_type, branches):
+    result.head = lower_fanout(flow_type, branches, context)
+    result.tail = result.head
+    return
+
+  var lambda: NimNode
+  if so_parts(node, flow_type, lambda):
+    result.head = lower_so(flow_type, lambda, context)
+    result.tail = result.head
+    return
+
+  if node.kind == nnkSym:
+    let ref_index = find_flow_ref_symbol(context.flow_refs, node)
+    if ref_index >= 0 and sameType(
+        flow_type, context.flow_refs[ref_index].flow_type):
+      result.head = lower_flow_ref(context.flow_refs[ref_index],
+        context.artifact_registry)
+      result.tail = result.head
+      return
+
+  let ir = node.field_value("ir")
+  if not ir.isNil and ir.is_flow_ir_lift:
+    result.head = lower_lift(flow_type, ir, context)
+  elif not ir.isNil and ir.is_flow_ir_it:
+    result.head = lower_it(flow_type, ir, context.artifact_registry)
+  else:
+    var profile, prompt: NimNode
+    if not model_call_parts(node, flow_type,
+        context.partial_model_call_symbol, profile, prompt):
+      error("unsupported FlowSpec expression; expected model call, pure, " &
+        "lift, or >>>", node)
+    result.head = lower_model_call(context.artifact_registry, profile, prompt)
+  result.tail = result.head
+
+proc lower_flow_pair(
+    pair: FlowPair;
+    context: var FlowWalkContext
+): NimNode =
+  let transformed_body = map_nim_tree(
+    pair.proc_info.body, context, rewrite_flow_node)
+  let artifact_name = context.artifact_registry.artifact_name
+  let root_name = newLit(pair.ref_info.name)
+  let top_flow = quote do:
+    Flow[`artifact_name`](
+      kind: fk_top,
+      root: `root_name`,
+      body: `transformed_body`
+    )
+  top_flow
+
+proc rewrite_flow_node(node: NimNode; context: var FlowWalkContext): NimNode =
+  if node.kind == nnkIdentDefs:
+    var ref_info: FlowRefInfo
+    if flow_ref_info(node, context.flow_spec_symbol, ref_info):
+      let pair_index = find_flow_pair(context.flow_pairs, ref_info.id)
+      if pair_index < 0:
+        error("unmatched FlowSpec reference id: " & $ref_info.id, node)
+      let flow = lower_flow_pair(context.flow_pairs[pair_index], context)
+      return newTree(nnkIdentDefs, ident(ref_info.name), newEmptyNode(), flow)
+
+  if node.kind == nnkProcDef:
+    var proc_id: int
+    if flow_ir_proc_id(node, proc_id):
+      if find_flow_pair(context.flow_pairs, proc_id) < 0:
+        error("unmatched flow_ir id: " & $proc_id, node)
+      return newEmptyNode()
+
+  let flow_type = flow_spec_type(node, context.flow_spec_symbol)
+  if not flow_type.isNil:
+    return lower_flow_expr(node, context).head
+  nil
 
 proc make_vecherinka_artifact_type(
     flow_types: seq[NimNode];
     registry: var ArtifactRegistry
 ): NimNode =
-  let kind_name = ident("VecherinkaArtifactKind")
-  let artifact_name = ident("VecherinkaArtifact")
+  let kind_name = genSym(nskType, "VecherinkaArtifactKind")
+  let artifact_name = genSym(nskType, "VecherinkaArtifact")
   registry.kind_name = kind_name
   registry.artifact_name = artifact_name
   let kind_type = newTree(nnkEnumTy, newEmptyNode())
@@ -449,16 +957,122 @@ proc emit_artifact_unpack(
       doAssert `checked`.kind == `kind_name`
       `checked`.`value_name`
 
-proc make_fake_work_type(registry: var ArtifactRegistry): NimNode =
-  ## Runtime work graph does not exist yet; keep generated work shape small.
-  registry.work_name = genSym(nskType, "FakeWork")
-  let work_name = registry.work_name
+proc lower_raw_value(
+    value_type, value: NimNode;
+    registry: ArtifactRegistry
+): NimNode =
   let artifact_name = registry.artifact_name
+  let packed = registry.emit_artifact_pack(value_type, value)
   quote do:
-    type
-      `work_name` = object
-        result_index*: int
-        input*: `artifact_name`
+    Flow[`artifact_name`](
+      kind: fk_raw,
+      value: `packed`
+    )
+
+proc lower_it(
+    flow_type, ir: NimNode;
+    registry: ArtifactRegistry
+): NimNode =
+  let path = ir.field_value("path")
+  if path.isNil:
+    error("malformed it IR: missing path", ir)
+
+  let domain = copyNimTree(flow_type[1])
+  let codomain = copyNimTree(flow_type[2])
+  if domain.is_void_type or codomain.is_void_type:
+    error("it flow endpoints must be non-void", flow_type)
+
+  let artifact_name = registry.artifact_name
+  let input = genSym(nskParam, "it_artifact")
+  let typed_input = genSym(nskLet, "it_value")
+  let unpacked = registry.emit_artifact_unpack(domain, input)
+  let projected = newCall(
+    bindSym("project_it"), typed_input, copyNimTree(path))
+  let packed = registry.emit_artifact_pack(codomain, projected)
+  let projector = quote do:
+    proc (`input`: `artifact_name`): `artifact_name` {.nimcall.} =
+      let `typed_input` = `unpacked`
+      `packed`
+  quote do:
+    Flow[`artifact_name`](
+      kind: fk_it,
+      projector: `projector`
+    )
+
+proc lower_fanout(
+    flow_type, branches: NimNode;
+    context: var FlowWalkContext
+): NimNode =
+  let output_type = flow_type[2]
+  if output_type.kind notin {nnkTupleConstr, nnkTupleTy} or
+      output_type.len != branches.len:
+    error("fanout output tuple does not match branch count", flow_type)
+
+  var branch_nodes = newTree(nnkBracket)
+  var branch_types: seq[NimNode]
+  for index, branch in branches:
+    let branch_type = flow_spec_type(branch, context.flow_spec_symbol)
+    if branch_type.isNil:
+      error("fanout branch is not a FlowSpec", branch)
+    if not sameType(branch_type[1], flow_type[1]):
+      error("fanout branch domain mismatch", branch)
+    let output_item = output_type[index]
+    let output_item_type = if output_item.kind == nnkExprColonExpr:
+      output_item[1]
+    else:
+      output_item
+    if not sameType(output_item_type, branch_type[2]):
+      error("fanout branch codomain mismatch", branch)
+    branch_types.add copyNimTree(branch_type[2])
+    branch_nodes.add lower_flow_expr(branch, context).head
+
+  let values = genSym(nskParam, "fan_values")
+  var tuple_value = newTree(nnkTupleConstr)
+  for index, branch_type in branch_types:
+    tuple_value.add context.artifact_registry.emit_artifact_unpack(
+      branch_type, newTree(nnkBracketExpr, values, newLit(index)))
+  let packed = context.artifact_registry.emit_artifact_pack(
+    output_type, tuple_value)
+  let artifact_name = context.artifact_registry.artifact_name
+  let coalesce = quote do:
+    proc (`values`: seq[`artifact_name`]): `artifact_name` {.nimcall.} =
+      `packed`
+  let branch_seq = newTree(nnkPrefix, ident("@"), branch_nodes)
+  quote do:
+    Flow[`artifact_name`](
+      kind: fk_fanout,
+      branches: `branch_seq`,
+      coalesce: `coalesce`
+    )
+
+proc lower_so(
+    flow_type, lambda: NimNode;
+    context: var FlowWalkContext
+): NimNode =
+  var parameter, input_type, body: NimNode
+  if not so_lambda_parts(lambda, parameter, input_type, body):
+    error("malformed so callback", lambda)
+
+  let domain = flow_type[1]
+  if domain.is_void_type or not sameType(input_type, domain):
+    error("so callback input does not match FlowSpec domain", lambda)
+
+  let artifact_name = context.artifact_registry.artifact_name
+  let artifact_input = genSym(nskParam, "so_artifact")
+  let typed_input = genSym(nskLet, "so_input")
+  let unpacked = context.artifact_registry.emit_artifact_unpack(
+    domain, artifact_input)
+  let transformed_body = map_nim_tree(body, context, rewrite_flow_node)
+  let rebound_body = replace_symbol(transformed_body, parameter, typed_input)
+  let expand = quote do:
+    proc (`artifact_input`: `artifact_name`): Flow[`artifact_name`] {.nimcall.} =
+      let `typed_input` = `unpacked`
+      `rebound_body`
+  quote do:
+    Flow[`artifact_name`](
+      kind: fk_so,
+      execute: `expand`
+    )
 
 proc lifted_node_types(
     tree: LiftPatternTree;
@@ -540,7 +1154,6 @@ proc emit_destructure(
       discard
   of lpk_here:
     let index = genSym(nskLet, "result_index")
-    let work_name = registry.work_name
     let next_index = state.next_index
     let works = state.works
     let source = copyNimTree(value)
@@ -548,7 +1161,7 @@ proc emit_destructure(
     result = quote do:
       let `index` = `next_index`
       inc `next_index`
-      `works`.add `work_name`(
+      `works`.add (
         result_index: `index`,
         input: `packed`)
   of lpk_seq:
@@ -661,82 +1274,150 @@ proc emit_construct(
         `output`.`field` = `body`
     result.add output
 
-proc make_lift_helpers(
-    occurrence: LiftOccurrence;
-    registry: ArtifactRegistry
+proc lower_lift(
+    flow_type, ir: NimNode;
+    context: var FlowWalkContext
 ): NimNode =
-  if occurrence.inner_domain.is_void_type or occurrence.inner_codomain.is_void_type:
-    error("lift inner flow must have non-void endpoints")
-  let destructure_name = genSym(nskProc, "lift_destructure")
-  let construct_name = genSym(nskProc, "lift_construct")
-  let artifact_name = registry.artifact_name
-  let work_name = registry.work_name
-  let outer_domain = copyNimTree(occurrence.outer_domain)
-  let outer_codomain = copyNimTree(occurrence.outer_codomain)
-  let input = genSym(nskParam, "input")
-  let original = genSym(nskLet, "original")
-  let next_index = genSym(nskVar, "next_index")
-  let unpack_input = registry.emit_artifact_unpack(
-    occurrence.outer_domain, input)
-  var destructure_state = LiftEmitState(
-    next_index: next_index,
-    works: ident("result"))
-  let destructure_body = emit_destructure(occurrence.tree,
-    occurrence.tree.root_id, original, destructure_state, registry,
-    occurrence.inner_domain)
+  let pattern_node = ir.field_value("pattern")
+  let inner_node = ir.field_value("inner")
+  if pattern_node.isNil or inner_node.isNil or pattern_node.kind notin {
+      nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    error("malformed lift IR", ir)
+  if inner_node.kind != nnkDotExpr or inner_node.len != 2 or
+      not inner_node[1].is_named("ir"):
+    error("lift inner flow source is unavailable", inner_node)
 
-  let results = genSym(nskParam, "results")
-  let original_input = genSym(nskParam, "original")
-  let construct_next_index = genSym(nskVar, "next_index")
+  let inner = inner_node[0]
+  let inner_type = first_flow_spec_type(inner, context.flow_spec_symbol)
+  if inner_type.isNil:
+    error("lift inner flow type is unavailable", inner)
+  if inner_type[1].is_void_type or inner_type[2].is_void_type:
+    error("lift inner flow must have non-void endpoints", inner)
+
+  let tree = parse_lift_pattern(parseExpr(pattern_node.strVal))
+  discard lift_types(tree, inner_type[1], inner_type[2])
+  let inner_flow = lower_flow_expr(inner, context).head
+  let registry = context.artifact_registry
+  let artifact_name = registry.artifact_name
+  let outer_domain = copyNimTree(flow_type[1])
+  let outer_codomain = copyNimTree(flow_type[2])
+
+  let destructure_input = genSym(nskParam, "lift_destructure_input")
+  let destructure_original = genSym(nskLet, "lift_original")
+  let destructure_next_index = genSym(nskVar, "lift_next_index")
+  let unpack_input = registry.emit_artifact_unpack(
+    outer_domain, destructure_input)
+  var destructure_state = LiftEmitState(
+    next_index: destructure_next_index,
+    works: ident("result"))
+  let destructure_body = emit_destructure(tree, tree.root_id,
+    destructure_original, destructure_state, registry, inner_type[1])
+  let destructure = quote do:
+    proc (`destructure_input`: `artifact_name`):
+        seq[tuple[result_index: int, input: `artifact_name`]] {.nimcall.} =
+      let `destructure_original` = `unpack_input`
+      var `destructure_next_index` = 0
+      `destructure_body`
+
+  let construct_results = genSym(nskParam, "lift_results")
+  let construct_input = genSym(nskParam, "lift_construct_input")
+  let construct_original = genSym(nskLet, "lift_original_input")
+  let construct_next_index = genSym(nskVar, "lift_next_index")
+  let unpack_construct_input = registry.emit_artifact_unpack(
+    outer_domain, construct_input)
   var construct_state = LiftEmitState(
     next_index: construct_next_index,
-    results: results)
-  let construct_body = emit_construct(occurrence.tree,
-    occurrence.tree.root_id, original_input, construct_state, registry,
-    occurrence.inner_domain, occurrence.inner_codomain)
-
-  result = newStmtList()
-  result.add quote do:
-    proc `destructure_name`(
-        `input`: `artifact_name`): seq[`work_name`] {.nimcall.} =
-      let `original` = `unpack_input`
-      var `next_index` = 0
-      `destructure_body`
-  result.add quote do:
-    proc `construct_name`(
-        `results`: seq[`artifact_name`];
-        `original_input`: `outer_domain`):
-        `outer_codomain` {.nimcall.} =
+    results: construct_results)
+  let construct_body = emit_construct(tree, tree.root_id,
+    construct_original, construct_state, registry,
+    inner_type[1], inner_type[2])
+  let packed = registry.emit_artifact_pack(outer_codomain, construct_body)
+  let construct = quote do:
+    proc (`construct_results`: seq[`artifact_name`];
+        `construct_input`: `artifact_name`): `artifact_name` {.nimcall.} =
+      let `construct_original` = `unpack_construct_input`
       var `construct_next_index` = 0
-      `construct_body`
+      `packed`
 
-macro vecherinka_runtime*(body: typed): untyped =
+  quote do:
+    Flow[`artifact_name`](
+      kind: fk_lift,
+      inner: `inner_flow`,
+      destructure: `destructure`,
+      construct: `construct`
+    )
+
+proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
   var context = FlowWalkContext(
-    phase: fwpGatherTypes,
-    flow_spec_symbol: bindSym("FlowSpec"))
+    flow_spec_symbol: bindSym("FlowSpec"),
+    partial_model_call_symbol: bindSym("PartialModelCallSyntax"))
   walk_flow_specs(body, context)
-  echo "FlowSpec types gathered=", context.flow_types.len
 
-  context.phase = fwpProcess
-  context.encountered = 0
-  walk_flow_specs(body, context)
-  echo "FlowSpec nodes processed=", context.encountered
-
-  var lifts: seq[LiftOccurrence]
-  collect_lifts(body, context.flow_spec_symbol, lifts)
+  collect_flow_declarations(body, context)
+  join_flow_declarations(context)
 
   var registry: ArtifactRegistry
-  result = newStmtList(make_vecherinka_artifact_type(
-    context.flow_types, registry))
-  if lifts.len > 0:
-    result.add make_fake_work_type(registry)
-    for lift in lifts:
-      result.add make_lift_helpers(lift, registry)
-  result.add(body)
+  let artifact_type = make_vecherinka_artifact_type(
+    context.flow_types, registry)
+  context.artifact_registry = registry
 
-macro vecherinka*(body: untyped): untyped =
-  result = newEmptyNode()
+  if solve.isNil:
+    let transformed_body = map_nim_tree(body, context, rewrite_flow_node)
+    return newStmtList(artifact_type, transformed_body)
+
+  let proc_name = if solve.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    ident(solve.strVal)
+  else:
+    solve
+  if proc_name.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    error("vecherinka proc name must be an identifier", solve)
+
+  var entry_index = -1
+  for index, pair in context.flow_pairs:
+    if not pair.ref_info.entry:
+      continue
+    if entry_index >= 0:
+      error("vecherinka requires exactly one .entry. flow")
+    entry_index = index
+  if entry_index < 0:
+    error("vecherinka requires exactly one .entry. flow")
+
+  let entry_type = context.flow_pairs[entry_index].ref_info.flow_type
+  if entry_type[1].is_void_type:
+    error("vecherinka entry flow domain must be non-void")
+  let entry_domain = copyNimTree(entry_type[1])
+
+  # Every pair lowers to one fk_top node. Pair order follows source declaration
+  # order, so sequence order stays deterministic and name-independent.
+  var top_flows = newTree(nnkBracket)
+  for pair in context.flow_pairs:
+    top_flows.add lower_flow_pair(pair, context)
+  let flow_sequence = newTree(nnkPrefix, ident("@"), top_flows)
+  let artifact_name = context.artifact_registry.artifact_name
+  let data_type = quote do:
+    seq[Flow[`artifact_name`]]
+  let input_name = genSym(nskParam, "input")
+  let data_name = genSym(nskLet, "data")
+  let proc_body = quote do:
+    let `data_name`: `data_type` = `flow_sequence`
+    discard `input_name`
+    echo "we have ", `data_name`.len, " top level procs"
+  let generated_proc = quote do:
+    proc `proc_name`(`input_name`: `entry_domain`) =
+      `proc_body`
+  newStmtList(artifact_type, generated_proc)
+
+macro vecherinka_runtime*(body: typed): untyped =
+  lower_vecherinka_runtime(body, nil)
+
+macro vecherinka_runtime*(solve: untyped; body: typed): untyped =
+  lower_vecherinka_runtime(body, solve)
+
+proc make_vecherinka(body, solve: NimNode): NimNode =
   var refs, procs = newStmtList()
+
+  if not solve.isNil and solve.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+    error("vecherinka proc name must be an identifier", solve)
 
   for id, child in body:
     case child:
@@ -753,7 +1434,8 @@ macro vecherinka*(body: untyped): untyped =
       refs.add quote do:
         let `name` = FlowSpec[`domain`, `codomain`](ir: FlowIR(
           kind: firk_ref,
-          id: `id`
+          id: `id`,
+          entry: `entry`
         ))
 
       let proc_name = genSym(nskProc, "flow")
@@ -765,6 +1447,18 @@ macro vecherinka*(body: untyped): untyped =
   for node in procs:
     refs.add node
 
-  result = quote do:
-    vecherinka_runtime:
-      `refs`
+  if solve.isNil:
+    result = quote do:
+      vecherinka_runtime:
+        `refs`
+  else:
+    let solve_name = newLit(solve.strVal)
+    result = quote do:
+      vecherinka_runtime(`solve_name`):
+        `refs`
+
+macro vecherinka*(body: untyped): untyped =
+  make_vecherinka(body, nil)
+
+macro vecherinka*(solve, body: untyped): untyped =
+  make_vecherinka(body, solve)

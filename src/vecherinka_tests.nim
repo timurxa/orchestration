@@ -14,9 +14,15 @@ type
     of true: discard
     of false: issues: Issues
 
+# type
+#   First = object
+#   Second = object
+#   Third = object
+#     first: First
+
 const cheap = "gpt-5.6-luna".minimal
 
-expandMacros: vecherinka:
+expandMacros: vecherinka(solve):
   > fix (Codebase, Issues) ~> Codebase:
     cheap[(Codebase, Issues), Codebase]("Read the issues and fix them in the codebase.")
 
@@ -30,13 +36,7 @@ expandMacros: vecherinka:
         if audit.ok: pure(code)
         else: (req, (code, audit.issues)) >>>
           lift((ImplementationRequest, here))[fix] >>> audit_fix_loop)
-  
-# type
-#   First = object
-#   Second = object
-#   Third = object
-#     first: First
-#
+
 # const cheap = "gpt-5.6-luna".minimal
 #
 # expandMacros: vecherinka:
@@ -154,7 +154,7 @@ when defined(vecherinka_ir_tests):
 
   let direct_so = so(int, string, value): pure($value)
   doAssert direct_so is FlowSpec[int, string]
-  doAssert direct_so.ir.fn != nil
+  doAssert direct_so.ir.kind == firk_so
 
   let projection_identity = it(ProjectionPair)
   doAssert projection_identity is FlowSpec[ProjectionPair, ProjectionPair]
@@ -201,12 +201,12 @@ when defined(vecherinka_ir_tests):
   let wrapper_lift = lift(seq[Option[here]])[stringify]
   doAssert wrapper_lift is FlowSpec[seq[Option[int]], seq[Option[string]]]
   doAssert wrapper_lift.ir.pattern == "seq[Option[here]]"
-  doAssert wrapper_lift.ir.inner.fn != nil
+  doAssert wrapper_lift.ir.inner.kind == firk_so
 
   let object_step = so(LiftRecord, LiftRecord, input): pure(input)
   let object_lift = lift(LiftRecord(name: here, count: int))[object_step]
   doAssert object_lift is FlowSpec[LiftRecord, LiftRecord]
-  doAssert object_lift.ir.inner.fn != nil
+  doAssert object_lift.ir.inner.kind == firk_so
 
   let envelope_step = so(LiftEnvelope, LiftEnvelope, input): pure(input)
   let nested_object_lift = lift(

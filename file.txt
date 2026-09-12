@@ -4,51 +4,12 @@ lift_pattern nodes=3 here_count=1
       type ImplementationRequest
     [1]
       here
-FlowSpec node=nnkSym type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
-FlowSpec node=nnkObjConstr type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
-FlowSpec node=nnkCall type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
-FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
-FlowSpec node=nnkObjConstr type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
-FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
-FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
-FlowSpec node=nnkObjConstr type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
-FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
-FlowSpec node=nnkSym type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
-FlowSpec node=nnkCall type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
-FlowSpec node=nnkSym type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
-FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
-FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
-FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
-FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
-FlowSpec node=nnkInfix type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
-FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase),
-         ((ImplementationRequest, Codebase), Audit)] domain=(ImplementationRequest, Codebase) codomain=((ImplementationRequest, Codebase), Audit)
-FlowSpec node=nnkObjConstr type=FlowSpec[(ImplementationRequest, Codebase), (ImplementationRequest, Codebase)] domain=(ImplementationRequest, Codebase) codomain=(ImplementationRequest, Codebase)
-FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase), (ImplementationRequest, Codebase)] domain=(ImplementationRequest, Codebase) codomain=(ImplementationRequest, Codebase)
-FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
-FlowSpec node=nnkObjConstr type=FlowSpec[((ImplementationRequest, Codebase), Audit), Codebase] domain=((ImplementationRequest, Codebase), Audit) codomain=Codebase
-FlowSpec node=nnkCall type=FlowSpec[((ImplementationRequest, Codebase), Audit), Codebase] domain=((ImplementationRequest, Codebase), Audit) codomain=Codebase
-FlowSpec node=nnkCall type=FlowSpec[void, Codebase] domain=void codomain=Codebase
-FlowSpec node=nnkSym type=FlowSpec[void, Codebase] domain=void codomain=Codebase
-FlowSpec node=nnkCall type=FlowSpec[void, Codebase] domain=void codomain=Codebase
-FlowSpec node=nnkInfix type=FlowSpec[void, Codebase] domain=void codomain=Codebase
-FlowSpec node=nnkInfix type=FlowSpec[void, (ImplementationRequest, Codebase)] domain=void codomain=(ImplementationRequest, Codebase)
-FlowSpec node=nnkObjConstr type=FlowSpec[(ImplementationRequest, (Codebase, Issues)),
-         (ImplementationRequest, Codebase)] domain=(ImplementationRequest, (Codebase, Issues)) codomain=(ImplementationRequest, Codebase)
-FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, (Codebase, Issues)),
-         (ImplementationRequest, Codebase)] domain=(ImplementationRequest, (Codebase, Issues)) codomain=(ImplementationRequest, Codebase)
-FlowSpec node=nnkSym type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
-FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
-FlowSpec node=nnkSym type=FlowSpec[void, Codebase] domain=void codomain=Codebase
-FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
-FlowSpec types gathered=7
-FlowSpec nodes processed=34
 
 type
-  VecherinkaArtifactKind = enum
+  VecherinkaArtifactKind_553649287 = enum
     vak_0, vak_1, vak_2, vak_3, vak_4, vak_5, vak_6
-  VecherinkaArtifact = object
-    case kind: VecherinkaArtifactKind
+  VecherinkaArtifact_553649288 = object
+    case kind: VecherinkaArtifactKind_553649287
     of vak_0:
       value_0: (Codebase, Issues)
     of vak_1:
@@ -63,89 +24,141 @@ type
       value_5: void
     of vak_6:
       value_6: (ImplementationRequest, (Codebase, Issues))
-type
-  FakeWork_553649165 = object
-    result_index*: int
-    input*: VecherinkaArtifact
-proc lift_destructure_553649166(input_553649168: VecherinkaArtifact): seq[
-    FakeWork_553649165] {.nimcall.} =
-  let original_553649169 = block:
-    let artifact_553649176 = input_553649168
+proc solve(input_553649442: (ImplementationRequest, Codebase)) =
+  let data_553649443: seq[Flow[VecherinkaArtifact_553649288]] = @[Flow[
+      VecherinkaArtifact_553649288](kind: fk_top, root: "fix", body: Flow[
+      VecherinkaArtifact_553649288](kind: fk_model, profile: cheap, prompt: "Read the issues and fix them in the codebase.")), Flow[
+      VecherinkaArtifact_553649288](kind: fk_top, root: "audit", body: Flow[
+      VecherinkaArtifact_553649288](kind: fk_model, profile: cheap, prompt: "Audit the codebase for issues based on the implementation request")), Flow[
+      VecherinkaArtifact_553649288](kind: fk_top, root: "audit_fix_loop", body: Flow[
+      VecherinkaArtifact_553649288](kind: fk_fanout, branches: @[Flow[
+      VecherinkaArtifact_553649288](kind: fk_it, projector: proc (
+      it_artifact_553649362: VecherinkaArtifact_553649288): VecherinkaArtifact_553649288 {.
+      nimcall.} = result =
+    let it_value_553649363 = block:
+      let artifact_553649369 = it_artifact_553649362
+      const
+        loc`gensym67 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+          line: 957, column: 6)
+        ploc`gensym67 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+               line: 957, column: 6).}:
+        if not (artifact_553649369.kind == vak_2):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7) `artifact_553649369.kind == vak_2` ")
+      artifact_553649369.value_2
+    VecherinkaArtifact_553649288(kind: vak_2, value_2: it_value_553649363)),
+      Flow[VecherinkaArtifact_553649288](kind: fk_ref, name: "audit")], coalesce: proc (
+      fan_values_553649374: seq[VecherinkaArtifact_553649288]): VecherinkaArtifact_553649288 {.
+      nimcall.} = result = VecherinkaArtifact_553649288(kind: vak_4, value_4: (block:
+    let artifact_553649375 = fan_values_553649374[0]
     const
-      loc`gensym27 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
-        line: 449, column: 6)
-      ploc`gensym27 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(449, 7)"
+      loc`gensym69 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+        line: 957, column: 6)
+      ploc`gensym69 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7)"
     bind instantiationInfo
     mixin failedAssertImpl
     {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
-             line: 449, column: 6).}:
-      if not (artifact_553649176.kind == vak_6):
-        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(449, 7) `artifact_553649176.kind == vak_6` ")
-    artifact_553649176.value_6
-  var next_index_553649170 = 0
-  discard
-  let result_index_553649185 = next_index_553649170
-  inc next_index_553649170, 1
-  add(result, FakeWork_553649165(result_index: result_index_553649185, input: VecherinkaArtifact(
-      kind: vak_0, value_0: original_553649169[1])))
-
-proc lift_construct_553649167(results_553649186: seq[VecherinkaArtifact];
-    original_553649187: (ImplementationRequest, (Codebase, Issues))): (
-    ImplementationRequest, Codebase) {.nimcall.} =
-  result =
-    var next_index_553649188 = 0
-    (original_553649187[0],
-      let result_index_553649198 = next_index_553649188
-      inc next_index_553649188, 1
-      block:
-        let artifact_553649199 = results_553649186[result_index_553649198]
+             line: 957, column: 6).}:
+      if not (artifact_553649375.kind == vak_2):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7) `artifact_553649375.kind == vak_2` ")
+    artifact_553649375.value_2, block:
+    let artifact_553649376 = fan_values_553649374[1]
+    const
+      loc`gensym71 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+        line: 957, column: 6)
+      ploc`gensym71 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+             line: 957, column: 6).}:
+      if not (artifact_553649376.kind == vak_3):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7) `artifact_553649376.kind == vak_3` ")
+    artifact_553649376.value_3)), continuation: Flow[VecherinkaArtifact_553649288](
+      kind: fk_so, execute: proc (so_artifact_553649406: VecherinkaArtifact_553649288): Flow[
+      VecherinkaArtifact_553649288] {.nimcall.} = result =
+    let so_input_553649407 = block:
+      let artifact_553649408 = so_artifact_553649406
+      const
+        loc`gensym56 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+          line: 957, column: 6)
+        ploc`gensym56 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+               line: 957, column: 6).}:
+        if not (artifact_553649408.kind == vak_4):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7) `artifact_553649408.kind == vak_4` ")
+      artifact_553649408.value_4
+    let
+      tmpTuple_553648703 = so_input_553649407
+      tmpTuple_553648704 = tmpTuple_553648703[0]
+      req = tmpTuple_553648704[0]
+      code = tmpTuple_553648704[1]
+      audit = tmpTuple_553648703[1]
+    if audit.ok: Flow[VecherinkaArtifact_553649288](kind: fk_raw,
+        value: VecherinkaArtifact_553649288(kind: vak_1, value_1: code)) else: Flow[
+        VecherinkaArtifact_553649288](kind: fk_raw, value: VecherinkaArtifact_553649288(
+        kind: vak_6, value_6: (req, (code, audit.issues))), continuation: Flow[
+        VecherinkaArtifact_553649288](kind: fk_lift, inner: Flow[
+        VecherinkaArtifact_553649288](kind: fk_ref, name: "fix"), destructure: proc (
+        lift_destructure_input_553649409: VecherinkaArtifact_553649288): seq[
+        tuple[result_index: int, input: VecherinkaArtifact_553649288]] {.nimcall.} =
+      let lift_original_553649410 = block:
+        let artifact_553649412 = lift_destructure_input_553649409
         const
-          loc`gensym30 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
-            line: 449, column: 6)
-          ploc`gensym30 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(449, 7)"
+          loc`gensym58 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+            line: 957, column: 6)
+          ploc`gensym58 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7)"
         bind instantiationInfo
         mixin failedAssertImpl
         {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
-                 line: 449, column: 6).}:
-          if not (artifact_553649199.kind == vak_1):
-            failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(449, 7) `artifact_553649199.kind == vak_1` ")
-        artifact_553649199.value_1)
-
-let fix = FlowSpec[(Codebase, Issues), Codebase](
-    ir: FlowIR(kind: firk_ref, id: 0, entry: zeroDefault([type node])))
-let audit = FlowSpec[(ImplementationRequest, Codebase), Audit](
-    ir: FlowIR(kind: firk_ref, id: 1, entry: zeroDefault([type node])))
-let audit_fix_loop = FlowSpec[(ImplementationRequest, Codebase), Codebase](
-    ir: FlowIR(kind: firk_ref, id: 2, entry: zeroDefault([type node])))
-proc flow_553648194(): (Codebase, Issues) ~> Codebase {.flow_ir(0, false).} =
-  result = ()(cheap[(Codebase, Issues), Codebase],
-              "Read the issues and fix them in the codebase.")
-
-proc flow_553648195(): (ImplementationRequest, Codebase) ~> Audit {.
-    flow_ir(1, false).} =
-  result = ()(cheap[(ImplementationRequest, Codebase), Audit], "Audit the codebase for issues based on the implementation request")
-
-proc flow_553648196(): (ImplementationRequest, Codebase) ~> Codebase {.
-    flow_ir(2, true).} =
-  result = fanout((FlowSpec[(ImplementationRequest, Codebase), typeof do:
-    block:
-      var it_input: (ImplementationRequest, Codebase)
-      it_input](ir: FlowIR(kind: firk_it,
-                           path: ItPath(groups: seq[ItSelectorGroup](@[])))),
-                   audit)) >>>
-      FlowSpec[((ImplementationRequest, Codebase), Audit), Codebase](ir: FlowIR(
-      kind: firk_so, fn: cast[pointer](proc (
-      input: ((ImplementationRequest, Codebase), Audit)): FlowSpec[void,
-      Codebase] = result =
-    let
-      tmpTuple_553648694 = input
-      tmpTuple_553648695 = tmpTuple_553648694[0]
-      req = tmpTuple_553648695[0]
-      code = tmpTuple_553648695[1]
-      audit = tmpTuple_553648694[1]
-    if audit.ok: pure(code) else: (req, (code, audit.issues)) >>>
-        FlowSpec[(ImplementationRequest, (Codebase, Issues)),
-                 (ImplementationRequest, Codebase)](ir: FlowIR(kind: firk_lift,
-        pattern: "(ImplementationRequest, here)", inner: fix.ir)) >>>
-        audit_fix_loop)))
+                 line: 957, column: 6).}:
+          if not (artifact_553649412.kind == vak_6):
+            failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7) `artifact_553649412.kind == vak_6` ")
+        artifact_553649412.value_6
+      var lift_next_index_553649411 = 0
+      discard
+      let result_index_553649421 = lift_next_index_553649411
+      inc lift_next_index_553649411, 1
+      add(result, (result_index: result_index_553649421, input: VecherinkaArtifact_553649288(
+          kind: vak_0, value_0: lift_original_553649410[1]))), construct: proc (
+        lift_results_553649422: seq[VecherinkaArtifact_553649288];
+        lift_construct_input_553649423: VecherinkaArtifact_553649288): VecherinkaArtifact_553649288 {.
+        nimcall.} = result =
+      let lift_original_input_553649424 = block:
+        let artifact_553649426 = lift_construct_input_553649423
+        const
+          loc`gensym61 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+            line: 957, column: 6)
+          ploc`gensym61 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7)"
+        bind instantiationInfo
+        mixin failedAssertImpl
+        {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+                 line: 957, column: 6).}:
+          if not (artifact_553649426.kind == vak_6):
+            failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7) `artifact_553649426.kind == vak_6` ")
+        artifact_553649426.value_6
+      var lift_next_index_553649425 = 0
+      VecherinkaArtifact_553649288(kind: vak_2, value_2: (
+          lift_original_input_553649424[0],
+        let result_index_553649436 = lift_next_index_553649425
+        inc lift_next_index_553649425, 1
+        block:
+          let artifact_553649437 = lift_results_553649422[result_index_553649436]
+          const
+            loc`gensym63 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+              line: 957, column: 6)
+            ploc`gensym63 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7)"
+          bind instantiationInfo
+          mixin failedAssertImpl
+          {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+                   line: 957, column: 6).}:
+            if not (artifact_553649437.kind == vak_1):
+              failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(957, 7) `artifact_553649437.kind == vak_1` ")
+          artifact_553649437.value_1)), continuation: Flow[VecherinkaArtifact_553649288](
+        kind: fk_ref, name: "audit_fix_loop"))))))]
+  discard input_553649442
+  echo ["we have ", len(data_553649443), " top level procs"]
 
