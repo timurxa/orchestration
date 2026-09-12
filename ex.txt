@@ -1,0 +1,48 @@
+let vecherinka_data = VecherinkaData(@[
+  ...,
+  Flow(
+    kind: fk_flow,
+    name: "so_test",
+    domain: vtk_first,
+    codomain: vtk_second,
+    entry: false,
+    root: Flow(
+      kind: fk_so,
+      domain: vtk_first,
+      codomain: vtk_Second,
+      fn: proc (input: First): Flow {.nimcall.} =
+        let e = Flow(
+	  kind: fk_fanout,
+	  domain: vtk_none,
+	  codomain: vtk_second_third
+	  argument: Flow(
+	    kind: fk_raw,
+	    value: Artifact(
+	      kind: vtk_first,
+	      vtkfirst: First()
+	    )
+	  ),
+	  operations: @[
+	    Flow(
+	      kind: fk_ref,
+	      name: "first_second",
+	    ),
+	    Flow(
+	      kind: fk_ref,
+	      name: "first_third_1",
+	    ),
+	  ]
+	)
+	echo "hi"
+	discard input
+	Flow(
+	  kind: fk_pure,
+	  value: Artifact(
+	    kind: vtk_second,
+	    value: Second()
+	  )
+	)
+    )
+  ),
+  ...
+])

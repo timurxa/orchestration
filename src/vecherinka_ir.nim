@@ -4,6 +4,7 @@
 
 import std/[macros, assertions, sugar]
 import fusion/matching
+import codex_json
 import it_projection, lift_pattern_typed
 
 type
@@ -29,9 +30,18 @@ type
   FlowSpec*[A, B] = object
     ir*: FlowIR
   ProfileSpec* = object
+    model*: string
+    effort*: ReasoningEffort
   PartialModelCallSyntax*[A, B] = object
   here* = object
   PartialLiftSyntax*[Pattern: static string] = object
+  Location* = distinct string
+
+proc minimal*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_minimal)
+proc low*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_low)
+proc medium*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_medium)
+proc high*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_high)
+proc xhigh*(model: string): ProfileSpec = ProfileSpec(model: model, effort: re_xhigh)
 
 template flow_ir*(id: int, entry: bool) {.pragma.}
 template `~>`*(A, B: untyped): untyped = FlowSpec[A, B]
@@ -209,6 +219,84 @@ macro lift*(pattern: untyped): untyped =
   result = quote do:
     PartialLiftSyntax[`spelling`]()
 
+type
+  FlowWalkPhase = enum
+    fwpGatherTypes,
+    fwpProcess
+  FlowWalkContext = object
+    phase: FlowWalkPhase
+    flow_spec_symbol: NimNode
+    flow_types: seq[NimNode]
+    encountered: int
+
+proc flow_spec_type(node, flow_spec_symbol: NimNode): NimNode =
+  ## `getTypeInst` is only safe on typed expression nodes. Type syntax,
+  ## pragmas, and some macro/template calls have no type and fail hard.
+  if node.kind == nnkSym and node.symKind notin {
+      nskParam, nskTemp, nskVar, nskLet, nskConst, nskResult, nskField,
+      nskForVar}:
+    return nil
+  if node.kind in nnkCallKinds and node.len > 0 and
+      node[0].kind == nnkSym and node[0].symKind in {nskTemplate, nskMacro}:
+    return nil
+  if node.kind in nnkCallKinds and node.len > 0 and
+      eqIdent(node[0], "typeof"):
+    return nil
+  if node.kind != nnkSym and node.kind notin nnkCallKinds and
+      node.kind notin nnkLiterals and
+      node.kind notin {nnkObjConstr, nnkPar, nnkDotExpr, nnkCast, nnkConv}:
+    return nil
+
+  try:
+    let type_inst = node.getTypeInst
+    if type_inst.kind == nnkBracketExpr and type_inst.len == 3 and
+        type_inst[0].kind == nnkSym and type_inst[0] == flow_spec_symbol:
+      return type_inst
+  except CatchableError:
+    discard
+  nil
+
+proc register_flow_type(types: var seq[NimNode]; type_node: NimNode) =
+  for known in types:
+    if sameType(known, type_node):
+      return
+  types.add type_node
+
+proc walk_flow_specs(node: NimNode; context: var FlowWalkContext) =
+  let flow_type = flow_spec_type(node, context.flow_spec_symbol)
+  if not flow_type.isNil:
+    inc context.encountered
+    case context.phase
+    of fwpGatherTypes:
+      register_flow_type(context.flow_types, flow_type[1])
+      register_flow_type(context.flow_types, flow_type[2])
+      echo "FlowSpec node=", $node.kind,
+        " type=", flow_type.repr,
+        " domain=", flow_type[1].repr,
+        " codomain=", flow_type[2].repr
+    of fwpProcess:
+      # Lowering will consume canonical expression roots. Typed AST wrappers
+      # can expose one source occurrence as Sym, ObjConstr, and Call.
+      discard
+
+  for child in node:
+    walk_flow_specs(child, context)
+
+macro vecherinka_runtime*(body: typed): untyped =
+  dump body.repr
+  var context = FlowWalkContext(
+    phase: fwpGatherTypes,
+    flow_spec_symbol: bindSym("FlowSpec"))
+  walk_flow_specs(body, context)
+  echo "FlowSpec types gathered=", context.flow_types.len
+
+  context.phase = fwpProcess
+  context.encountered = 0
+  walk_flow_specs(body, context)
+  echo "FlowSpec nodes processed=", context.encountered
+
+  result = body
+
 macro vecherinka*(body: untyped): untyped =
   result = newEmptyNode()
   var refs, procs = newStmtList()
@@ -241,4 +329,5 @@ macro vecherinka*(body: untyped): untyped =
     refs.add node
 
   result = quote do:
-    `refs`
+    vecherinka_runtime:
+      `refs`

@@ -1,52 +1,77 @@
 {.experimental: "callOperator".}
 
-import std/[macros, options]
+import std/macros
 import vecherinka_ir
 import it_projection
-import lift_pattern_typed
 
 type
-  First = object
-  Second = object
-  Third = object
-    first: First
+  ImplementationRequest = distinct string
+  Codebase = distinct Location
+  Issues = distinct seq[string]
+  Audit = object
+    case ok: bool
+    of true: discard
+    of false: issues: Issues
 
-let cheap = ProfileSpec()
+const cheap = "gpt-5.6-luna".minimal
 
-expandMacros: vecherinka:
-  > first_second First ~> Second:
-    cheap[First, Second]("")
+vecherinka:
+  > fix (Codebase, Issues) ~> Codebase:
+    cheap[(Codebase, Issues), Codebase]("Read the issues and fix them in the codebase.")
 
-  > first_third First ~> Third:
-    cheap[First, Third]("")
+  > audit (ImplementationRequest, Codebase) ~> Audit:
+    cheap[(ImplementationRequest, Codebase), Audit]("Audit the codebase for issues based on the implementation request")
 
-  > second_third Second ~> Third:
-    cheap[Second, Third]("")
-  
-  > first_third_1 First ~> Third:
-    first_second >>> cheap[Second, Third]("")
+  > audit_fix_loop (ImplementationRequest, Codebase) ~> Codebase {.entry.}:
+    fan(it((ImplementationRequest, Codebase)), audit) >>>
+      (so(((ImplementationRequest, Codebase), Audit), Codebase, input) do:
+        let ((req, code), audit) = input
+        if audit.ok: pure(code)
+        else: (req, (code, audit.issues)) >>>
+          lift((ImplementationRequest, here))[fix] >>> audit_fix_loop)
 
-  > first_third_2 First ~> Third:
-    first_second >>> second_third
-
-  > first_second_third_fanout_2 First ~> (Second, Third):
-    fan first_second, first_third
-
-  > so_test First ~> Second:
-    so(First, Second, input) do:
-      let e = (First()) >>> fan(first_second, first_third_1)
-      echo "hi"
-      discard input
-      pure(Second())
-  
-  > lens_multiple (First, Third) ~> First:
-    it((First, Third))[1][first]
-
-  > lift_identity (First, Second) ~> (First, Second):
-    lift((here, Second))[it(First)]
-
-  > entry_flow First ~> Second {.entry.}:
-    cheap[First, Second]("entry")
+# type
+#   First = object
+#   Second = object
+#   Third = object
+#     first: First
+#
+# let cheap = "gpt-5.6-luna".minimal
+#
+# expandMacros: vecherinka:
+#   > first_second First ~> Second:
+#     cheap[First, Second]("")
+#
+#   > first_third First ~> Third:
+#     cheap[First, Third]("")
+#
+#   > second_third Second ~> Third:
+#     cheap[Second, Third]("")
+#
+#   > first_third_1 First ~> Third:
+#     first_second >>> cheap[Second, Third]("")
+#
+#   > first_third_2 First ~> Third:
+#     first_second >>> second_third
+#
+#   > first_second_third_fanout_2 First ~> (Second, Third):
+#     fan first_second, first_third
+#
+#   > so_test First ~> Second:
+#     so(First, Second, input) do:
+#       let e = (First()) >>> fan(first_second, first_third_1)
+#       echo "hi"
+#       discard input
+#       pure(Second())
+#
+#   > lens_multiple (First, Third) ~> First:
+#     it((First, Third))[1][first]
+#
+#   > lift_identity (First, Second) ~> (First, Second):
+#     lift((here, Second))[it(First)]
+#
+#   > entry_flow First ~> Second {.entry.}:
+#     cheap[First, Second]("entry")
 
 when defined(vecherinka_ir_tests):
   type
