@@ -1,0 +1,151 @@
+lift_pattern nodes=3 here_count=1
+  tuple
+    [0]
+      type ImplementationRequest
+    [1]
+      here
+FlowSpec node=nnkSym type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
+FlowSpec node=nnkObjConstr type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
+FlowSpec node=nnkCall type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
+FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
+FlowSpec node=nnkObjConstr type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
+FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
+FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
+FlowSpec node=nnkObjConstr type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
+FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
+FlowSpec node=nnkSym type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
+FlowSpec node=nnkCall type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
+FlowSpec node=nnkSym type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
+FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
+FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
+FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
+FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
+FlowSpec node=nnkInfix type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
+FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase),
+         ((ImplementationRequest, Codebase), Audit)] domain=(ImplementationRequest, Codebase) codomain=((ImplementationRequest, Codebase), Audit)
+FlowSpec node=nnkObjConstr type=FlowSpec[(ImplementationRequest, Codebase), (ImplementationRequest, Codebase)] domain=(ImplementationRequest, Codebase) codomain=(ImplementationRequest, Codebase)
+FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, Codebase), (ImplementationRequest, Codebase)] domain=(ImplementationRequest, Codebase) codomain=(ImplementationRequest, Codebase)
+FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Audit] domain=(ImplementationRequest, Codebase) codomain=Audit
+FlowSpec node=nnkObjConstr type=FlowSpec[((ImplementationRequest, Codebase), Audit), Codebase] domain=((ImplementationRequest, Codebase), Audit) codomain=Codebase
+FlowSpec node=nnkCall type=FlowSpec[((ImplementationRequest, Codebase), Audit), Codebase] domain=((ImplementationRequest, Codebase), Audit) codomain=Codebase
+FlowSpec node=nnkCall type=FlowSpec[void, Codebase] domain=void codomain=Codebase
+FlowSpec node=nnkSym type=FlowSpec[void, Codebase] domain=void codomain=Codebase
+FlowSpec node=nnkCall type=FlowSpec[void, Codebase] domain=void codomain=Codebase
+FlowSpec node=nnkInfix type=FlowSpec[void, Codebase] domain=void codomain=Codebase
+FlowSpec node=nnkInfix type=FlowSpec[void, (ImplementationRequest, Codebase)] domain=void codomain=(ImplementationRequest, Codebase)
+FlowSpec node=nnkObjConstr type=FlowSpec[(ImplementationRequest, (Codebase, Issues)),
+         (ImplementationRequest, Codebase)] domain=(ImplementationRequest, (Codebase, Issues)) codomain=(ImplementationRequest, Codebase)
+FlowSpec node=nnkCall type=FlowSpec[(ImplementationRequest, (Codebase, Issues)),
+         (ImplementationRequest, Codebase)] domain=(ImplementationRequest, (Codebase, Issues)) codomain=(ImplementationRequest, Codebase)
+FlowSpec node=nnkSym type=FlowSpec[(Codebase, Issues), Codebase] domain=(Codebase, Issues) codomain=Codebase
+FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
+FlowSpec node=nnkSym type=FlowSpec[void, Codebase] domain=void codomain=Codebase
+FlowSpec node=nnkSym type=FlowSpec[(ImplementationRequest, Codebase), Codebase] domain=(ImplementationRequest, Codebase) codomain=Codebase
+FlowSpec types gathered=7
+FlowSpec nodes processed=34
+
+type
+  VecherinkaArtifactKind = enum
+    vak_0, vak_1, vak_2, vak_3, vak_4, vak_5, vak_6
+  VecherinkaArtifact = object
+    case kind: VecherinkaArtifactKind
+    of vak_0:
+      value_0: (Codebase, Issues)
+    of vak_1:
+      value_1: Codebase
+    of vak_2:
+      value_2: (ImplementationRequest, Codebase)
+    of vak_3:
+      value_3: Audit
+    of vak_4:
+      value_4: ((ImplementationRequest, Codebase), Audit)
+    of vak_5:
+      value_5: void
+    of vak_6:
+      value_6: (ImplementationRequest, (Codebase, Issues))
+type
+  FakeWork_553649165 = object
+    result_index*: int
+    input*: VecherinkaArtifact
+proc lift_destructure_553649166(input_553649168: VecherinkaArtifact): seq[
+    FakeWork_553649165] {.nimcall.} =
+  let original_553649169 = block:
+    let artifact_553649176 = input_553649168
+    const
+      loc`gensym27 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+        line: 449, column: 6)
+      ploc`gensym27 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(449, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+             line: 449, column: 6).}:
+      if not (artifact_553649176.kind == vak_6):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(449, 7) `artifact_553649176.kind == vak_6` ")
+    artifact_553649176.value_6
+  var next_index_553649170 = 0
+  discard
+  let result_index_553649185 = next_index_553649170
+  inc next_index_553649170, 1
+  add(result, FakeWork_553649165(result_index: result_index_553649185, input: VecherinkaArtifact(
+      kind: vak_0, value_0: original_553649169[1])))
+
+proc lift_construct_553649167(results_553649186: seq[VecherinkaArtifact];
+    original_553649187: (ImplementationRequest, (Codebase, Issues))): (
+    ImplementationRequest, Codebase) {.nimcall.} =
+  result =
+    var next_index_553649188 = 0
+    (original_553649187[0],
+      let result_index_553649198 = next_index_553649188
+      inc next_index_553649188, 1
+      block:
+        let artifact_553649199 = results_553649186[result_index_553649198]
+        const
+          loc`gensym30 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+            line: 449, column: 6)
+          ploc`gensym30 = "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(449, 7)"
+        bind instantiationInfo
+        mixin failedAssertImpl
+        {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim",
+                 line: 449, column: 6).}:
+          if not (artifact_553649199.kind == vak_1):
+            failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_ir.nim(449, 7) `artifact_553649199.kind == vak_1` ")
+        artifact_553649199.value_1)
+
+let fix = FlowSpec[(Codebase, Issues), Codebase](
+    ir: FlowIR(kind: firk_ref, id: 0, entry: zeroDefault([type node])))
+let audit = FlowSpec[(ImplementationRequest, Codebase), Audit](
+    ir: FlowIR(kind: firk_ref, id: 1, entry: zeroDefault([type node])))
+let audit_fix_loop = FlowSpec[(ImplementationRequest, Codebase), Codebase](
+    ir: FlowIR(kind: firk_ref, id: 2, entry: zeroDefault([type node])))
+proc flow_553648194(): (Codebase, Issues) ~> Codebase {.flow_ir(0, false).} =
+  result = ()(cheap[(Codebase, Issues), Codebase],
+              "Read the issues and fix them in the codebase.")
+
+proc flow_553648195(): (ImplementationRequest, Codebase) ~> Audit {.
+    flow_ir(1, false).} =
+  result = ()(cheap[(ImplementationRequest, Codebase), Audit], "Audit the codebase for issues based on the implementation request")
+
+proc flow_553648196(): (ImplementationRequest, Codebase) ~> Codebase {.
+    flow_ir(2, true).} =
+  result = fanout((FlowSpec[(ImplementationRequest, Codebase), typeof do:
+    block:
+      var it_input: (ImplementationRequest, Codebase)
+      it_input](ir: FlowIR(kind: firk_it,
+                           path: ItPath(groups: seq[ItSelectorGroup](@[])))),
+                   audit)) >>>
+      FlowSpec[((ImplementationRequest, Codebase), Audit), Codebase](ir: FlowIR(
+      kind: firk_so, fn: cast[pointer](proc (
+      input: ((ImplementationRequest, Codebase), Audit)): FlowSpec[void,
+      Codebase] = result =
+    let
+      tmpTuple_553648694 = input
+      tmpTuple_553648695 = tmpTuple_553648694[0]
+      req = tmpTuple_553648695[0]
+      code = tmpTuple_553648695[1]
+      audit = tmpTuple_553648694[1]
+    if audit.ok: pure(code) else: (req, (code, audit.issues)) >>>
+        FlowSpec[(ImplementationRequest, (Codebase, Issues)),
+                 (ImplementationRequest, Codebase)](ir: FlowIR(kind: firk_lift,
+        pattern: "(ImplementationRequest, here)", inner: fix.ir)) >>>
+        audit_fix_loop)))
+
