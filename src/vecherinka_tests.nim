@@ -25,7 +25,7 @@ type
 expandMacros: vecherinka(solve):
   > basic Simple ~> Simple {.entry.}:
     cheap[Simple, Simple]("Write a welcome message into 'message' field.")
-  # > fix (Codebase, Issues) ~> Codebase {.entry.}:
+  # > fix (Codebase, Issues) ~> Codebase:
   #   cheap[(Codebase, Issues), Codebase]("Read the issues and fix them in the codebase.")
   #
   # > audit (ImplementationRequest, Codebase) ~> Audit:

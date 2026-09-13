@@ -117,5 +117,3 @@ proc solve(input_553648697: Simple;
         failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1548, 7) `artifact_553648702.kind == vak_0` ")
     artifact_553648702.value_0
 
-test: calling generated solve
-test: generated solve returned Wrote the welcome message containing “duck” to [message](/Users/alex/areas/productive/orchestration/run-YNXyXACG/artifact-1/message).
