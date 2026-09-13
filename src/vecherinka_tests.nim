@@ -15,16 +15,22 @@ type
 const cheap = "gpt-5.6-luna".minimal
 
 expandMacros: vecherinka(solve):
-  > fix (Codebase, Issues) ~> Codebase:
+  > fix (Codebase, Issues) ~> Codebase {.entry.}:
     cheap[(Codebase, Issues), Codebase]("Read the issues and fix them in the codebase.")
+  #
+  # > audit (ImplementationRequest, Codebase) ~> Audit:
+  #   cheap[(ImplementationRequest, Codebase), Audit]("Audit the codebase for issues based on the implementation request")
+  #
+  # > audit_fix_loop (ImplementationRequest, Codebase) ~> Codebase {.entry.}:
+  #   fan(it((ImplementationRequest, Codebase)), audit) >>>
+  #     (so(((ImplementationRequest, Codebase), Audit), Codebase, input) do:
+  #       let ((req, code), audit) = input
+  #       if audit.ok: pure(code)
+  #       else: (req, (code, audit.issues)) >>>
+  #         lift((ImplementationRequest, here))[fix] >>> audit_fix_loop)
 
-  > audit (ImplementationRequest, Codebase) ~> Audit:
-    cheap[(ImplementationRequest, Codebase), Audit]("Audit the codebase for issues based on the implementation request")
+let implementation_request = ImplementationRequest("")
+let codebase = Codebase(Location(""))
+let issues = Issues(@[""])
 
-  > audit_fix_loop (ImplementationRequest, Codebase) ~> Codebase {.entry.}:
-    fan(it((ImplementationRequest, Codebase)), audit) >>>
-      (so(((ImplementationRequest, Codebase), Audit), Codebase, input) do:
-        let ((req, code), audit) = input
-        if audit.ok: pure(code)
-        else: (req, (code, audit.issues)) >>>
-          lift((ImplementationRequest, here))[fix] >>> audit_fix_loop)
+solve((codebase, issues))

@@ -232,6 +232,15 @@ vecherinka:
     pure(First()) >>> profile[First, Second]("after pure")
 
 doAssert pure_value.kind == fk_top
+
+vecherinka:
+  > non_entry_flow First ~> Second:
+    profile[First, Second]("non-entry")
+  > entry_flow First ~> Third {.entry.}:
+    profile[First, Third]("entry")
+
+doAssert non_entry_flow.entry == false
+doAssert entry_flow.entry == true
 doAssert pure_value.body.kind == fk_raw
 doAssert pure_value.body.continuation.isNil
 doAssert pure_local.body.kind == fk_raw

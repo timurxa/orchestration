@@ -414,8 +414,11 @@ proc first_flow_spec_type(node, flow_spec_symbol: NimNode): NimNode =
 proc walk_flow_specs(node: NimNode; context: var FlowWalkContext) =
   let flow_type = flow_spec_type(node, context.flow_spec_symbol)
   if not flow_type.isNil:
-    register_flow_type(context.flow_types, flow_type[1])
-    register_flow_type(context.flow_types, flow_type[2])
+    ## `void` is a flow endpoint, not a runtime artifact variant.
+    if not flow_type[1].is_named("void"):
+      register_flow_type(context.flow_types, flow_type[1])
+    if not flow_type[2].is_named("void"):
+      register_flow_type(context.flow_types, flow_type[2])
 
   for child in node:
     walk_flow_specs(child, context)
@@ -566,8 +569,18 @@ proc artifact_info(
 
 proc is_void_type(type_expr: NimNode): bool
 
+proc emit_debug_value(type_expr, output: NimNode): NimNode =
+  ## Keep debug materialization typed. String outputs get visible evidence;
+  ## other types use a legal typed zero until per-type factories are added.
+  if type_expr.is_named("string"):
+    let tool_name = newDotExpr(copyNimTree(output), ident("tool_name"))
+    return newTree(nnkInfix, ident("&"), newLit("debug:"), tool_name)
+  newTree(nnkCall,
+    newTree(nnkBracketExpr, bindSym"default_debug_value",
+      copyNimTree(type_expr)))
+
 proc lower_model_call(
-    registry: ArtifactRegistry;
+    registry: var ArtifactRegistry;
     flow_type, profile, prompt: NimNode
 ): NimNode =
   let artifact_name = registry.artifact_name
@@ -575,6 +588,18 @@ proc lower_model_call(
   let prompt_expr = copyNimTree(prompt)
   let input_type = copyNimTree(flow_type[1])
   let output_type = copyNimTree(flow_type[2])
+  let output_info = registry.artifact_info(output_type)
+  var output_kind_ordinal = -1
+  for index, info in registry.types:
+    if sameType(info.type_expr, output_type):
+      output_kind_ordinal = index
+      break
+  if output_kind_ordinal < 0:
+    error("model output type is missing from Artifact registry: " &
+      output_type.repr, output_type)
+  let output_kind_value = newLit(output_kind_ordinal)
+  let output_kind_type = registry.kind_name
+  let output_value_name = output_info.value_name
   let input = genSym(nskParam, "model_artifact")
   let output = genSym(nskParam, "model_value")
   let unpacked = if input_type.is_void_type:
@@ -596,13 +621,124 @@ proc lower_model_call(
     (proc (`output`: `output_type`): `artifact_name` {.nimcall.} =
       `packed`
     )
+
+  let materializer_kind = genSym(nskParam, "model_output_kind")
+  let materializer_output = genSym(nskParam, "model_output")
+  let debug_value = emit_debug_value(output_type, materializer_output)
+  let materializer_body = quote do:
+    case `materializer_kind`
+    of `output_kind_value`:
+      result = `artifact_name`(
+        kind: `output_kind_type`(`output_kind_value`),
+        `output_value_name`: `debug_value`
+      )
+    else:
+      doAssert false, "unexpected model output kind"
+  let materializer = quote do:
+    (proc (`materializer_kind`: int; `materializer_output`: LlmOutput):
+        `artifact_name` {.nimcall.} =
+      `materializer_body`
+    )
+
+  let submit_context = genSym(nskParam, "model_context")
+  let submit_request_id = genSym(nskParam, "model_request_id")
+  let submit_spec_pointer = genSym(nskParam, "model_spec")
+  let typed_spec_pointer = genSym(nskLet, "typed_model_spec")
+  let submit_spec = newTree(nnkDerefExpr, copyNimTree(typed_spec_pointer))
+  let submit_input = genSym(nskLet, "model_typed_input")
+  let submit_unpacked = if input_type.is_void_type:
+    newEmptyNode()
+  else:
+    registry.emit_artifact_unpack(input_type, newDotExpr(
+      copyNimTree(submit_spec), ident("input")))
+  let typed_context = if input_type.is_void_type:
+    newLit("")
+  else:
+    quote do:
+      $`submit_input`
+  let input_type_name = newLit(input_type.repr)
+  let output_type_name = newLit(output_type.repr)
+  let tools = newCall(bindSym"debug_tool_registry",
+    input_type_name, output_type_name)
+  let typed_context_name = genSym(nskLet, "typed_model_context")
+  let llm_spec_name = genSym(nskLet, "llm_spec")
+  let llm_spec_value = quote do:
+    LlmCallSpec[`artifact_name`](
+      profile: `submit_spec`.profile,
+      prompt: `submit_spec`.prompt,
+      typed_context: `typed_context`,
+      tools: `tools`,
+      output_kind: `submit_spec`.output_kind,
+      materialize: `submit_spec`.debug_output
+    )
+  let submit_llm_symbol = bindSym"submit_llm"
+  let submit_body = if input_type.is_void_type:
+    quote do:
+      let `typed_spec_pointer` = cast[ptr ModelCallSpec[`artifact_name`]](
+        `submit_spec_pointer`)
+      let `typed_context_name` = cast[RuntimeContext[`artifact_name`]](
+        `submit_context`)
+      let `llm_spec_name` = `llm_spec_value`
+      `submit_llm_symbol`(`typed_context_name`, `submit_request_id`,
+        `llm_spec_name`)
+  else:
+    quote do:
+      let `typed_spec_pointer` = cast[ptr ModelCallSpec[`artifact_name`]](
+        `submit_spec_pointer`)
+      let `submit_input` = `submit_unpacked`
+      let `typed_context_name` = cast[RuntimeContext[`artifact_name`]](
+        `submit_context`)
+      let `llm_spec_name` = `llm_spec_value`
+      `submit_llm_symbol`(`typed_context_name`, `submit_request_id`,
+        `llm_spec_name`)
+  let submit = quote do:
+    (proc (`submit_context`: pointer;
+        `submit_request_id`: RequestId;
+        `submit_spec_pointer`: pointer) {.nimcall.} =
+      `submit_body`
+    )
+  let prepare_input = genSym(nskParam, "prepare_model_artifact")
+  let prepare_unpacked = if input_type.is_void_type:
+    newEmptyNode()
+  else:
+    registry.emit_artifact_unpack(input_type, prepare_input)
+  let prepared_input = genSym(nskLet, "prepared_model_input")
+  let prepare_body = if input_type.is_void_type:
+    quote do:
+      discard `prepare_input`
+      ModelCallSpec[`artifact_name`](
+        profile: `profile_expr`,
+        prompt: `prompt_expr`,
+        input: `prepare_input`,
+        output_kind: `output_kind_value`,
+        debug_output: `materializer`,
+        submit: cast[pointer](`submit`)
+      )
+  else:
+    quote do:
+      let `prepared_input` = `prepare_unpacked`
+      discard `prepared_input`
+      ModelCallSpec[`artifact_name`](
+        profile: `profile_expr`,
+        prompt: `prompt_expr`,
+        input: `prepare_input`,
+        output_kind: `output_kind_value`,
+        debug_output: `materializer`,
+        submit: cast[pointer](`submit`)
+      )
+  let prepare = quote do:
+    (proc (`prepare_input`: `artifact_name`):
+        ModelCallSpec[`artifact_name`] {.nimcall.} =
+      `prepare_body`
+    )
   quote do:
     Flow[`artifact_name`](
       kind: fk_model,
       profile: `profile_expr`,
       prompt: `prompt_expr`,
       packer: cast[pointer](`packer`),
-      unpacker: cast[pointer](`unpacker`)
+      unpacker: cast[pointer](`unpacker`),
+      prepare: `prepare`
     )
 
 proc lower_it(
@@ -853,10 +989,12 @@ proc lower_flow_pair(
     pair.proc_info.body, context, rewrite_flow_node)
   let artifact_name = context.artifact_registry.artifact_name
   let root_name = newLit(pair.ref_info.name)
+  let entry = newLit(pair.ref_info.entry)
   let top_flow = quote do:
     Flow[`artifact_name`](
       kind: fk_top,
       root: `root_name`,
+      entry: `entry`,
       body: `transformed_body`
     )
   top_flow
@@ -1359,7 +1497,10 @@ proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
 
   if solve.isNil:
     let transformed_body = map_nim_tree(body, context, rewrite_flow_node)
-    return newStmtList(artifact_type, transformed_body)
+    var generated = newStmtList()
+    generated.add(artifact_type)
+    generated.add(transformed_body)
+    return generated
 
   let proc_name = if solve.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
     ident(solve.strVal)
@@ -1393,15 +1534,26 @@ proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
   let data_type = quote do:
     seq[Flow[`artifact_name`]]
   let input_name = genSym(nskParam, "input")
+  let transport_name = genSym(nskParam, "transport")
   let data_name = genSym(nskLet, "data")
+  let input_artifact_name = genSym(nskLet, "input_artifact")
+  let input_artifact = context.artifact_registry.emit_artifact_pack(
+    entry_domain, input_name)
+  let execute_flows = bindSym"execute_flows"
   let proc_body = quote do:
     let `data_name`: `data_type` = `flow_sequence`
-    discard `input_name`
+    let `input_artifact_name` = `input_artifact`
     echo "we have ", `data_name`.len, " top level procs"
+    discard `execute_flows`(`data_name`, `input_artifact_name`,
+      transport = `transport_name`)
   let generated_proc = quote do:
-    proc `proc_name`(`input_name`: `entry_domain`) =
+    proc `proc_name`(`input_name`: `entry_domain`;
+        `transport_name`: LlmTransport[`artifact_name`] = nil) =
       `proc_body`
-  newStmtList(artifact_type, generated_proc)
+  var generated = newStmtList()
+  generated.add(artifact_type)
+  generated.add(generated_proc)
+  generated
 
 macro vecherinka_runtime*(body: typed): untyped =
   lower_vecherinka_runtime(body, nil)
