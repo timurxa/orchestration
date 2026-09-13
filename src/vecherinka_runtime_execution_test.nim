@@ -10,6 +10,9 @@ var observed_tool = ""
 var observed_output_kind = -1
 var observed_materialized = false
 var observed_model_working_dirs: seq[Path] = @[]
+var stale_tool_data: pointer
+var stale_tool_callback: DynamicToolCallback
+var stale_tool_context: ToolCallContext
 let expected_source_root = Path(os.expandFilename(os.getCurrentDir()))
 
 proc artifact_value[A](context: RuntimeContext[A]; id: ArtifactID): A =
@@ -28,7 +31,10 @@ proc inspect_generated_transport[A](
   doAssert spec.tools.len == 1
   doAssert spec.tools[0].name == "finish_work"
   doAssert spec.tools[0].input_schema["type"].getStr == "string"
+  doAssert not spec.tools[0].data.isNil
   doAssert not spec.tools[0].callback.isNil
+  stale_tool_data = spec.tools[0].data
+  stale_tool_callback = spec.tools[0].callback
   let decoded = spec.materialize(spec.output_kind, LlmOutput(
     tool_name: "finish_work",
     arguments: %*"generated"))
@@ -38,7 +44,8 @@ proc inspect_generated_transport[A](
     arguments: %*42))
   doAssert not rejected.ok
   var tool_context: ToolCallContext
-  tool_context.request_id = RequestId(kind: rid_integer, integer_value: 900)
+  tool_context.request_id = RequestId(
+    kind: rid_string, string_value: "tool-request-900")
   tool_context.params.tool = "finish_work"
   tool_context.params.arguments = %*"generated"
   spec.tools[0].callback(spec.tools[0].data, tool_context)
@@ -409,6 +416,7 @@ block:
   generated_solve(
     GeneratedInput(value: "actual"),
     inspect_generated_transport)
+  stale_tool_callback(stale_tool_data, stale_tool_context)
   doAssert observed_materialized
   doAssert observed_tool == "finish_work"
   doAssert observed_output_kind >= 0

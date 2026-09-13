@@ -109,22 +109,26 @@ type
     tool_name*: string
     arguments*: JsonNode
 
+  LlmToolBinding* = object
+    ## Vecherinka-owned state behind a dynamic tool handle. The handle itself
+    ## is an opaque integer encoded as a pointer and is never dereferenced.
+    id*: uint64
+    context*: pointer
+    request_id*: RequestId
+    output_kind*: int
+    materializer*: pointer
+
   ModelMaterialization*[A] = object
-    ok*: bool
-    value*: A
-    error*: string
+    case ok*: bool
+    of true:
+      value*: A
+    of false:
+      error*: string
 
   ModelMaterializer*[A] = proc(
     output_kind: int;
     output: LlmOutput
   ): ModelMaterialization[A] {.nimcall.}
-
-  LlmToolData* = ref object
-    ## Opaque callback state. Runtime context keeps GC ownership.
-    context*: pointer
-    request_id*: RequestId
-    output_kind*: int
-    materializer*: pointer
 
   LlmCallSpec*[A] = object
     profile*: ProfileSpec
@@ -151,6 +155,7 @@ type
       output*: LlmOutput
       materialize*: ModelMaterializer[A]
       tool_request_id*: Option[RequestId]
+      tool_binding_id*: Option[uint64]
       output_meta*: Option[ArtifactMeta]
     of rev_model_error:
       error_message*: string
@@ -181,6 +186,7 @@ type
         output_arguments*: string
         output_materializer*: pointer
         tool_request_id*: Option[RequestId]
+        tool_binding_id*: Option[uint64]
         output_meta*: Option[ArtifactMeta]
       of rev_model_error:
         error_message*: string
@@ -231,7 +237,6 @@ type
     run_dir*: Path
     next_artifact_id*: ArtifactID
     codex_runtime*: ptr CodexRuntime
-    llm_tool_data*: seq[LlmToolData]
 
   ModelSubmitter*[A] = proc(
     context: RuntimeContext[A];
@@ -259,6 +264,51 @@ type
     output*: Option[ArtifactID]
     finished*: bool
     failed*: bool
+
+when sizeof(pointer) < sizeof(uint64):
+  {.fatal: "Vecherinka dynamic tool handles require 64-bit pointers".}
+
+var llm_tool_bindings = initTable[uint64, LlmToolBinding]()
+var next_llm_tool_binding_id: uint64
+
+proc llm_tool_handle(binding_id: uint64): pointer {.inline.} =
+  cast[pointer](cast[uint](binding_id))
+
+proc llm_tool_binding_id(handle: pointer): uint64 {.inline.} =
+  cast[uint64](cast[uint](handle))
+
+proc register_llm_tool_binding*(context: pointer; request_id: RequestId;
+    output_kind: int; materializer: pointer): pointer =
+  ## IDs are never reused: a stale DynamicTool handle can only miss lookup.
+  if next_llm_tool_binding_id == high(uint64):
+    raise newException(OverflowDefect, "LLM tool binding ID space exhausted")
+  inc next_llm_tool_binding_id
+  let binding_id = next_llm_tool_binding_id
+  llm_tool_bindings[binding_id] = LlmToolBinding(
+    id: binding_id,
+    context: context,
+    request_id: request_id,
+    output_kind: output_kind,
+    materializer: materializer)
+  llm_tool_handle(binding_id)
+
+proc lookup_llm_tool_binding*(handle: pointer): Option[LlmToolBinding] =
+  ## Callback and registry mutation are serialized by the runtime coordinator.
+  let binding_id = llm_tool_binding_id(handle)
+  if binding_id == 0 or not llm_tool_bindings.hasKey(binding_id):
+    return none(LlmToolBinding)
+  some(llm_tool_bindings[binding_id])
+
+proc retire_llm_tool_binding*(binding_id: uint64) =
+  llm_tool_bindings.del(binding_id)
+
+proc retire_llm_tool_bindings*(context: pointer) =
+  var retired: seq[uint64] = @[]
+  for binding_id, binding in llm_tool_bindings.pairs:
+    if binding.context == context:
+      retired.add(binding_id)
+  for binding_id in retired:
+    llm_tool_bindings.del(binding_id)
 
 proc open_global_events*[A](context: RuntimeContext[A]) =
   ## Open once before reader threads start; close only after all readers join.
@@ -301,6 +351,7 @@ proc enqueue_runtime_event*[A](
       output_arguments: $event.output.arguments,
       output_materializer: cast[pointer](event.materialize),
       tool_request_id: event.tool_request_id,
+      tool_binding_id: event.tool_binding_id,
       output_meta: event.output_meta)
   of rev_model_error:
     global_event = GlobalEvent(
@@ -320,6 +371,7 @@ proc enqueue_llm_output_event*[A](
     request_id: RequestId;
     output_kind: int;
     materialize: ModelMaterializer[A];
+    binding_id: uint64;
     tool_context: ToolCallContext
 ) {.gcsafe.} =
   ## Callback only copies transport data. Typed decoding stays owner-thread.
@@ -333,27 +385,9 @@ proc enqueue_llm_output_event*[A](
         arguments: tool_context.params.arguments),
       materialize: materialize,
       tool_request_id: some(tool_context.request_id),
+      tool_binding_id: some(binding_id),
       output_meta: none(ArtifactMeta))
     enqueue_runtime_event(context, event)
-
-proc new_llm_tool_data*(
-    context: pointer;
-    request_id: RequestId;
-    output_kind: int;
-    materializer: pointer
-): LlmToolData =
-  let data = LlmToolData(
-    context: context,
-    request_id: request_id,
-    output_kind: output_kind,
-    materializer: materializer)
-  data
-
-proc retain_llm_tool_data*[A](context: RuntimeContext[A]; data: LlmToolData) =
-  context.llm_tool_data.add(data)
-
-proc release_llm_tool_data*[A](context: RuntimeContext[A]) =
-  context.llm_tool_data.setLen(0)
 
 proc recv_global_event*[A](context: RuntimeContext[A]): GlobalEvent =
   context.events.recv()
@@ -627,7 +661,6 @@ proc new_runtime_context*[A](
   result.run_dir = run_dir
   result.next_artifact_id = 0
   result.codex_runtime = nil
-  result.llm_tool_data = @[]
 
 proc create_run_directory*(source_root: Path): Path =
   ## Keep run state in a unique child of the program working directory.
@@ -805,14 +838,18 @@ proc fail_plan[A](plan: var WorkPlan[A]; message: string) =
   plan.finished = true
   raise newException(ValueError, message)
 
+template plan_assert[A](plan: var WorkPlan[A]; condition: bool;
+    message: string) =
+  ## Invariant failure is terminal; fail_plan raises, so callers need no return.
+  if not condition:
+    fail_plan(plan, message)
+
 proc new_join_state[A](
     plan: var WorkPlan[A];
     kind: JoinKind;
     slot_count: int
 ): JoinID =
-  if slot_count < 0:
-    fail_plan(plan, "join slot count cannot be negative")
-    return
+  plan_assert(plan, slot_count >= 0, "join slot count cannot be negative")
   result = plan.next_join_id
   inc plan.next_join_id
   plan.joins[result] = JoinState(
@@ -857,9 +894,7 @@ proc deliver_destination[A](
     destination: Destination[A];
     artifact_id: ArtifactID
 ) =
-  if destination.isNil:
-    fail_plan(plan, "nil invocation destination")
-    return
+  plan_assert(plan, not destination.isNil, "nil invocation destination")
 
   echo "runtime: deliver destination"
   dump destination.kind
@@ -883,42 +918,34 @@ proc finish_join[A](
 ) =
   echo "runtime: finish join"
   dump join_id
-  if not plan.joins.hasKey(join_id):
-    fail_plan(plan, "unknown join")
-    return
-
-  if not plan.join_invocations.hasKey(join_id):
-    fail_plan(plan, "join has no invocation")
-    return
+  plan_assert(plan, plan.joins.hasKey(join_id), "unknown join")
+  plan_assert(plan, plan.join_invocations.hasKey(join_id),
+    "join has no invocation")
 
   let state = plan.joins[join_id]
   let invocation = plan.join_invocations[join_id]
-  if state.remaining != 0:
-    fail_plan(plan, "join finalized before all results arrived")
-    return
+  plan_assert(plan, state.remaining == 0,
+    "join finalized before all results arrived")
 
   var values = newSeq[A](state.slots.len)
   for index, slot in state.slots:
-    if slot.isNone:
-      fail_plan(plan, "join has missing result slot")
-      return
+    plan_assert(plan, slot.isSome, "join has missing result slot")
     values[index] = lookup_artifact(plan.context, slot.get).data
 
-  if invocation.flow.isNil:
-    fail_plan(plan, "join invocation has no flow")
-    return
+  plan_assert(plan, not invocation.flow.isNil,
+    "join invocation has no flow")
 
   var output: A
   case state.kind
   of jk_fanout:
-    if invocation.flow.kind != fk_fanout or invocation.flow.coalesce.isNil:
-      fail_plan(plan, "fanout join has invalid flow")
-      return
+    plan_assert(plan,
+      invocation.flow.kind == fk_fanout and not invocation.flow.coalesce.isNil,
+      "fanout join has invalid flow")
     output = invocation.flow.coalesce(values)
   of jk_lift:
-    if invocation.flow.kind != fk_lift or invocation.flow.construct.isNil:
-      fail_plan(plan, "lift join has invalid flow")
-      return
+    plan_assert(plan,
+      invocation.flow.kind == fk_lift and not invocation.flow.construct.isNil,
+      "lift join has invalid flow")
     let original = lookup_artifact(plan.context, invocation.input_id).data
     output = invocation.flow.construct(values, original)
 
@@ -940,18 +967,13 @@ proc accept_join_result[A](
   echo "runtime: accept join result"
   dump join_id
   dump slot
-  if not plan.joins.hasKey(join_id):
-    fail_plan(plan, "unknown join result")
-    return
+  plan_assert(plan, plan.joins.hasKey(join_id), "unknown join result")
 
   let state = plan.joins[join_id]
   discard lookup_artifact(plan.context, artifact_id)
-  if slot < 0 or slot >= state.slots.len:
-    fail_plan(plan, "invalid join slot")
-    return
-  if state.slots[slot].isSome:
-    fail_plan(plan, "duplicate join result")
-    return
+  plan_assert(plan, slot >= 0 and slot < state.slots.len,
+    "invalid join slot")
+  plan_assert(plan, state.slots[slot].isNone, "duplicate join result")
 
   state.slots[slot] = some(artifact_id)
   dec state.remaining
@@ -1036,9 +1058,8 @@ proc suspend_model[A](
     destination: prepend_continuation(flow.continuation, destination),
     output_meta: some(output_meta))
   let key = request_id_key(request_id)
-  if plan.model_requests.hasKey(key):
-    fail_plan(plan, "duplicate model request ID")
-    return
+  plan_assert(plan, not plan.model_requests.hasKey(key),
+    "duplicate model request ID")
   plan.model_requests[key] = invocation
   echo "runtime: model request in flight"
   dump request_id
@@ -1090,18 +1111,15 @@ proc begin_lift[A](
   dump works.len
   var seen = newSeq[bool](works.len)
   for work in works:
-    if work.result_index < 0 or work.result_index >= works.len:
-      fail_plan(plan, "lift result index out of range")
-      return
-    if seen[work.result_index]:
-      fail_plan(plan, "duplicate lift result index")
-      return
+    plan_assert(plan,
+      work.result_index >= 0 and work.result_index < works.len,
+      "lift result index out of range")
+    plan_assert(plan, not seen[work.result_index],
+      "duplicate lift result index")
     seen[work.result_index] = true
 
   for index in 0 ..< seen.len:
-    if not seen[index]:
-      fail_plan(plan, "lift result indexes are not contiguous")
-      return
+    plan_assert(plan, seen[index], "lift result indexes are not contiguous")
 
   let join_id = new_join_state(plan, jk_lift, works.len)
   plan.join_invocations[join_id] = new_invocation(
@@ -1196,30 +1214,25 @@ proc handle_runtime_event[A](
     event: GlobalEvent
 ) =
   echo "runtime: handle event"
-  if event.kind != gek_runtime:
-    fail_plan(plan, "non-runtime event passed to runtime handler")
-    return
+  plan_assert(plan, event.kind == gek_runtime,
+    "non-runtime event passed to runtime handler")
   dump event.runtime_kind
   dump event.request_id
   case event.runtime_kind
   of rev_model_artifact:
     let key = request_id_key(event.request_id)
-    if not plan.model_requests.hasKey(key):
-      fail_plan(plan, "unknown model completion")
-      return
+    plan_assert(plan, plan.model_requests.hasKey(key),
+      "unknown model completion")
     let invocation = plan.model_requests[key]
-    if invocation.flow.isNil or invocation.flow.kind != fk_model:
-      fail_plan(plan, "model completion has invalid invocation")
-      return
-    if invocation.output_meta.isNone:
-      fail_plan(plan, "model invocation has no output metadata")
-      return
-    if event.output_materializer.isNil:
-      fail_plan(plan, "model completion has no materializer")
-      return
-    if event.output_arguments.len == 0:
-      fail_plan(plan, "model completion has no encoded output")
-      return
+    plan_assert(plan,
+      not invocation.flow.isNil and invocation.flow.kind == fk_model,
+      "model completion has invalid invocation")
+    plan_assert(plan, invocation.output_meta.isSome,
+      "model invocation has no output metadata")
+    plan_assert(plan, not event.output_materializer.isNil,
+      "model completion has no materializer")
+    plan_assert(plan, event.output_arguments.len > 0,
+      "model completion has no encoded output")
     let can_ack_tool = event.tool_request_id.isSome and not runtime.isNil and
       runtime.server_requests.hasKey(
         request_id_key(event.tool_request_id.get))
@@ -1231,17 +1244,16 @@ proc handle_runtime_event[A](
           @[dynamic_tool_text("unexpected completion tool: " &
             event.output_tool_name)])
         return
-      fail_plan(plan, "unexpected completion tool: " & event.output_tool_name)
+      plan_assert(plan, false,
+        "unexpected completion tool: " & event.output_tool_name)
       return
     let materialize = cast[ModelMaterializer[A]](event.output_materializer)
-    var decoded: ModelMaterialization[A]
-    try:
-      decoded = materialize(event.output_kind, LlmOutput(
+    let decoded = try:
+      materialize(event.output_kind, LlmOutput(
         tool_name: event.output_tool_name,
         arguments: parseJson(event.output_arguments)))
     except CatchableError as error:
-      decoded.ok = false
-      decoded.error = error.msg
+      ModelMaterialization[A](ok: false, error: error.msg)
     if not decoded.ok:
       if can_ack_tool:
         runtime.accept_tool_response(
@@ -1249,29 +1261,29 @@ proc handle_runtime_event[A](
           false,
           @[dynamic_tool_text("invalid finish_work result: " & decoded.error)])
         return
-      fail_plan(plan, "invalid model output: " & decoded.error)
+      plan_assert(plan, false, "invalid model output: " & decoded.error)
       return
     let artifact = decoded.value
     let output_meta = invocation.output_meta.get
-    if event.output_meta.isSome and
-        (event.output_meta.get.id != output_meta.id or
-         $event.output_meta.get.artifact_dir != $output_meta.artifact_dir):
-      fail_plan(plan, "model completion output metadata mismatch")
-      return
+    plan_assert(plan,
+      event.output_meta.isNone or
+        (event.output_meta.get.id == output_meta.id and
+         $event.output_meta.get.artifact_dir == $output_meta.artifact_dir),
+      "model completion output metadata mismatch")
     if can_ack_tool:
       runtime.accept_tool_response(
         event.tool_request_id.get,
         true,
         @[dynamic_tool_text(event.output_arguments)])
+    if event.tool_binding_id.isSome:
+      retire_llm_tool_binding(event.tool_binding_id.get)
     plan.model_requests.del(key)
     let output_id = register_artifact(plan.context, artifact, output_meta)
     echo "runtime: model artifact accepted"
     deliver_destination(plan, invocation.destination, output_id)
   of rev_model_error:
     let key = request_id_key(event.request_id)
-    if not plan.model_requests.hasKey(key):
-      fail_plan(plan, "unknown model error")
-      return
+    plan_assert(plan, plan.model_requests.hasKey(key), "unknown model error")
     plan.model_requests.del(key)
     plan.failed = true
     plan.finished = true
@@ -1290,9 +1302,8 @@ proc handle_global_event[A](
   of gek_runtime:
     handle_runtime_event(plan, runtime, event)
   of gek_ready:
-    if not plan.pending_ready.hasKey(event.ready_id):
-      fail_plan(plan, "unknown ready invocation")
-      return
+    plan_assert(plan, plan.pending_ready.hasKey(event.ready_id),
+      "unknown ready invocation")
     let invocation = plan.pending_ready[event.ready_id]
     plan.pending_ready.del(event.ready_id)
     handle_invocation(plan, invocation)
@@ -1358,8 +1369,8 @@ proc execute_flows*[A](
   finally:
     if readers_started:
       stop_codex_readers(readers)
+    retire_llm_tool_bindings(cast[pointer](context))
     close_global_events(context)
-    release_llm_tool_data(context)
     if owned_runtime:
       deinit_codex_runtime(active_runtime)
       context.codex_runtime = nil

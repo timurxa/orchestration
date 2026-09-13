@@ -1025,18 +1025,20 @@ proc lower_model_call(
       let `parsed_output` = `output_contract`.tryParse(
         `materializer_output`.arguments)
       if not `parsed_output`.ok:
-        result.ok = false
-        result.error = "invalid finish_work result (" &
-          $`parsed_output`.issues.len & " schema issues)"
-        return
-      result.ok = true
-      result.value = `packed_output`
+        return ModelMaterialization[`artifact_name`](
+          ok: false,
+          error: "invalid finish_work result (" &
+            $`parsed_output`.issues.len & " schema issues)")
+      return ModelMaterialization[`artifact_name`](
+        ok: true,
+        value: `packed_output`)
     else:
-      result.ok = false
-      result.error = "unexpected model output kind"
+      return ModelMaterialization[`artifact_name`](
+        ok: false,
+        error: "unexpected model output kind")
   let materializer = quote do:
     (proc (`materializer_kind`: int; `materializer_output`: LlmOutput):
-        ModelMaterialization[`artifact_name`] {.nimcall.} =
+        ModelMaterialization[`artifact_name`] {.nimcall, noinit.} =
       `materializer_body`
     )
 
@@ -1076,28 +1078,31 @@ proc lower_model_call(
     (proc (tool_data: pointer; tool_context: ToolCallContext)
       {.nimcall, gcsafe.} =
       {.cast(gcsafe).}:
-        let data = cast[LlmToolData](tool_data)
+        let binding = lookup_llm_tool_binding(tool_data)
+        if binding.isNone:
+          return
+        let data = binding.get
         enqueue_llm_output_event(
           cast[RuntimeContext[`artifact_name`]](data.context),
           data.request_id,
           data.output_kind,
           cast[ModelMaterializer[`artifact_name`]](data.materializer),
+          data.id,
           tool_context)
     )
   let protocol_setup = quote do:
     let `output_contract_name` = `output_contract_expr`
     let `output_schema_name` = toJsonSchema(`output_contract_name`)
     let `materializer_name` = `materializer`
-    let `tool_data_name` = new_llm_tool_data(
+    let `tool_data_name` = register_llm_tool_binding(
       cast[pointer](`submit_context`), `submit_request_id`,
       `output_kind_value`, cast[pointer](`materializer_name`))
-    retain_llm_tool_data(`submit_context`, `tool_data_name`)
     var `tools_name`: DynamicToolRegistry = @[]
     `tools_name`.register_dynamic_tool(
       "finish_work",
       "Submit final structured result. Call exactly once when task is complete.",
       `output_schema_name`,
-      cast[pointer](`tool_data_name`),
+      `tool_data_name`,
       `callback`)
   let llm_spec_name = genSym(nskLet, "llm_spec")
   let llm_spec_value = quote do:
