@@ -1,8 +1,13 @@
-# Slice 4 — output schema, location contract, decoder
+# Slice 4 — output schema and decoder
 
 ## Purpose
 
-Turn model output JSON into validated typed domain values, then generated artifact payloads.
+Turn model output JSON into typed domain values, then generated artifact payloads.
+
+## Status
+
+Partial. Compile-time schema generation exists for debug output, but parsing
+and typed decoding do not.
 
 ## Files
 
@@ -14,14 +19,11 @@ Turn model output JSON into validated typed domain values, then generated artifa
 
 1. Generate `output_schema(B)` from actual output type.
 2. Use discriminator-aware schema for tagged output variants.
-3. Generate `location_contract(B)` listing nested paths and conditions.
-4. Generate `verify_locations(value, artifact_dir)` using safe path helpers.
-5. Replace debug/default output materializer with generated decoder.
-6. Parse `LlmOutput.arguments` using `output_contract.tryParse`.
-7. Verify every active `Location`.
-8. Pack parsed value into expected generated artifact branch.
-9. Return explicit success/error result.
-10. Reject unexpected output kind or wrong tool name.
+3. Replace debug/default output materializer with generated decoder.
+4. Parse `LlmOutput.arguments` using `output_contract.tryParse`.
+5. Pack parsed value into expected generated artifact branch.
+6. Return explicit success/error result.
+7. Reject unexpected output kind or wrong tool name.
 
 Decoder must never use `default(A)` for failure. `Option[A]` represents absent decoded value.
 
@@ -32,12 +34,7 @@ Decoder must never use `default(A)` for failure. `Option[A]` represents absent d
 - missing required field rejects;
 - wrong discriminator rejects;
 - valid variant selects correct branch;
-- sequence and option output locations verified;
-- missing output file rejects;
-- output directory accepted;
-- output traversal rejects;
-- output absolute path rejects;
-- output symlink escape rejects;
+- sequence and option output locations decode as typed values;
 - ordinary string path-like text remains literal;
 - valid value packs into expected artifact kind;
 - malformed output never reaches continuation.
@@ -45,4 +42,3 @@ Decoder must never use `default(A)` for failure. `Option[A]` represents absent d
 ## Done when
 
 Decoder can be tested without Codex process or scheduler.
-

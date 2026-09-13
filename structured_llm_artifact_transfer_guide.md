@@ -129,22 +129,22 @@ unambiguous:
     Put the final result in finish_work arguments.
     Text outside the tool call is not the result.
 
-## 3. Define `Location` as a relative artifact reference
+## 3. Define `Location` as a relative runtime reference
 
 The historical API defines:
 
     type Location* = distinct string
 
 `Location` is not an absolute filesystem path. It is a reference to a file or
-directory below an artifact directory. For an artifact with directory
-`artifact-12`, the value `src/main.nim` means:
+directory below the common runtime directory. For a runtime containing
+`run-42/artifact-12`, the value `run-42/artifact-12/src/main.nim` means:
 
-    artifact-12/src/main.nim
+    <runtime_dir>/run-42/artifact-12/src/main.nim
 
 The helper used by the old implementation was conceptually:
 
-    proc location_path(artifact_dir: Path; location: Location): Path =
-      artifact_dir / Path(string(location))
+    proc location_path(runtime_dir: Path; location: Location): Path =
+      runtime_dir / Path(string(location))
 
 This gives the type a runtime meaning while keeping the value portable between
 agents and artifact generations. Never put the source machine's absolute path
@@ -163,11 +163,11 @@ For ordinary scalar or enum fields, materialization appends a line such as:
 
 For a `Location` field, it:
 
-1. Interprets the value as a path relative to the source artifact directory.
-2. Copies the source file or directory to the same relative path below the
-   destination artifact directory.
+1. Interprets the value as a path relative to the common runtime directory.
+2. Resolves the source payload there and copies it into the supplied fresh
+   artifact working directory.
 3. Appends a line identifying the relative location, for example:
-   `problem.codebase: location = repo`.
+   `problem.codebase: location = run-42/artifact-12/repo`.
 4. Raises an I/O error if the source path does not exist.
 
 The historical materializer recursively handled:
@@ -190,8 +190,9 @@ Example input type:
         goal*: string
         codebase*: Location
 
-For `codebase = Location("repo")`, the model receives a prompt describing
-`problem.codebase` as `repo`, and `artifact-N/repo` contains the copied
+For a runtime-relative codebase location such as
+`Location("run-42/artifact-12/repo")`, the model receives that logical
+location in the prompt and the payload is copied into the call's fresh working
 directory. The model is instructed to modify only that destination artifact
 directory.
 
@@ -208,10 +209,10 @@ sequences, and options. A representative contract is:
 
 The model-facing instructions should state all of the following:
 
-    You may only modify files in <artifact_dir>.
-    Location fields are strings containing paths relative to <artifact_dir>.
+    You may only modify files in <working_dir>.
+    Location fields are strings containing paths relative to <runtime_dir>.
     Every returned Location must name an existing file or directory below
-    <artifact_dir>.
+    <runtime_dir> and inside this call's working directory.
     If a field is an ordinary string rather than a listed Location field, return
     literal text in that field.
     Call finish_work once with an object matching the supplied JSON schema.
@@ -230,7 +231,7 @@ The artifact-aware callback in `f2ad7bc` uses two gates:
       return
 
     let res = parsed.value
-    let verification_error = verify_locations(res, artifact_dir)
+    let verification_error = verify_locations(res, runtime_dir)
     if verification_error.len != 0:
       accept_tool_response(tool_context, false,
         @[dynamic_tool_text(verification_error)])
@@ -240,7 +241,7 @@ The artifact-aware callback in `f2ad7bc` uses two gates:
       @[dynamic_tool_text($tool_context.params.arguments)])
 
 `verify_locations` walks the same structural shape as the materializer. For
-each `Location`, it checks that `artifact_dir / relative_location` is an
+each `Location`, it checks that `runtime_dir / relative_location` is an
 existing file or directory. It also descends through the active branch of a
 variant, every sequence element, and present options.
 
@@ -279,11 +280,11 @@ there. Consequently, transfer is:
            v
     artifact B / artifact-2
 
-This is copy-on-transfer with immutable logical inputs. It prevents one model
-call from mutating another call's view and gives every model a self-contained
-working directory. The old code also allows future optimizations such as
-hard-links, snapshots, deltas, or content-addressed storage, as long as the
-next call still sees the same logical artifact and relative `Location` contract.
+Each model call gets a fresh working directory under one run root. The model is
+instructed to modify only that directory; source immutability is not a
+sandboxed runtime contract. Runtime-relative `Location` values keep payloads
+from different artifact directories addressable without a join-time root
+merge.
 
 The initial problem is seeded as an artifact whose source directory is the
 process working directory. Every later model output is assigned a fresh ID and
@@ -336,7 +337,7 @@ artifact validation, and flow resumption belong to the runtime's central owner.
   at each call site.
 - `Location` values are relative references, never absolute paths. When
   restoring the design, normalize and validate each path so it cannot escape
-  the artifact directory through `..`, an absolute path, or a symlinked
+  the runtime directory through `..`, an absolute path, or a symlinked
   destination.
 - Every model request receives an isolated materialized directory.
 - The model must return `Location` paths for files it actually created or kept

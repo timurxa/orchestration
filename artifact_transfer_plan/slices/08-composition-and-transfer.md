@@ -4,6 +4,12 @@
 
 Prove artifact transfer across current flow composition, including branch boundaries.
 
+## Status
+
+Complete for composition and multi-root routing. Metadata survives sequential
+models, `so`, fanout, lift, and distinct-root joins. Physical `Location`
+copying remains part of input materialization in Slices 3 and 5.
+
 ## Files
 
 - `src/vecherinka_runtime.nim`
@@ -28,13 +34,17 @@ Immediate transformations:
 
 Fanout/lift joins:
 
-- same-root branch outputs preserve root;
-- distinct roots merge into fresh join root;
-- merge copies referenced payload trees without changing relative `Location` values;
-- incompatible relative-path collisions fail explicitly;
-- no branch root is silently discarded.
+- same-root and distinct-root branch outputs are both addressable because
+  `Location` values are relative to the common runtime directory;
+- the join allocates a fresh artifact ID and directory for its constructed
+  typed value;
+- no branch root is silently selected or merged;
+- all referenced runtime-relative locations retain their source paths after the
+  join.
 
-If composite root merge proves too invasive for first implementation, gate multi-root joins behind explicit failure and record follow-up. Sequential transfer must still complete.
+No composite artifact-root merge is required. A later model materializes any
+referenced payloads into its own fresh working directory from the common
+runtime directory.
 
 ## Test gate
 
@@ -44,12 +54,13 @@ If composite root merge proves too invasive for first implementation, gate multi
 - model inside lift;
 - model fanout with same root;
 - model fanout with distinct roots;
-- join collision failure;
+- distinct-root join retains both branch locations;
 - branch directory isolation;
 - source artifact remains unchanged;
 - continuation sees typed value plus correct metadata.
 
 ## Done when
 
-Every supported composition preserves both typed payload semantics and filesystem provenance.
-
+Every supported composition preserves typed payload semantics and filesystem
+provenance. Runtime-relative paths provide multi-root transfer without root
+merging; physical copying is tested by the materialization slices.

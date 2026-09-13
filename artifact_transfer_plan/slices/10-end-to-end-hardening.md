@@ -4,6 +4,11 @@
 
 Run complete matrix, remove debug-only behavior from default path, document final contract.
 
+## Status
+
+Not started. Current tests cover runtime scaffolding and generated debug
+transport, not complete artifact transfer.
+
 ## Work
 
 1. Run all current Nim tests.
@@ -23,7 +28,6 @@ Run complete matrix, remove debug-only behavior from default path, document fina
 - compile-only interface tests;
 - generated lowering tests;
 - scheduler execution tests;
-- path safety tests;
 - input materialization tests;
 - output decoder tests;
 - dynamic tool protocol tests;
@@ -35,5 +39,6 @@ Run complete matrix, remove debug-only behavior from default path, document fina
 
 ## Done when
 
-All acceptance criteria in `README.md` pass. `PROGRESS.md` marks every completed slice and records any intentionally deferred multi-root behavior.
-
+All acceptance criteria in `README.md` pass. `PROGRESS.md` marks every
+completed slice and records that multi-root routing is already provided by
+runtime-relative `Location` paths.

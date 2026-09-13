@@ -4,6 +4,13 @@
 
 Use current `CodexRuntime` to run one artifact-aware agent turn.
 
+## Status
+
+Partial. Codex process lifecycle, POSIX readers, main-thread JSON handling,
+and dynamic-tool primitives exist. Model calls still use deterministic or
+injected transport; per-agent working directories and delayed real turns are
+not integrated.
+
 ## Files
 
 - `src/vecherinka_runtime.nim`
@@ -15,7 +22,7 @@ Use current `CodexRuntime` to run one artifact-aware agent turn.
 1. Keep deterministic fake transport available by explicit injection.
 2. Add real transport path for `LlmCallSpec`.
 3. Create agent with generated dynamic tools.
-4. Give agent artifact directory as thread working directory.
+4. Give agent its fresh artifact directory as thread working directory.
 5. Store pending thread-start action keyed by agent/model request.
 6. Wait for thread-start response.
 7. Set explicit goal after thread ID exists.
@@ -24,6 +31,9 @@ Use current `CodexRuntime` to run one artifact-aware agent turn.
 10. Route all completion/error events to central runtime.
 
 Current `create_agent` uses runtime-wide `cwd`; add optional per-agent working directory while preserving existing callers.
+
+The prompt must tell the model to modify only that artifact directory. Model
+facing `Location` values remain relative to the common runtime directory.
 
 Do not send prompt from `create_agent` call. Do not send before thread ID.
 
@@ -41,4 +51,3 @@ Do not send prompt from `create_agent` call. Do not send before thread ID.
 ## Done when
 
 One real model call can create files, call `finish_work`, and complete scheduler node.
-

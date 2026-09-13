@@ -1,17 +1,17 @@
 # Artifact transfer progress
 
-Last updated: Slice 0 complete; Slice 1 planning.
+Last updated: 2026-09-13; Slice 1 and scheduler complete; Slice 2 removed by design.
 
-## Baseline
+## Slice 0 baseline
 
 Branch: `master`
 
-Pre-existing dirty files:
+Pre-existing dirty files at baseline:
 
 - `file.txt`
 - `src/vecherinka_comptime.nim`
 - `src/vecherinka_tests`
-- untracked `artifact_transfer_plan/`
+- `artifact_transfer_plan/` plan files
 - untracked `structured_llm_artifact_transfer_guide.md`
 
 No source files changed during Slice 0. Progress document is only file changed by this task.
@@ -37,25 +37,68 @@ Issues: pre-existing dirty worktree recorded above.
 
 Next action: Slice 1 implementation plan below.
 
+## Slice 1 record
+
+Status: complete.
+
+Files changed: `src/vecherinka_runtime.nim`, `src/vecherinka_comptime.nim`, `src/vecherinka_runtime_execution_test.nim`.
+
+Tests run: execution, model lowering, interface, IPC, and generated integration tests. All pass.
+
+Result: metadata now follows activations, continuations, joins, pending models, nodes, and runtime events. `execute_flows` creates unique `run-*` roots under program CWD. Runtime allocates each model's fresh `artifact-N` working root before calling `submit`, and passes that directory plus input metadata into the submit boundary. Joins accept distinct roots and allocate fresh output metadata; `Location` values will resolve from the common runtime directory.
+
+Issues: existing compiler warnings only.
+
+Next action: Slice 3 input materialization.
+
+## Scheduler/event unification record
+
+Status: complete.
+
+Files changed: `src/vecherinka_runtime.nim`, runtime execution tests, and the
+runtime plan.
+
+Result: removed the ready deque and both scheduler drain layers. Typed
+activations now live in `WorkPlan.pending_ready`; `gek_ready` carries only a
+numeric ID through the shared channel. `run_work_plan` performs one blocking
+`recv_global_event` per iteration. Existing runtime, generated, interface, and
+IPC tests pass.
+
+This is scheduler infrastructure, not artifact transfer. It does not advance
+input materialization, output decoding, or real Codex transport.
+
+## Plan adjustment: path validation removed
+
+Slice 2 is removed. No runtime path-validation helpers, traversal checks,
+symlink checks, or output `Location` verifier are planned. The model receives
+strong instructions to use runtime-relative `Location` paths, never emit
+absolute or `..` paths, and modify only its assigned working directory.
+
+Multi-root transfer design is complete: `Location` values use paths relative to
+the common runtime directory, so copying by location path does not require
+merging or selecting artifact metadata roots. Physical copy/materialization
+work remains in Slices 3 and 5.
+
 ## Current slice
 
-Slice 1 — artifact metadata and run-root allocation.
+Slice 3 — input materialization.
 
 Status: not started.
 
 ## Slice status
 
 - [x] Slice 0 — baseline and contracts
-- [ ] Slice 1 — metadata and run-root allocation
-- [ ] Slice 2 — safe path helpers
+- [x] Slice 1 — metadata and run-root allocation
 - [ ] Slice 3 — input materialization walker
-- [ ] Slice 4 — output schema and decoder
-- [ ] Slice 5 — generated submit integration
+- [~] Slice 4 — output schema and decoder
+- [~] Slice 5 — generated submit integration
 - [ ] Slice 6 — `finish_work` event protocol
-- [ ] Slice 7 — real Codex transport
-- [ ] Slice 8 — composition and multi-root transfer
-- [ ] Slice 9 — failure lifecycle and cleanup
+- [~] Slice 7 — real Codex transport
+- [x] Slice 8 — composition and multi-root transfer design
+- [~] Slice 9 — failure lifecycle and cleanup
 - [ ] Slice 10 — end-to-end hardening
+
+`[~]` means prerequisite or partial behavior exists; slice gate not met.
 
 ## Working log
 
@@ -64,10 +107,19 @@ Status: not started.
 - Current generated submit only unpacks typed input, stringifies context, installs debug tool, and sends `LlmCallSpec`.
 - Current generated materializer returns debug/default values.
 - Current generated pack/unpack carries typed payload only.
+- Current generated lowering computes and echoes output JSON schema, but does
+  not yet build the final output decoder/tool protocol.
+- Current `LlmCallSpec` carries `input_meta`, `runtime_dir`, and `working_dir`;
+  it does not yet carry materialized input or a generated output decoder.
 - Current `debug_tool_registry` has empty input schema and nil callback.
 - Current default transport is deterministic; it does not create agent or send prompt.
 - Current Codex runtime already supports dynamic tool registration, thread creation, delayed turn eligibility, and tool acknowledgement.
 - Current readers already route framed events to main owner.
+- Current scheduler routes initial and resumed activations as `gek_ready`
+  events, with typed payload retained in `WorkPlan.pending_ready`.
+- Current execution tests cover metadata propagation, fresh model/join roots,
+  sequential models, dynamic model flows, distinct-root joins, generated
+  transport, and reader lifecycle.
 - Historical artifact behavior exists in commit `f2ad7bc`.
 
 ### Open issues to watch
@@ -75,18 +127,21 @@ Status: not started.
 - Nim closure `{.gcsafe.}` captures and lifetime across copied dynamic tools.
 - Generated macro support for distinct wrappers around `Location`.
 - Generated tagged output schema discriminator behavior.
-- Safe copying when destination parents or source components are symlinks.
+- Materialize runtime-relative `Location` values into each model's working
+  directory by path; path policy is prompt-owned, not runtime-validated.
 - Distinguishing scheduler model ID from Codex tool request ID.
 - Turn completion without `finish_work`.
-- Merging branch roots with colliding relative paths.
+- Clearing or retaining pending ready activations on terminal shutdown.
 - Existing dirty worktree files: preserve unrelated user changes.
 
 ### Decision log
 
 - Use metadata sidecar, not generated artifact wrapper, to minimize changes to current `Flow[A]` structure.
 - Keep deterministic transport as explicit test seam.
-- Validate output centrally after callback event reaches main owner.
-- Never silently choose one branch root when a join combines distinct roots.
+- Handle output/tool protocol centrally after callback event reaches main owner;
+  rely on model instructions for `Location` path discipline.
+- Multi-root joins need no root merge or selection: runtime-relative locations
+  keep every branch payload addressable.
 
 ### Slice 0 contracts
 
@@ -107,18 +162,18 @@ Fixture plan: scalar field; nested object; `Location`; `seq[Location]`; `Option[
 
 ### Slice 1 implementation plan
 
-1. In `src/vecherinka_runtime.nim`, add `ArtifactID`/`ArtifactMeta`; add `run_dir`, `next_artifact_id`, borrowed `CodexRuntime` owner, and request-keyed pending agent-start records to `RuntimeContext`.
-2. In `execute_flows`, capture canonical CWD as immutable source root; create unique `run-*` below it; pass run root to `init_codex_runtime`; allocate `artifact-N` below run root. Entry metadata uses CWD, never run root.
-3. Add metadata fields to `Activation`, `WorkNode`, `PendingModel`, `JoinState`, `RuntimeEvent`, and copied `GlobalEvent` fields. Update `deliver_resume` and every ready-queue path. `fk_it`, `fk_so`, raw, and lift preserve incoming metadata; joins preserve same root and explicitly reject distinct roots until Slice 8.
-4. Change `Flow.fk_model.submit` to receive input metadata. Allocate fresh output metadata per model request, carry it with completion event, record input/output metadata on node/pending state, and keep generated typed artifact union unchanged.
+1. In `src/vecherinka_runtime.nim`, add `ArtifactID`/`ArtifactMeta`; add the program-CWD `runtime_dir`, `run_dir`, `next_artifact_id`, borrowed `CodexRuntime` owner, and request-keyed pending agent-start records to `RuntimeContext`.
+2. In `execute_flows`, capture canonical CWD as the runtime-relative Location base; create unique `run-*` below it; pass run root to `init_codex_runtime`; allocate `artifact-N` below run root. Entry metadata uses CWD, never run root.
+3. Add metadata fields to `Activation`, `WorkNode`, `PendingModel`, `JoinState`, `RuntimeEvent`, and copied `GlobalEvent` fields. Update `deliver_resume` and every ready-queue path. `fk_it`, `fk_so`, raw, and lift preserve incoming metadata; joins accept all roots and create fresh output metadata.
+4. Change `Flow.fk_model.submit` to receive input metadata plus the pre-created working directory. Allocate fresh output metadata before submit, record input/output metadata on node/pending state, and keep generated typed artifact union unchanged.
 5. Update generated submit adapters and fake callbacks for new boundary/event fields only. Keep parsing, Codex mutation, and scheduler ownership on main thread; defer real agent-start behavior to Slice 7.
-6. Add focused runtime tests for entry CWD metadata, two fresh model roots, `it`, `so`, raw continuation, node input/output metadata, event fields, same-root join behavior, distinct-root rejection, and unchanged source root. Run baseline matrix plus Slice 1 tests.
+6. Add focused runtime tests for entry CWD metadata, two fresh model roots, submit working-directory plumbing, `it`, `so`, raw continuation, node input/output metadata, event fields, same-root joins, distinct-root joins, fresh join metadata, and unchanged source root. Run baseline matrix plus Slice 1 tests.
 
 ### Per-slice record template
 
 ```text
 Slice:
-Status: not started | active | blocked | complete
+Status: not started | active | partial | blocked | complete
 Files changed:
 Tests run:
 Result:

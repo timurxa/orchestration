@@ -4,6 +4,13 @@
 
 Make generated model nodes prepare real artifact-aware `LlmCallSpec`.
 
+## Status
+
+Partial. Generated submit passes input metadata, runtime directory, working
+directory, output kind, and materializer to the injected transport. It still
+uses the debug tool, debug materializer, typed-context stringification, and
+schema echo.
+
 ## Files
 
 - `src/vecherinka_comptime.nim`
@@ -15,21 +22,20 @@ Make generated model nodes prepare real artifact-aware `LlmCallSpec`.
 Modify `lower_model_call` around current `src/vecherinka_comptime.nim:586`:
 
 1. Unpack expected input branch.
-2. Receive input `ArtifactMeta`.
-3. Allocate fresh output metadata/root.
-4. Invoke input materializer.
-5. Build output schema and location contract.
-6. Build typed output decoder.
-7. Build `finish_work` tool descriptor.
-8. Build complete prompt payload.
-9. Call `submit_llm` through existing transport seam.
+2. Receive input `ArtifactMeta` and the pre-created working directory.
+3. Invoke input materializer.
+4. Build output schema.
+5. Build typed output decoder.
+6. Build `finish_work` tool descriptor.
+7. Build complete prompt payload.
+8. Call `submit_llm` through existing transport seam.
 
 Extend `LlmCallSpec` with typed metadata and textual protocol fields:
 
 - `materialized_input`;
-- `artifact_id`;
-- `artifact_dir`;
-- `location_contract`;
+- `input_meta`;
+- `runtime_dir`;
+- `working_dir`;
 - `output_schema`;
 - existing `typed_context` retained temporarily for test compatibility.
 
@@ -39,8 +45,9 @@ Prompt must state:
 - working directory;
 - modify only that directory;
 - input field values;
-- `Location` relative-path rules;
-- location contract;
+- `Location` paths relative to the runtime directory;
+- never emit absolute or `..` paths in `Location` values;
+- use only the assigned working directory for file changes;
 - `finish_work` exact-once rule;
 - output schema.
 
@@ -54,7 +61,6 @@ Fake transport asserts:
 - destination directory exists;
 - copied input payload exists;
 - output schema matches output type;
-- location contract lists correct fields;
 - tool name is `finish_work`;
 - tool schema equals output schema;
 - output metadata is fresh;
@@ -64,4 +70,3 @@ Fake transport asserts:
 ## Done when
 
 Generated submit prepares all data without opening Codex or resuming flow inline.
-

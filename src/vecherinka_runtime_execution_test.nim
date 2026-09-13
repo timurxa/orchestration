@@ -1,4 +1,4 @@
-import std/[deques, json, options, strutils, tables]
+import std/[deques, json, options, os, paths, strutils, tables]
 import vecherinka
 import codex_json
 
@@ -12,6 +12,9 @@ var observed_context = ""
 var observed_tool = ""
 var observed_output_kind = -1
 var observed_materialized = false
+var observed_model_input_metas: seq[ArtifactMeta] = @[]
+var observed_model_working_dirs: seq[Path] = @[]
+let expected_source_root = Path(os.expandFilename(os.getCurrentDir()))
 
 proc inspect_generated_transport[A](
     context: RuntimeContext[A];
@@ -22,6 +25,10 @@ proc inspect_generated_transport[A](
   observed_tool = spec.tools[0].name
   observed_output_kind = spec.output_kind
   observed_materialized = true
+  doAssert spec.input_meta.id == 0
+  doAssert $spec.input_meta.artifact_dir == $expected_source_root
+  doAssert $spec.runtime_dir == $expected_source_root
+  doAssert dirExists($spec.working_dir)
   var event: RuntimeEvent[A]
   event.kind = rev_model_artifact
   event.request_id = request_id
@@ -90,11 +97,37 @@ proc materialize_debug_string(
   discard output_kind
   output.tool_name
 
+proc metadata_flow_submit(
+    context: RuntimeContext[string];
+    request_id: RequestId;
+    input: string;
+    input_meta: ArtifactMeta;
+    working_dir: Path
+) =
+  observed_model_input_metas.add(input_meta)
+  observed_model_working_dirs.add(working_dir)
+  doAssert dirExists($working_dir)
+  var event: RuntimeEvent[string]
+  event.kind = rev_model_artifact
+  event.request_id = request_id
+  event.output_kind = 0
+  event.output = LlmOutput(
+    tool_name: "model(" & input & ")",
+    arguments: newJObject()
+  )
+  event.materialize = materialize_debug_string
+  event.has_output = true
+  enqueue_runtime_event(context, event)
+
 proc debug_submit(
     context: RuntimeContext[string];
     request_id: RequestId;
-    input: string
+    input: string;
+    input_meta: ArtifactMeta;
+    working_dir: Path
 ) =
+  discard input_meta
+  discard working_dir
   var event: RuntimeEvent[string]
   event.kind = rev_model_artifact
   event.request_id = request_id
@@ -117,6 +150,11 @@ block:
   let result = execute_flows(@[top("immediate", immediate, true)], "seed")
   doAssert result.output.get == "replaced+it"
   doAssert result.nodes.len == 0
+  doAssert result.pending_ready.len == 0
+  doAssert result.next_ready_id == 1
+  doAssert result.output_meta.isSome
+  doAssert result.output_meta.get.id == 0
+  doAssert $result.output_meta.get.artifact_dir == $expected_source_root
 
 block:
   let model = Flow[string](
@@ -136,6 +174,15 @@ block:
   doAssert result.nodes[1].state == ws_done
   doAssert result.nodes[1].input.get == "seed"
   doAssert result.nodes[1].output.get == "model(seed)"
+  doAssert result.nodes[1].input_meta.isSome
+  doAssert result.nodes[1].input_meta.get.id == 0
+  doAssert $result.nodes[1].input_meta.get.artifact_dir ==
+    $expected_source_root
+  doAssert result.nodes[1].output_meta.isSome
+  doAssert result.nodes[1].output_meta.get.id == 1
+  doAssert dirExists($result.nodes[1].output_meta.get.artifact_dir)
+  doAssert result.pending_ready.len == 0
+  doAssert result.next_ready_id == 2
 
 block:
   let worker = top(
@@ -164,6 +211,11 @@ block:
   doAssert result.nodes.len == 1
   doAssert result.nodes[1].kind == wk_fanout
   doAssert result.nodes[1].state == ws_done
+  doAssert result.nodes[1].output_meta.isSome
+  doAssert result.nodes[1].output_meta.get.id == 1
+  doAssert $result.nodes[1].output_meta.get.artifact_dir !=
+    $expected_source_root
+  doAssert dirExists($result.nodes[1].output_meta.get.artifact_dir)
 
 block:
   let lift = Flow[string](
@@ -177,6 +229,11 @@ block:
   doAssert result.nodes.len == 1
   doAssert result.nodes[1].kind == wk_lift
   doAssert result.nodes[1].state == ws_done
+  doAssert result.nodes[1].output_meta.isSome
+  doAssert result.nodes[1].output_meta.get.id == 1
+  doAssert $result.nodes[1].output_meta.get.artifact_dir !=
+    $expected_source_root
+  doAssert dirExists($result.nodes[1].output_meta.get.artifact_dir)
 
 block:
   let empty_lift = Flow[string](
@@ -196,6 +253,102 @@ block:
   )
   let result = execute_flows(@[top("dynamic", dynamic, true)], "seed")
   doAssert result.output.get == "seed+child+it"
+  doAssert result.output_meta.isSome
+  doAssert result.output_meta.get.id == 0
+
+block:
+  observed_model_input_metas.setLen(0)
+  observed_model_working_dirs.setLen(0)
+  let second = Flow[string](
+    kind: fk_model,
+    submit: metadata_flow_submit)
+  let first = Flow[string](
+    kind: fk_model,
+    submit: metadata_flow_submit,
+    continuation: second)
+  let result = execute_flows(@[top("metadata", first, true)], "seed")
+  doAssert result.finished
+  doAssert not result.failed
+  doAssert result.nodes.len == 2
+  doAssert result.context.run_dir != Path("")
+  doAssert dirExists($result.context.run_dir)
+  doAssert result.context.next_artifact_id == 2
+  doAssert observed_model_input_metas.len == 2
+  doAssert observed_model_working_dirs.len == 2
+  doAssert observed_model_input_metas[0].id == 0
+  doAssert $observed_model_input_metas[0].artifact_dir ==
+    $expected_source_root
+  doAssert observed_model_input_metas[1].id == 1
+  doAssert $observed_model_input_metas[1].artifact_dir ==
+    $observed_model_working_dirs[0]
+  doAssert $observed_model_working_dirs[0] !=
+    $observed_model_working_dirs[1]
+  doAssert result.nodes[1].input_meta.isSome
+  doAssert result.nodes[1].input_meta.get.id == 0
+  doAssert result.nodes[1].output_meta.isSome
+  doAssert result.nodes[1].output_meta.get.id ==
+    1
+  doAssert result.nodes[2].input_meta.isSome
+  doAssert result.nodes[2].input_meta.get.id ==
+    1
+  doAssert result.nodes[2].output_meta.isSome
+  doAssert result.nodes[2].output_meta.get.id ==
+    2
+  doAssert result.output_meta.isSome
+  doAssert result.output_meta.get.id == 2
+
+proc observed_child_model(value: string): Flow[string] =
+  discard value
+  Flow[string](kind: fk_model, submit: metadata_flow_submit)
+
+block:
+  observed_model_input_metas.setLen(0)
+  observed_model_working_dirs.setLen(0)
+  let dynamic_model = Flow[string](
+    kind: fk_so,
+    execute: observed_child_model)
+  let result = execute_flows(@[top("dynamic_model", dynamic_model, true)], "seed")
+  doAssert result.finished
+  doAssert observed_model_input_metas.len == 1
+  doAssert observed_model_input_metas[0].id == 0
+  doAssert $observed_model_input_metas[0].artifact_dir ==
+    $expected_source_root
+
+block:
+  let context = new_runtime_context[string](
+    nil, nil, create_run_directory(expected_source_root))
+  open_global_events(context)
+  let metadata = ArtifactMeta(
+    id: 77,
+    artifact_dir: context.run_dir / Path("artifact-77"))
+  var event: RuntimeEvent[string]
+  event.kind = rev_model_artifact
+  event.request_id = RequestId(kind: rid_integer, integer_value: 7)
+  event.has_output_meta = true
+  event.output_meta = metadata
+  enqueue_runtime_event(context, event)
+  let copied = recv_global_event(context)
+  doAssert copied.has_output_meta
+  doAssert copied.output_meta.id == 77
+  doAssert $copied.output_meta.artifact_dir == $metadata.artifact_dir
+  close_global_events(context)
+
+block:
+  observed_model_input_metas.setLen(0)
+  observed_model_working_dirs.setLen(0)
+  let branch_a = Flow[string](kind: fk_model, submit: metadata_flow_submit)
+  let branch_b = Flow[string](kind: fk_model, submit: metadata_flow_submit)
+  let fan = Flow[string](
+    kind: fk_fanout,
+    branches: @[branch_a, branch_b],
+    coalesce: join_values)
+  let result = execute_flows(@[top("distinct_roots", fan, true)], "seed")
+  doAssert result.finished
+  doAssert not result.failed
+  doAssert result.output.get == "model(seed)|model(seed)"
+  doAssert result.output_meta.isSome
+  doAssert result.output_meta.get.id == 3
+  doAssert dirExists($result.output_meta.get.artifact_dir)
 
 block:
   generated_solve(

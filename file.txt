@@ -8,33 +8,37 @@ type
       value_0: (Codebase, Issues)
     of vak_1:
       value_1: Codebase
-proc solve(input_553648687: (Codebase, Issues);
-           transport_553648688: LlmTransport[VecherinkaArtifact_553648604] = nil) =
-  let data_553648689: seq[Flow[VecherinkaArtifact_553648604]] = @[Flow[
+proc solve(input_553648689: (Codebase, Issues);
+           transport_553648690: LlmTransport[VecherinkaArtifact_553648604] = nil) =
+  let data_553648691: seq[Flow[VecherinkaArtifact_553648604]] = @[Flow[
       VecherinkaArtifact_553648604](kind: fk_top, root: "fix", entry: true, body: Flow[
       VecherinkaArtifact_553648604](kind: fk_model, submit: proc (
       model_context_553648680: RuntimeContext[VecherinkaArtifact_553648604];
-      model_request_id_553648681: RequestId; model_input_553648682: VecherinkaArtifact_553648604) {.
+      model_request_id_553648681: RequestId; model_input_553648682: VecherinkaArtifact_553648604;
+      model_input_meta_553648683: ArtifactMeta; model_working_dir_553648684: Path) {.
       nimcall.} =
     const
-      model_output_schema_553648686 = "{\"type\":\"string\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"}"
+      model_output_schema_553648688 = "{\"type\":\"string\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"}"
     echo ["{\"type\":\"string\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"}"]
-    let model_typed_input_553648683 = block:
-      let artifact_553648684 = model_input_553648682
+    let model_typed_input_553648685 = block:
+      let artifact_553648686 = model_input_553648682
       const
         loc`gensym24 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-          line: 1032, column: 6)
-        ploc`gensym24 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1032, 7)"
+          line: 1040, column: 6)
+        ploc`gensym24 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1040, 7)"
       bind instantiationInfo
       mixin failedAssertImpl
       {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-               line: 1032, column: 6).}:
-        if not (artifact_553648684.kind == vak_0):
-          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1032, 7) `artifact_553648684.kind == vak_0` ")
-      artifact_553648684.value_0
-    let llm_spec_553648685 = LlmCallSpec[VecherinkaArtifact_553648604](
+               line: 1040, column: 6).}:
+        if not (artifact_553648686.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1040, 7) `artifact_553648686.kind == vak_0` ")
+      artifact_553648686.value_0
+    let llm_spec_553648687 = LlmCallSpec[VecherinkaArtifact_553648604](
         profile: cheap, prompt: "Read the issues and fix them in the codebase.",
-        typed_context: $model_typed_input_553648683,
+        typed_context: $model_typed_input_553648685,
+        input_meta: model_input_meta_553648683,
+        runtime_dir: model_context_553648680.runtime_dir,
+        working_dir: model_working_dir_553648684,
         tools: debug_tool_registry("(Codebase, Issues)", "Codebase"),
         output_kind: 1, materialize: proc (model_output_kind_553648678: int;
         model_output_553648679: LlmOutput): VecherinkaArtifact_553648604 {.
@@ -45,21 +49,21 @@ proc solve(input_553648687: (Codebase, Issues);
     else:
       const
         loc`gensym33 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-          line: 618, column: 6)
-        ploc`gensym33 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(618, 7)"
+          line: 619, column: 6)
+        ploc`gensym33 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(619, 7)"
       bind instantiationInfo
       mixin failedAssertImpl
       {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-               line: 618, column: 6).}:
+               line: 619, column: 6).}:
         if true:
-          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(618, 7) `false` unexpected model output kind")
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(619, 7) `false` unexpected model output kind")
     )
-    submit_llm(model_context_553648680, model_request_id_553648681, llm_spec_553648685)))]
-  let input_artifact_553648690 = VecherinkaArtifact_553648604(kind: vak_0,
-      value_0: input_553648687)
-  echo ["we have ", len(data_553648689), " top level procs"]
-  discard execute_flows(data_553648689, input_artifact_553648690, nil,
-                        transport_553648688, nil)
+    submit_llm(model_context_553648680, model_request_id_553648681, llm_spec_553648687)))]
+  let input_artifact_553648692 = VecherinkaArtifact_553648604(kind: vak_0,
+      value_0: input_553648689)
+  echo ["we have ", len(data_553648691), " top level procs"]
+  discard execute_flows(data_553648691, input_artifact_553648692, nil,
+                        transport_553648690, nil)
 
 test: calling generated solve
 we have 1 top level procs
@@ -79,22 +83,13 @@ result.entry.kind = fk_model
 runtime: enqueue entry activation
 result.entry.kind = fk_model
 runtime: run work plan
-runtime: scheduler iteration
-iteration = 1
-plan.ready.len = 1
-plan.context.events_open = true
-runtime: drain ready batch
-plan.ready.len = 1
-limit = 64
 runtime: handle activation
-plan.ready.len = 0
+plan.pending_ready.len = 0
 activation.parent = (val: 0, has: false)
 current.kind = fk_model
 runtime: suspend model
-parent = (val: 0, has: false)
 runtime: new work node
 kind = wk_model
-parent = (val: 0, has: false)
 input.isSome = true
 runtime: allocate request id
 context.next_request_id = 0
@@ -111,8 +106,6 @@ request_id = (kind: rid_integer, integer_value: 0)
 spec.output_kind = 1
 spec.typed_context = (, @[""])
 spec.tools.len = 1
-handled = 1
-plan.ready.len = 0
 runtime: handle event
 event.runtime_kind = rev_model_artifact
 event.request_id = (kind: rid_integer, integer_value: 0)

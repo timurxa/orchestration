@@ -32,6 +32,7 @@ type
   PartialModelCallSyntax*[A, B] = object
   here* = object
   PartialLiftSyntax*[Pattern: static string] = object
+  ## Relative path resolved against RuntimeContext.runtime_dir.
   Location* = distinct string
 
 template flow_ir*(id: int, entry: bool) {.pragma.}
@@ -625,6 +626,8 @@ proc lower_model_call(
   let submit_context = genSym(nskParam, "model_context")
   let submit_request_id = genSym(nskParam, "model_request_id")
   let submit_input = genSym(nskParam, "model_input")
+  let submit_input_meta = genSym(nskParam, "model_input_meta")
+  let submit_working_dir = genSym(nskParam, "model_working_dir")
   let typed_input = genSym(nskLet, "model_typed_input")
   let submit_unpacked = if input_type.is_void_type:
     newEmptyNode()
@@ -651,6 +654,9 @@ proc lower_model_call(
       profile: `profile_expr`,
       prompt: `prompt_expr`,
       typed_context: `typed_context`,
+      input_meta: `submit_input_meta`,
+      runtime_dir: `submit_context`.runtime_dir,
+      working_dir: `submit_working_dir`,
       tools: `tools`,
       output_kind: `output_kind_value`,
       materialize: `materializer`
@@ -673,7 +679,9 @@ proc lower_model_call(
   let submit = quote do:
     (proc (`submit_context`: RuntimeContext[`artifact_name`];
         `submit_request_id`: RequestId;
-        `submit_input`: `artifact_name`) {.nimcall.} =
+        `submit_input`: `artifact_name`;
+        `submit_input_meta`: ArtifactMeta;
+        `submit_working_dir`: Path) {.nimcall.} =
       `submit_body`
     )
   quote do:

@@ -3,11 +3,22 @@
 ## Included by `vecherinka.nim`. Keep compile-time AST and macro machinery out
 ## of this fragment.
 
-import std/[sugar, deques, json, options, tables, posix, strutils, os]
+import std/[sugar, json, options, tables, posix, strutils, os,
+  paths, tempfiles]
 import codex_json
 import codex_runtime
 
 type
+  ArtifactID* = uint64
+
+  ArtifactMeta* = object
+    id*: ArtifactID
+    artifact_dir*: Path
+
+  PendingAgentStart* = object
+    agent_id*: AgentId
+    artifact_meta*: ArtifactMeta
+
   ProfileSpec* = object
     model*: string
     effort*: ReasoningEffort
@@ -33,7 +44,9 @@ type
       submit*: proc(
         context: RuntimeContext[A];
         request_id: RequestId;
-        input: A
+        input: A;
+        input_meta: ArtifactMeta;
+        working_dir: Path
       ) {.nimcall.}
     of fk_raw:
       value*: A
@@ -86,6 +99,7 @@ type
   Activation*[A] = object
     flow*: Flow[A]
     input*: A
+    artifact_meta*: ArtifactMeta
     parent*: Option[WorkID]
     resume*: Resume[A]
 
@@ -93,9 +107,10 @@ type
     id*: WorkID
     kind*: WorkKind
     state*: WorkState
-    parent*: Option[WorkID]
     input*: Option[A]
+    input_meta*: Option[ArtifactMeta]
     output*: Option[A]
+    output_meta*: Option[ArtifactMeta]
     request_id*: Option[RequestId]
     error_message*: Option[string]
 
@@ -108,6 +123,8 @@ type
     parent*: Option[WorkID]
     remaining*: int
     slots*: seq[Option[A]]
+    slot_meta*: seq[Option[ArtifactMeta]]
+    original_meta*: ArtifactMeta
     resume*: Resume[A]
     case kind*: JoinKind
     of jk_fanout:
@@ -119,6 +136,8 @@ type
   PendingModel*[A] = ref object
     node_id*: WorkID
     request_id*: RequestId
+    input_meta*: ArtifactMeta
+    output_meta*: Option[ArtifactMeta]
     resume*: Resume[A]
 
   LlmOutput* = object
@@ -136,6 +155,9 @@ type
     profile*: ProfileSpec
     prompt*: string
     typed_context*: string
+    input_meta*: ArtifactMeta
+    runtime_dir*: Path
+    working_dir*: Path
     tools*: DynamicToolRegistry
     output_kind*: int
     materialize*: ModelMaterializer[A]
@@ -154,11 +176,14 @@ type
     output_kind*: int
     output*: LlmOutput
     materialize*: ModelMaterializer[A]
+    has_output_meta*: bool
+    output_meta*: ArtifactMeta
     has_message*: bool
     message*: string
 
   GlobalEventKind* = enum
     gek_runtime,
+    gek_ready,
     gek_stdout_line,
     gek_stderr_line,
     gek_stdout_closed,
@@ -168,17 +193,20 @@ type
     gek_shutdown
 
   GlobalEvent* = object
-    ## Transport events contain copied wire data only. Readers never receive
-    ## or mutate CodexRuntime, WorkPlan, Flow, or RuntimeContext.
+    ## Events contain copied transport data or a main-thread work ID. Readers
+    ## never receive or mutate CodexRuntime, WorkPlan, Flow, or RuntimeContext.
     kind*: GlobalEventKind
     message*: string
     request_id*: RequestId
+    ready_id*: uint64
     runtime_kind*: RuntimeEventKind
     has_output*: bool
     output_kind*: int
     output_tool_name*: string
     output_arguments*: string
     output_materializer*: pointer
+    has_output_meta*: bool
+    output_meta*: ArtifactMeta
     has_message*: bool
 
   CodexReaderArgs = object
@@ -211,11 +239,20 @@ type
     submitter*: ModelSubmitter[A]
     transport*: LlmTransport[A]
     next_request_id*: int64
+    ## Common base for runtime-relative Location values. This is the program
+    ## working directory, not an individual artifact directory.
+    runtime_dir*: Path
+    run_dir*: Path
+    next_artifact_id*: ArtifactID
+    codex_runtime*: ptr CodexRuntime
+    pending_agent_starts*: Table[string, PendingAgentStart]
 
   ModelSubmitter*[A] = proc(
     context: RuntimeContext[A];
     request_id: RequestId;
-    input: A
+    input: A;
+    input_meta: ArtifactMeta;
+    working_dir: Path
   ) {.nimcall.}
 
   LlmTransport*[A] = proc(
@@ -228,12 +265,14 @@ type
     context*: RuntimeContext[A]
     roots*: Table[string, Flow[A]]
     entry*: Flow[A]
-    ready*: Deque[Activation[A]]
+    pending_ready*: Table[uint64, Activation[A]]
+    next_ready_id*: uint64
     nodes*: Table[WorkID, WorkNode[A]]
     joins*: Table[WorkID, JoinState[A]]
     pending_models*: Table[string, PendingModel[A]]
     next_work_id*: WorkID
     output*: Option[A]
+    output_meta*: Option[ArtifactMeta]
     finished*: bool
     failed*: bool
 
@@ -273,6 +312,8 @@ proc enqueue_runtime_event*[A](
     has_output: event.has_output,
     output_kind: event.output_kind,
     output_materializer: cast[pointer](event.materialize),
+    has_output_meta: event.has_output_meta,
+    output_meta: event.output_meta,
     has_message: event.has_message,
     message: event.message)
   if event.has_output:
@@ -484,7 +525,7 @@ proc handle_global_event*(
 ) =
   ## Main-thread coordinator. Only this path touches CodexRuntime protocol state.
   case event.kind
-  of gek_runtime:
+  of gek_runtime, gek_ready:
     discard
   of gek_stdout_line:
     if runtime.isNil:
@@ -528,7 +569,9 @@ proc prepend_continuation*[A](
 
 proc new_runtime_context*[A](
     submitter: ModelSubmitter[A] = nil;
-    transport: LlmTransport[A] = nil
+    transport: LlmTransport[A] = nil;
+    run_dir: Path = Path("");
+    runtime_dir: Path = Path("")
 ): RuntimeContext[A] =
   echo "runtime: new context"
   dump submitter.isNil
@@ -538,6 +581,28 @@ proc new_runtime_context*[A](
   result.submitter = submitter
   result.transport = transport
   result.next_request_id = 0
+  result.runtime_dir = if $runtime_dir == "": run_dir else: runtime_dir
+  result.run_dir = run_dir
+  result.next_artifact_id = 0
+  result.codex_runtime = nil
+  result.pending_agent_starts = initTable[string, PendingAgentStart]()
+
+proc create_run_directory*(source_root: Path): Path =
+  ## Keep run state in a unique child of the program working directory.
+  if not dirExists($source_root):
+    raise newException(ValueError, "source root is not a directory: " &
+      $source_root)
+  Path(createTempDir("run-", "", $source_root))
+
+proc allocate_artifact_meta*[A](context: RuntimeContext[A]): ArtifactMeta =
+  if $context.run_dir == "":
+    raise newException(ValueError, "runtime context has no run directory")
+  inc context.next_artifact_id
+  result = ArtifactMeta(
+    id: context.next_artifact_id,
+    artifact_dir: context.run_dir /
+      Path("artifact-" & $context.next_artifact_id))
+  createDir($result.artifact_dir)
 
 proc allocate_request_id[A](context: RuntimeContext[A]): RequestId =
   echo "runtime: allocate request id"
@@ -558,8 +623,10 @@ proc init_work_plan*[A](
   result.nodes = initTable[WorkID, WorkNode[A]]()
   result.joins = initTable[WorkID, JoinState[A]]()
   result.pending_models = initTable[string, PendingModel[A]]()
-  result.ready = initDeque[Activation[A]]()
+  result.pending_ready = initTable[uint64, Activation[A]]()
+  result.next_ready_id = 0
   result.next_work_id = 1
+  result.output_meta = none(ArtifactMeta)
 
   for top in top_level_flows:
     if top.isNil or top.kind != fk_top:
@@ -599,12 +666,11 @@ proc resolve_root[A](
 proc new_work_node[A](
     plan: var WorkPlan[A];
     kind: WorkKind;
-    parent: Option[WorkID];
-    input: Option[A]
+    input: Option[A];
+    artifact_meta: ArtifactMeta
 ): WorkID =
   echo "runtime: new work node"
   dump kind
-  dump parent
   dump input.isSome
   result = plan.next_work_id
   inc plan.next_work_id
@@ -612,9 +678,11 @@ proc new_work_node[A](
     id: result,
     kind: kind,
     state: ws_running,
-    parent: parent,
     input: input,
+    input_meta: if input.isSome: some(artifact_meta)
+                else: none(ArtifactMeta),
     output: none(A),
+    output_meta: none(ArtifactMeta),
     request_id: none(RequestId),
     error_message: none(string)
   )
@@ -641,22 +709,31 @@ proc mark_node_failed[A](
   plan.failed = true
   plan.finished = true
 
-proc finalize_join[A](
-    plan: var WorkPlan[A];
-    join_id: WorkID
-)
-
 proc accept_join_result[A](
     plan: var WorkPlan[A];
     join_id: WorkID;
     slot: int;
-    value: A
+    value: A;
+    artifact_meta: ArtifactMeta
 )
+
+proc enqueue_ready[A](
+    plan: var WorkPlan[A];
+    activation: Activation[A]
+) =
+  ## Typed activation stays owner-thread state; channel carries only its ID.
+  inc plan.next_ready_id
+  let ready_id = plan.next_ready_id
+  plan.pending_ready[ready_id] = activation
+  send_global_event(plan.context, GlobalEvent(
+    kind: gek_ready,
+    ready_id: ready_id))
 
 proc deliver_resume[A](
     plan: var WorkPlan[A];
     resume: Resume[A];
-    value: A
+    value: A;
+    artifact_meta: ArtifactMeta
 ) =
   if resume.isNil:
     fail_plan(plan, "nil resume destination")
@@ -666,16 +743,18 @@ proc deliver_resume[A](
   dump resume.kind
   case resume.kind
   of rk_continue:
-    addLast(plan.ready, Activation[A](
+    enqueue_ready(plan, Activation[A](
       flow: resume.flow,
       input: value,
+      artifact_meta: artifact_meta,
       parent: none(WorkID),
       resume: resume.next
     ))
   of rk_join:
-    accept_join_result(plan, resume.join_id, resume.slot, value)
+    accept_join_result(plan, resume.join_id, resume.slot, value, artifact_meta)
   of rk_finished:
     plan.output = some(value)
+    plan.output_meta = some(artifact_meta)
     plan.finished = true
     echo "runtime: plan finished from resume"
 
@@ -701,6 +780,7 @@ proc finish_join[A](
       return
     values[index] = slot.get
 
+  let artifact_meta = allocate_artifact_meta(plan.context)
   let output = case join.kind
     of jk_fanout: join.coalesce(values)
     of jk_lift: join.construct(values, join.original)
@@ -708,24 +788,20 @@ proc finish_join[A](
   if plan.nodes.hasKey(join.id):
     let node = plan.nodes[join.id]
     node.output = some(output)
+    node.output_meta = some(artifact_meta)
     node.state = ws_done
   plan.joins.del(join_id)
   echo "runtime: join output ready"
   dump join.kind
   dump values.len
-  deliver_resume(plan, join.resume, output)
-
-proc finalize_join[A](
-    plan: var WorkPlan[A];
-    join_id: WorkID
-) =
-  finish_join(plan, join_id)
+  deliver_resume(plan, join.resume, output, artifact_meta)
 
 proc accept_join_result[A](
     plan: var WorkPlan[A];
     join_id: WorkID;
     slot: int;
-    value: A
+    value: A;
+    artifact_meta: ArtifactMeta
 ) =
   echo "runtime: accept join result"
   dump join_id
@@ -743,18 +819,23 @@ proc accept_join_result[A](
     return
 
   join.slots[slot] = some(value)
+  join.slot_meta[slot] = some(artifact_meta)
   dec join.remaining
   if join.remaining == 0:
-    finalize_join(plan, join_id)
+    finish_join(plan, join_id)
 
 proc default_model_submit[A](
     context: RuntimeContext[A];
     request_id: RequestId;
-    input: A
+    input: A;
+    input_meta: ArtifactMeta;
+    working_dir: Path
 ) =
   echo "runtime: default model submit (error path)"
   dump request_id
   discard input
+  discard input_meta
+  discard working_dir
   var event: RuntimeEvent[A]
   event.kind = rev_model_error
   event.request_id = request_id
@@ -827,16 +908,19 @@ proc suspend_model[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
     input: A;
-    parent: Option[WorkID];
+    artifact_meta: ArtifactMeta;
     resume: Resume[A]
 ) =
   echo "runtime: suspend model"
-  dump parent
-  let node_id = new_work_node(plan, wk_model, parent, some(input))
+  let node_id = new_work_node(
+    plan, wk_model, some(input), artifact_meta)
   let request_id = allocate_request_id(plan.context)
+  let output_meta = allocate_artifact_meta(plan.context)
   let pending = PendingModel[A](
     node_id: node_id,
     request_id: request_id,
+    input_meta: artifact_meta,
+    output_meta: some(output_meta),
     resume: prepend_continuation(flow.continuation, resume)
   )
   echo "runtime: model pending"
@@ -850,51 +934,61 @@ proc suspend_model[A](
   node.state = ws_waiting
 
   if not flow.submit.isNil:
-    flow.submit(plan.context, request_id, input)
+    flow.submit(
+      plan.context, request_id, input, artifact_meta,
+      output_meta.artifact_dir)
   else:
     let submitter = if not plan.context.submitter.isNil:
       plan.context.submitter
     else:
       default_model_submit[A]
-    submitter(plan.context, request_id, input)
+    submitter(
+      plan.context, request_id, input, artifact_meta,
+      output_meta.artifact_dir)
 
 proc begin_fanout[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
     input: A;
+    artifact_meta: ArtifactMeta;
     parent: Option[WorkID];
     resume: Resume[A]
 ) =
   echo "runtime: begin fanout"
   dump flow.branches.len
   dump parent
-  let join_id = new_work_node(plan, wk_fanout, parent, some(input))
+  let join_id = new_work_node(
+    plan, wk_fanout, some(input), artifact_meta)
   let join = JoinState[A](
     id: join_id,
     kind: jk_fanout,
     parent: parent,
     remaining: flow.branches.len,
     slots: newSeq[Option[A]](flow.branches.len),
+    slot_meta: newSeq[Option[ArtifactMeta]](flow.branches.len),
+    original_meta: artifact_meta,
     resume: prepend_continuation(flow.continuation, resume),
     coalesce: flow.coalesce
   )
   plan.joins[join_id] = join
 
   for index, branch in flow.branches:
-    addLast(plan.ready, Activation[A](
+    enqueue_ready(plan, Activation[A](
       flow: branch,
       input: input,
+      artifact_meta: artifact_meta,
       parent: some(join_id),
       resume: Resume[A](kind: rk_join, join_id: join_id, slot: index)
     ))
 
   if flow.branches.len == 0:
-    finalize_join(plan, join_id)
+    finish_join(plan, join_id)
 
 proc begin_lift[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
     input: A;
+    artifact_meta: ArtifactMeta;
     parent: Option[WorkID];
     resume: Resume[A]
 ) =
@@ -917,13 +1011,16 @@ proc begin_lift[A](
       fail_plan(plan, "lift result indexes are not contiguous")
       return
 
-  let join_id = new_work_node(plan, wk_lift, parent, some(input))
+  let join_id = new_work_node(
+    plan, wk_lift, some(input), artifact_meta)
   let join = JoinState[A](
     id: join_id,
     kind: jk_lift,
     parent: parent,
     remaining: works.len,
     slots: newSeq[Option[A]](works.len),
+    slot_meta: newSeq[Option[ArtifactMeta]](works.len),
+    original_meta: artifact_meta,
     resume: prepend_continuation(flow.continuation, resume),
     original: input,
     construct: flow.construct
@@ -931,9 +1028,10 @@ proc begin_lift[A](
   plan.joins[join_id] = join
 
   for work in works:
-    addLast(plan.ready, Activation[A](
+    enqueue_ready(plan, Activation[A](
       flow: flow.inner,
       input: work.input,
+      artifact_meta: artifact_meta,
       parent: some(join_id),
       resume: Resume[A](
         kind: rk_join,
@@ -943,14 +1041,14 @@ proc begin_lift[A](
     ))
 
   if works.len == 0:
-    finalize_join(plan, join_id)
+    finish_join(plan, join_id)
 
 proc handle_activation*[A](
     plan: var WorkPlan[A];
     activation: Activation[A]
 ) =
   echo "runtime: handle activation"
-  dump plan.ready.len
+  dump plan.pending_ready.len
   dump activation.parent
   var current = activation.flow
   var value = activation.input
@@ -974,7 +1072,9 @@ proc handle_activation*[A](
       value = current.projector(value)
       current = current.continuation
     of fk_model:
-      suspend_model(plan, current, value, activation.parent, activation.resume)
+      suspend_model(
+        plan, current, value, activation.artifact_meta,
+        activation.resume)
       return
     of fk_so:
       echo "runtime: execute dynamic flow"
@@ -982,27 +1082,30 @@ proc handle_activation*[A](
       let child_resume = prepend_continuation(current.continuation,
         activation.resume)
       if child.isNil:
-        deliver_resume(plan, child_resume, value)
+        deliver_resume(plan, child_resume, value, activation.artifact_meta)
       else:
-        addLast(plan.ready, Activation[A](
+        enqueue_ready(plan, Activation[A](
           flow: child,
           input: value,
+          artifact_meta: activation.artifact_meta,
           parent: activation.parent,
           resume: child_resume
         ))
       return
     of fk_fanout:
       echo "runtime: suspend fanout"
-      begin_fanout(plan, current, value, activation.parent,
-        activation.resume)
+      begin_fanout(
+        plan, current, value, activation.artifact_meta,
+        activation.parent, activation.resume)
       return
     of fk_lift:
       echo "runtime: suspend lift"
-      begin_lift(plan, current, value, activation.parent,
-        activation.resume)
+      begin_lift(
+        plan, current, value, activation.artifact_meta,
+        activation.parent, activation.resume)
       return
 
-  deliver_resume(plan, activation.resume, value)
+  deliver_resume(plan, activation.resume, value, activation.artifact_meta)
 
 proc handle_runtime_event[A](
     plan: var WorkPlan[A];
@@ -1037,10 +1140,20 @@ proc handle_runtime_event[A](
     let artifact = materialize(event.output_kind, LlmOutput(
       tool_name: event.output_tool_name,
       arguments: parseJson(event.output_arguments)))
+    if not pending.output_meta.isSome:
+      fail_plan(plan, "model completion has no output metadata")
+      return
+    let output_meta = pending.output_meta.get
+    if event.has_output_meta and
+        (event.output_meta.id != output_meta.id or
+         $event.output_meta.artifact_dir != $output_meta.artifact_dir):
+      fail_plan(plan, "model completion output metadata mismatch")
+      return
     node.output = some(artifact)
+    node.output_meta = some(output_meta)
     node.state = ws_done
     echo "runtime: model artifact accepted"
-    deliver_resume(plan, pending.resume, artifact)
+    deliver_resume(plan, pending.resume, artifact, output_meta)
   of rev_model_error:
     let key = request_id_key(event.request_id)
     if not plan.pending_models.hasKey(key):
@@ -1066,40 +1179,18 @@ proc handle_global_event[A](
   case event.kind
   of gek_runtime:
     handle_runtime_event(plan, event)
+  of gek_ready:
+    if not plan.pending_ready.hasKey(event.ready_id):
+      fail_plan(plan, "unknown ready activation")
+      return
+    let activation = plan.pending_ready[event.ready_id]
+    plan.pending_ready.del(event.ready_id)
+    handle_activation(plan, activation)
   of gek_stdout_line, gek_stderr_line, gek_stdout_closed, gek_stderr_closed,
       gek_process_exit, gek_reader_error:
     messenger.handle_global_event(runtime, event)
   of gek_shutdown:
     plan.finished = true
-
-proc drain_ready_batch*[A](
-    plan: var WorkPlan[A];
-    limit: int = 64
-) =
-  echo "runtime: drain ready batch"
-  dump plan.ready.len
-  dump limit
-  var handled = 0
-  while not plan.finished and plan.ready.len > 0 and handled < limit:
-    let activation = popFirst(plan.ready)
-    inc handled
-    handle_activation(plan, activation)
-  dump handled
-  dump plan.ready.len
-
-proc drain_global_events[A](
-    plan: var WorkPlan[A];
-    messenger: var GlobalEventMessenger;
-    runtime: ptr CodexRuntime;
-    limit: int = 64
-): int =
-  ## Unified main-thread drainer. Channel recv is intentionally blocking.
-  while result < limit:
-    let event = recv_global_event(plan.context)
-    inc result
-    handle_global_event(plan, messenger, runtime, event)
-    if plan.finished:
-      break
 
 proc run_work_plan*[A](
     plan: var WorkPlan[A];
@@ -1108,16 +1199,9 @@ proc run_work_plan*[A](
   if not plan.context.events_open:
     raise newException(ValueError, "global event channel is not open")
   var messenger = new_global_event_messenger()
-  var iteration = 0
   while not plan.finished:
-    inc iteration
-    echo "runtime: scheduler iteration"
-    dump iteration
-    dump plan.ready.len
-    dump plan.context.events_open
-    drain_ready_batch(plan)
-    if not plan.finished and plan.ready.len == 0:
-      discard drain_global_events(plan, messenger, runtime, 1)
+    let event = recv_global_event(plan.context)
+    handle_global_event(plan, messenger, runtime, event)
 
 proc execute_flows*[A](
     top_level_flows: seq[Flow[A]];
@@ -1130,24 +1214,29 @@ proc execute_flows*[A](
   ## borrowed; otherwise this call owns the complete Codex lifecycle.
   echo "runtime: execute flows"
   dump top_level_flows.len
-  let context = new_runtime_context(submitter, transport)
+  let source_root = Path(expandFilename(os.getCurrentDir()))
+  let run_dir = create_run_directory(source_root)
+  let context = new_runtime_context(
+    submitter, transport, run_dir, source_root)
   var owned_runtime = false
   var active_runtime = runtime
   var readers: CodexReaders
   var readers_started = false
   try:
     if active_runtime.isNil:
-      active_runtime = init_codex_runtime(getCurrentDir())
+      active_runtime = init_codex_runtime($context.run_dir)
       owned_runtime = true
+    context.codex_runtime = active_runtime
     open_global_events(context)
     start_codex_readers(readers, context, active_runtime)
     readers_started = true
     result = init_work_plan(top_level_flows, context)
     echo "runtime: enqueue entry activation"
     dump result.entry.kind
-    addLast(result.ready, Activation[A](
+    enqueue_ready(result, Activation[A](
       flow: result.entry,
       input: input,
+      artifact_meta: ArtifactMeta(id: 0, artifact_dir: source_root),
       parent: none(WorkID),
       resume: Resume[A](kind: rk_finished)
     ))
@@ -1163,6 +1252,7 @@ proc execute_flows*[A](
     close_global_events(context)
     if owned_runtime:
       deinit_codex_runtime(active_runtime)
+      context.codex_runtime = nil
 
 proc execute_flows*[A](top_level_flows: seq[Flow[A]]) =
   ## Compatibility entry point used by the current generated solve wrapper.

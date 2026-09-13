@@ -4,6 +4,11 @@
 
 Restore historical recursive materializer for model input.
 
+## Status
+
+Not started. Generated submit still stringifies typed input; it does not walk
+or copy `Location` payloads.
+
 ## Files
 
 - `src/vecherinka_comptime.nim`
@@ -17,14 +22,15 @@ Port and adapt historical walker:
 - `materialize_tree`;
 - field and variant inspection;
 - sequence and option traversal;
-- instruction path helpers;
-- location contract path traversal.
+- instruction rendering;
+- `Location` leaves represented as runtime-relative source paths.
 
 Generated materializer signature should receive:
 
 - typed input value;
-- source artifact root;
-- destination artifact root;
+- input metadata;
+- common runtime directory for resolving `Location` values;
+- destination artifact working directory;
 - optional initial instruction text.
 
 Generated output:
@@ -39,11 +45,12 @@ optional: Option:none
 Behavior:
 
 - inline leaves become text;
-- `Location` leaves copy source payload to identical relative destination path;
+- `Location` leaves resolve from the common runtime directory and copy the
+  payload into the supplied working directory;
 - variants visit active branch only;
 - sequences use one-based human paths;
 - absent options emit explicit none marker;
-- source errors become model submission errors before agent creation.
+- copy failures become model submission errors before agent creation.
 
 Resolve aliases and distinct wrappers. Preserve public field names. Reject unsupported object shapes at compile time.
 
@@ -58,11 +65,10 @@ Resolve aliases and distinct wrappers. Preserve public field names. Reject unsup
 - absent option emits none;
 - file copied;
 - directory copied recursively;
-- missing location returns error;
+- missing source reports a copy failure;
 - ordinary strings remain literal;
 - repeated model input gets independent destination copy.
 
 ## Done when
 
 Fake transport can inspect complete materialized input instructions and destination tree.
-

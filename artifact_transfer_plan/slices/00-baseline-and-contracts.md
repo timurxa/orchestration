@@ -4,6 +4,10 @@
 
 Freeze current behavior before artifact changes. Establish names, boundaries, and test fixtures.
 
+## Status
+
+Complete. Baseline matrix recorded in `PROGRESS.md`.
+
 ## Work
 
 1. Record current branch and dirty files.
@@ -49,4 +53,3 @@ type ModelMaterialization*[A] = object
 ## Done when
 
 Current baseline recorded in `PROGRESS.md`; fixture plan clear; no implementation started accidentally.
-

@@ -4,6 +4,12 @@
 
 Prevent hangs, duplicate completion, leaked pending work, or unsafe partial artifacts.
 
+## Status
+
+Partial. Reader shutdown, runtime cleanup, stale completion checks, and join
+duplicate checks exist. Artifact, turn, `finish_work`, and pending-work
+failure coverage remains.
+
 ## Files
 
 - `src/vecherinka_runtime.nim`
@@ -19,7 +25,7 @@ Handle distinctly:
 - thread-start failure;
 - turn-start failure;
 - invalid schema output;
-- invalid location output;
+- input materialization/copy failure;
 - duplicate `finish_work`;
 - turn failure;
 - interrupted turn;
@@ -49,4 +55,3 @@ Rules:
 - repeated runtime deinitialization safe;
 - partial materialization cleanup safe;
 - successful artifacts remain inspectable.
-
