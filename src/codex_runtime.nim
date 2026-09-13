@@ -407,12 +407,19 @@ proc accept_json*(runtime: ptr CodexRuntime; node: JsonNode): Message =
   result = parse_message(node, runtime.pending)
   handle_message(runtime, result)
 
+proc accept_tool_response*(runtime: ptr CodexRuntime; request_id: RequestId;
+    success: bool; content_items: seq[DynamicToolContentItem])
+
 proc accept_tool_response*(runtime: ptr CodexRuntime; context: ToolCallContext;
+    success: bool; content_items: seq[DynamicToolContentItem]) =
+  accept_tool_response(runtime, context.request_id, success, content_items)
+
+proc accept_tool_response*(runtime: ptr CodexRuntime; request_id: RequestId;
     success: bool; content_items: seq[DynamicToolContentItem]) =
   handle_message(runtime, Message(
     kind: mk_server_response,
     server_response: ServerResponse(
-      id: context.request_id,
+      id: request_id,
       result: some(serialize_dynamic_tool_call_response(DynamicToolCallResponse(
         success: success,
         content_items: content_items

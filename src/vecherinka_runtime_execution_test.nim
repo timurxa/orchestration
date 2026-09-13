@@ -25,17 +25,23 @@ proc inspect_generated_transport[A](
   observed_materialized = true
   doAssert $spec.runtime_dir == $expected_source_root
   doAssert dirExists($spec.working_dir)
-  var event: RuntimeEvent[A]
-  event.kind = rev_model_artifact
-  event.request_id = request_id
-  event.output_kind = spec.output_kind
-  event.output = LlmOutput(
-    tool_name: "debug_return",
-    arguments: newJObject()
-  )
-  event.materialize = spec.materialize
-  event.has_output = true
-  enqueue_runtime_event(context, event)
+  doAssert spec.tools.len == 1
+  doAssert spec.tools[0].name == "finish_work"
+  doAssert spec.tools[0].input_schema["type"].getStr == "string"
+  doAssert not spec.tools[0].callback.isNil
+  let decoded = spec.materialize(spec.output_kind, LlmOutput(
+    tool_name: "finish_work",
+    arguments: %*"generated"))
+  doAssert decoded.ok
+  let rejected = spec.materialize(spec.output_kind, LlmOutput(
+    tool_name: "finish_work",
+    arguments: %*42))
+  doAssert not rejected.ok
+  var tool_context: ToolCallContext
+  tool_context.request_id = RequestId(kind: rid_integer, integer_value: 900)
+  tool_context.params.tool = "finish_work"
+  tool_context.params.arguments = %*"generated"
+  spec.tools[0].callback(spec.tools[0].data, tool_context)
 
 vecherinka(generated_solve):
   > generated_entry GeneratedInput ~> string {.entry.}:
@@ -92,9 +98,9 @@ proc construct_empty(results: seq[string]; input: string): string =
 proc materialize_debug_string(
     output_kind: int;
     output: LlmOutput
-): string =
+): ModelMaterialization[string] =
   discard output_kind
-  output.tool_name
+  ModelMaterialization[string](ok: true, value: output.tool_name)
 
 proc expect_value_error(action: proc()) =
   var raised = false
@@ -399,7 +405,7 @@ block:
     GeneratedInput(value: "actual"),
     inspect_generated_transport)
   doAssert observed_materialized
-  doAssert observed_tool == "return_string"
+  doAssert observed_tool == "finish_work"
   doAssert observed_output_kind >= 0
 
 echo "vecherinka runtime execution: PASS"

@@ -73,8 +73,8 @@ proc inspect_materialization[A](
   event.request_id = request_id
   event.output_kind = spec.output_kind
   event.output = LlmOutput(
-    tool_name: "debug_return",
-    arguments: newJObject())
+    tool_name: "finish_work",
+    arguments: %*"generated")
   event.materialize = spec.materialize
   event.has_output = true
   enqueue_runtime_event(context, event)

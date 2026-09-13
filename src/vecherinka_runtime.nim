@@ -109,10 +109,22 @@ type
     tool_name*: string
     arguments*: JsonNode
 
+  ModelMaterialization*[A] = object
+    ok*: bool
+    value*: A
+    error*: string
+
   ModelMaterializer*[A] = proc(
     output_kind: int;
     output: LlmOutput
-  ): A {.nimcall.}
+  ): ModelMaterialization[A] {.nimcall.}
+
+  LlmToolData* = ref object
+    ## Opaque callback state. Runtime context keeps GC ownership.
+    context*: pointer
+    request_id*: RequestId
+    output_kind*: int
+    materializer*: pointer
 
   LlmCallSpec*[A] = object
     profile*: ProfileSpec
@@ -138,6 +150,8 @@ type
     output_kind*: int
     output*: LlmOutput
     materialize*: ModelMaterializer[A]
+    has_tool_request_id*: bool
+    tool_request_id*: RequestId
     has_output_meta*: bool
     output_meta*: ArtifactMeta
     has_message*: bool
@@ -167,6 +181,8 @@ type
     output_tool_name*: string
     output_arguments*: string
     output_materializer*: pointer
+    has_tool_request_id*: bool
+    tool_request_id*: RequestId
     has_output_meta*: bool
     output_meta*: ArtifactMeta
     has_message*: bool
@@ -208,6 +224,7 @@ type
     run_dir*: Path
     next_artifact_id*: ArtifactID
     codex_runtime*: ptr CodexRuntime
+    llm_tool_data*: seq[LlmToolData]
 
   ModelSubmitter*[A] = proc(
     context: RuntimeContext[A];
@@ -272,6 +289,8 @@ proc enqueue_runtime_event*[A](
     has_output: event.has_output,
     output_kind: event.output_kind,
     output_materializer: cast[pointer](event.materialize),
+    has_tool_request_id: event.has_tool_request_id,
+    tool_request_id: event.tool_request_id,
     has_output_meta: event.has_output_meta,
     output_meta: event.output_meta,
     has_message: event.has_message,
@@ -280,6 +299,47 @@ proc enqueue_runtime_event*[A](
     global_event.output_tool_name = event.output.tool_name
     global_event.output_arguments = $event.output.arguments
   send_global_event(context, global_event)
+
+proc enqueue_llm_output_event*[A](
+    context: RuntimeContext[A];
+    request_id: RequestId;
+    output_kind: int;
+    materialize: ModelMaterializer[A];
+    tool_context: ToolCallContext
+) {.gcsafe.} =
+  ## Callback only copies transport data. Typed decoding stays owner-thread.
+  {.cast(gcsafe).}:
+    var event: RuntimeEvent[A]
+    event.kind = rev_model_artifact
+    event.request_id = request_id
+    event.output_kind = output_kind
+    event.output = LlmOutput(
+      tool_name: tool_context.params.tool,
+      arguments: tool_context.params.arguments)
+    event.materialize = materialize
+    event.has_output = true
+    event.has_tool_request_id = true
+    event.tool_request_id = tool_context.request_id
+    enqueue_runtime_event(context, event)
+
+proc new_llm_tool_data*(
+    context: pointer;
+    request_id: RequestId;
+    output_kind: int;
+    materializer: pointer
+): LlmToolData =
+  let data = LlmToolData(
+    context: context,
+    request_id: request_id,
+    output_kind: output_kind,
+    materializer: materializer)
+  data
+
+proc retain_llm_tool_data*[A](context: RuntimeContext[A]; data: LlmToolData) =
+  context.llm_tool_data.add(data)
+
+proc release_llm_tool_data*[A](context: RuntimeContext[A]) =
+  context.llm_tool_data.setLen(0)
 
 proc recv_global_event*[A](context: RuntimeContext[A]): GlobalEvent =
   context.events.recv()
@@ -546,6 +606,7 @@ proc new_runtime_context*[A](
   result.run_dir = run_dir
   result.next_artifact_id = 0
   result.codex_runtime = nil
+  result.llm_tool_data = @[]
 
 proc create_run_directory*(source_root: Path): Path =
   ## Keep run state in a unique child of the program working directory.
@@ -939,21 +1000,6 @@ proc submit_llm*[A](
     context.transport
   transport(context, request_id, spec)
 
-proc debug_tool_registry*(input_type, output_type: string): DynamicToolRegistry =
-  ## Generated submit adapters provide concrete type names. Keep registry
-  ## construction centralized until real tool callbacks are wired.
-  result.add(DynamicTool(
-    name: "return_" & output_type,
-    description: "Return value of type " & output_type &
-      " for input " & input_type,
-    input_schema: newJObject(),
-    data: nil,
-    callback: nil
-  ))
-
-proc default_debug_value*[A](): A =
-  default(A)
-
 proc suspend_model[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
@@ -1126,6 +1172,7 @@ proc handle_invocation*[A](
 
 proc handle_runtime_event[A](
     plan: var WorkPlan[A];
+    runtime: ptr CodexRuntime;
     event: GlobalEvent
 ) =
   echo "runtime: handle event"
@@ -1138,7 +1185,6 @@ proc handle_runtime_event[A](
       fail_plan(plan, "unknown model completion")
       return
     let invocation = plan.model_requests[key]
-    plan.model_requests.del(key)
     if invocation.flow.isNil or invocation.flow.kind != fk_model:
       fail_plan(plan, "model completion has invalid invocation")
       return
@@ -1154,16 +1200,49 @@ proc handle_runtime_event[A](
     if event.output_arguments.len == 0:
       fail_plan(plan, "model completion has no encoded output")
       return
+    let can_ack_tool = event.has_tool_request_id and not runtime.isNil and
+      runtime.server_requests.hasKey(request_id_key(event.tool_request_id))
+    if event.has_tool_request_id and event.output_tool_name != "finish_work":
+      if can_ack_tool:
+        runtime.accept_tool_response(
+          event.tool_request_id,
+          false,
+          @[dynamic_tool_text("unexpected completion tool: " &
+            event.output_tool_name)])
+        return
+      fail_plan(plan, "unexpected completion tool: " & event.output_tool_name)
+      return
     let materialize = cast[ModelMaterializer[A]](event.output_materializer)
-    let artifact = materialize(event.output_kind, LlmOutput(
-      tool_name: event.output_tool_name,
-      arguments: parseJson(event.output_arguments)))
+    var decoded: ModelMaterialization[A]
+    try:
+      decoded = materialize(event.output_kind, LlmOutput(
+        tool_name: event.output_tool_name,
+        arguments: parseJson(event.output_arguments)))
+    except CatchableError as error:
+      decoded.ok = false
+      decoded.error = error.msg
+    if not decoded.ok:
+      if can_ack_tool:
+        runtime.accept_tool_response(
+          event.tool_request_id,
+          false,
+          @[dynamic_tool_text("invalid finish_work result: " & decoded.error)])
+        return
+      fail_plan(plan, "invalid model output: " & decoded.error)
+      return
+    let artifact = decoded.value
     let output_meta = invocation.output_meta.get
     if event.has_output_meta and
         (event.output_meta.id != output_meta.id or
          $event.output_meta.artifact_dir != $output_meta.artifact_dir):
       fail_plan(plan, "model completion output metadata mismatch")
       return
+    if can_ack_tool:
+      runtime.accept_tool_response(
+        event.tool_request_id,
+        true,
+        @[dynamic_tool_text(event.output_arguments)])
+    plan.model_requests.del(key)
     let output_id = register_artifact(plan.context, artifact, output_meta)
     echo "runtime: model artifact accepted"
     deliver_destination(plan, invocation.destination, output_id)
@@ -1188,7 +1267,7 @@ proc handle_global_event[A](
   ## One main-thread dispatcher handles both transport and Vecherinka events.
   case event.kind
   of gek_runtime:
-    handle_runtime_event(plan, event)
+    handle_runtime_event(plan, runtime, event)
   of gek_ready:
     if not plan.pending_ready.hasKey(event.ready_id):
       fail_plan(plan, "unknown ready invocation")
@@ -1259,6 +1338,7 @@ proc execute_flows*[A](
     if readers_started:
       stop_codex_readers(readers)
     close_global_events(context)
+    release_llm_tool_data(context)
     if owned_runtime:
       deinit_codex_runtime(active_runtime)
       context.codex_runtime = nil

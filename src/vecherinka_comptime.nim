@@ -6,9 +6,6 @@ import fusion/matching
 import it_projection, lift_pattern_typed
 import schematic
 
-proc json_schema_text[T](): string {.compileTime.} =
-  $toJsonSchema(schemaOf(T))
-
 type
   FlowIRKind* = enum
     firk_ref,
@@ -982,15 +979,11 @@ proc emit_input_materializer(type_expr: NimNode): NimNode =
       `instructions`
     )
 
-proc emit_debug_value(type_expr, output: NimNode): NimNode =
-  ## Keep debug materialization typed. String outputs get visible evidence;
-  ## other types use a legal typed zero until per-type factories are added.
-  if type_expr.is_named("string"):
-    let tool_name = newDotExpr(copyNimTree(output), ident("tool_name"))
-    return newTree(nnkInfix, ident("&"), newLit("debug:"), tool_name)
-  newTree(nnkCall,
-    newTree(nnkBracketExpr, bindSym"default_debug_value",
-      copyNimTree(type_expr)))
+template output_schema_of[T](): untyped =
+  schemaOf(T)
+
+template output_discriminated_schema[T](discriminator: untyped): untyped =
+  discriminated(T, discriminator)
 
 proc lower_model_call(
     registry: var ArtifactRegistry;
@@ -1001,7 +994,6 @@ proc lower_model_call(
   let prompt_expr = copyNimTree(prompt)
   let input_type = copyNimTree(flow_type[1])
   let output_type = copyNimTree(flow_type[2])
-  let output_info = registry.artifact_info(output_type)
   var output_kind_ordinal = -1
   for index, info in registry.types:
     if sameType(info.type_expr, output_type):
@@ -1011,23 +1003,40 @@ proc lower_model_call(
     error("model output type is missing from Artifact registry: " &
       output_type.repr, output_type)
   let output_kind_value = newLit(output_kind_ordinal)
-  let output_kind_type = registry.kind_name
-  let output_value_name = output_info.value_name
   let materializer_kind = genSym(nskParam, "model_output_kind")
   let materializer_output = genSym(nskParam, "model_output")
-  let debug_value = emit_debug_value(output_type, materializer_output)
+  let output_contract = genSym(nskLet, "model_output_contract")
+  let parsed_output = genSym(nskLet, "model_parsed_output")
+  let parsed_value = newDotExpr(parsed_output, ident("value"))
+  let packed_output = registry.emit_artifact_pack(output_type, parsed_value)
+  let output_tree = artifact_tree(output_type)
+  let output_contract_expr = if output_tree.kind == ank_variant:
+    newCall(
+      newTree(nnkBracketExpr,
+        bindSym"output_discriminated_schema", copyNimTree(output_type)),
+      ident(output_tree.tag_name.strVal))
+  else:
+    newCall(newTree(nnkBracketExpr,
+      bindSym"output_schema_of", copyNimTree(output_type)))
   let materializer_body = quote do:
     case `materializer_kind`
     of `output_kind_value`:
-      result = `artifact_name`(
-        kind: `output_kind_type`(`output_kind_value`),
-        `output_value_name`: `debug_value`
-      )
+      let `output_contract` = `output_contract_expr`
+      let `parsed_output` = `output_contract`.tryParse(
+        `materializer_output`.arguments)
+      if not `parsed_output`.ok:
+        result.ok = false
+        result.error = "invalid finish_work result (" &
+          $`parsed_output`.issues.len & " schema issues)"
+        return
+      result.ok = true
+      result.value = `packed_output`
     else:
-      doAssert false, "unexpected model output kind"
+      result.ok = false
+      result.error = "unexpected model output kind"
   let materializer = quote do:
     (proc (`materializer_kind`: int; `materializer_output`: LlmOutput):
-        `artifact_name` {.nimcall.} =
+        ModelMaterialization[`artifact_name`] {.nimcall.} =
       `materializer_body`
     )
 
@@ -1058,17 +1067,39 @@ proc lower_model_call(
     newLit("")
   else:
     materialized_input
-  let input_type_name = newLit(input_type.repr)
-  let output_type_name = newLit(output_type.repr)
-  let tools = newCall(bindSym"debug_tool_registry",
-    input_type_name, output_type_name)
+  let output_contract_name = genSym(nskLet, "model_output_contract")
+  let output_schema_name = genSym(nskLet, "model_output_schema")
+  let materializer_name = genSym(nskLet, "model_materializer")
+  let tool_data_name = genSym(nskLet, "model_tool_data")
+  let tools_name = genSym(nskVar, "model_tools")
+  let callback = quote do:
+    (proc (tool_data: pointer; tool_context: ToolCallContext)
+      {.nimcall, gcsafe.} =
+      {.cast(gcsafe).}:
+        let data = cast[LlmToolData](tool_data)
+        enqueue_llm_output_event(
+          cast[RuntimeContext[`artifact_name`]](data.context),
+          data.request_id,
+          data.output_kind,
+          cast[ModelMaterializer[`artifact_name`]](data.materializer),
+          tool_context)
+    )
+  let protocol_setup = quote do:
+    let `output_contract_name` = `output_contract_expr`
+    let `output_schema_name` = toJsonSchema(`output_contract_name`)
+    let `materializer_name` = `materializer`
+    let `tool_data_name` = new_llm_tool_data(
+      cast[pointer](`submit_context`), `submit_request_id`,
+      `output_kind_value`, cast[pointer](`materializer_name`))
+    retain_llm_tool_data(`submit_context`, `tool_data_name`)
+    var `tools_name`: DynamicToolRegistry = @[]
+    `tools_name`.register_dynamic_tool(
+      "finish_work",
+      "Submit final structured result. Call exactly once when task is complete.",
+      `output_schema_name`,
+      cast[pointer](`tool_data_name`),
+      `callback`)
   let llm_spec_name = genSym(nskLet, "llm_spec")
-  let output_schema_name = genSym(nskConst, "model_output_schema")
-  let json_schema_text_symbol = bindSym"json_schema_text"
-  let output_schema_echo = quote do:
-    const `output_schema_name` =
-      `json_schema_text_symbol`[`output_type`]()
-    echo `output_schema_name`
   let llm_spec_value = quote do:
     LlmCallSpec[`artifact_name`](
       profile: `profile_expr`,
@@ -1076,24 +1107,24 @@ proc lower_model_call(
       materialized_input: `materialized_input_value`,
       runtime_dir: `submit_context`.runtime_dir,
       working_dir: `submit_working_dir`,
-      tools: `tools`,
+      tools: `tools_name`,
       output_kind: `output_kind_value`,
-      materialize: `materializer`
+      materialize: `materializer_name`
     )
   let submit_llm_symbol = bindSym"submit_llm"
   let submit_body = if input_type.is_void_type:
     quote do:
-      `output_schema_echo`
       discard `submit_input`
+      `protocol_setup`
       let `llm_spec_name` = `llm_spec_value`
       `submit_llm_symbol`(`submit_context`, `submit_request_id`,
         `llm_spec_name`)
   else:
     quote do:
-      `output_schema_echo`
       let `typed_input` = `submit_unpacked`
       try:
         let `materialized_input` = `materialized_input_call`
+        `protocol_setup`
         let `llm_spec_name` = `llm_spec_value`
         `submit_llm_symbol`(`submit_context`, `submit_request_id`,
           `llm_spec_name`)

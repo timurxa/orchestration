@@ -28,16 +28,25 @@ proc debug_generated_transport[A](
   dump spec.tools.len
   dump spec.prompt
   dump spec.materialized_input
-  doAssert spec.tools.len > 0
+  doAssert spec.tools.len == 1
+  doAssert spec.tools[0].name == "finish_work"
+  doAssert spec.tools[0].input_schema["type"].getStr == "object"
   doAssert not spec.materialize.isNil
-
+  let decoded = spec.materialize(spec.output_kind, LlmOutput(
+    tool_name: "finish_work",
+    arguments: %*{"message": "generated"}))
+  doAssert decoded.ok
+  let rejected = spec.materialize(spec.output_kind, LlmOutput(
+    tool_name: "finish_work",
+    arguments: %*{"message": 42}))
+  doAssert not rejected.ok
   var event: RuntimeEvent[A]
   event.kind = rev_model_artifact
   event.request_id = request_id
   event.output_kind = spec.output_kind
   event.output = LlmOutput(
-    tool_name: "debug_return",
-    arguments: newJObject()
+    tool_name: "finish_work",
+    arguments: %*{"message": "generated"}
   )
   event.materialize = spec.materialize
   event.has_output = true
