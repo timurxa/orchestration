@@ -6,8 +6,8 @@ Restore historical recursive materializer for model input.
 
 ## Status
 
-Not started. Generated submit still stringifies typed input; it does not walk
-or copy `Location` payloads.
+Complete. Generated submit now walks typed input and copies `Location` payloads
+before transport submission.
 
 ## Files
 

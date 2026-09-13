@@ -83,13 +83,37 @@ work remains in Slices 3 and 5.
 
 Slice 3 — input materialization.
 
-Status: not started.
+Status: complete.
+
+## Slice 3 record
+
+Status: complete.
+
+Files changed: `src/vecherinka_comptime.nim`, `src/vecherinka_runtime.nim`,
+and `src/vecherinka_materialization_test.nim`.
+
+Tests run: focused materialization test plus execution, model lowering,
+interface, IPC, and generated integration tests. All pass under finite
+`gtimeout` limits.
+
+Result: generated model submits now walk scalar, enum, object, tuple, variant,
+sequence, option, and distinct wrapper inputs through a callback-based
+compile-time walker. Active variant branches only are visited; sequence paths
+are one-based; absent options render explicitly. `Location` payloads resolve
+against the common runtime directory, must pass `Path.isRelativeTo`, copy into
+the fresh working directory by basename, and receive numeric suffixes on
+collision. Empty, missing, outside-root, and destination-contained sources
+fail before transport submission.
+
+Issues: existing compiler warnings only.
+
+Next action: Slice 4 output schema and decoder.
 
 ## Slice status
 
 - [x] Slice 0 — baseline and contracts
 - [x] Slice 1 — metadata and run-root allocation
-- [ ] Slice 3 — input materialization walker
+- [x] Slice 3 — input materialization walker
 - [~] Slice 4 — output schema and decoder
 - [~] Slice 5 — generated submit integration
 - [ ] Slice 6 — `finish_work` event protocol
@@ -104,13 +128,15 @@ Status: not started.
 
 ### Known facts
 
-- Current generated submit only unpacks typed input, stringifies context, installs debug tool, and sends `LlmCallSpec`.
-- Current generated materializer returns debug/default values.
+- Current generated submit unpacks typed input, materializes it, stringifies
+  context, installs debug tool, and sends `LlmCallSpec`.
+- Current generated output materializer returns debug/default values.
 - Current generated pack/unpack carries typed payload only.
 - Current generated lowering computes and echoes output JSON schema, but does
   not yet build the final output decoder/tool protocol.
-- Current `LlmCallSpec` carries `input_meta`, `runtime_dir`, and `working_dir`;
-  it does not yet carry materialized input or a generated output decoder.
+- Current `LlmCallSpec` carries `input_meta`, `runtime_dir`, `working_dir`,
+  and generated `materialized_input`; it does not yet carry a generated output
+  decoder.
 - Current `debug_tool_registry` has empty input schema and nil callback.
 - Current default transport is deterministic; it does not create agent or send prompt.
 - Current Codex runtime already supports dynamic tool registration, thread creation, delayed turn eligibility, and tool acknowledgement.

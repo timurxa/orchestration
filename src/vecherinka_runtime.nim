@@ -155,6 +155,7 @@ type
     profile*: ProfileSpec
     prompt*: string
     typed_context*: string
+    materialized_input*: string
     input_meta*: ArtifactMeta
     runtime_dir*: Path
     working_dir*: Path
@@ -603,6 +604,65 @@ proc allocate_artifact_meta*[A](context: RuntimeContext[A]): ArtifactMeta =
     artifact_dir: context.run_dir /
       Path("artifact-" & $context.next_artifact_id))
   createDir($result.artifact_dir)
+
+proc materialized_name_used(names: seq[string]; name: string): bool =
+  for used_name in names:
+    if used_name == name:
+      return true
+  false
+
+proc copy_location_payload*(
+    runtime_dir, artifact_dir: Path;
+    location: string;
+    materialized_names: var seq[string]
+): string =
+  ## Destination is flat by design. The containment check also prevents a
+  ## Location naming a parent of the destination from recursive self-copy.
+  if location.len == 0:
+    raise newException(IOError, "materialize Location is empty")
+
+  let source = runtime_dir / Path(location)
+  if not source.isRelativeTo(runtime_dir):
+    raise newException(IOError,
+      "materialize Location is outside runtime directory: " & $source)
+
+  let source_is_file = fileExists($source)
+  let source_is_dir = dirExists($source)
+  if not source_is_file and not source_is_dir:
+    raise newException(IOError,
+      "materialize Location source does not exist: " & $source)
+  if source_is_dir and artifact_dir.isRelativeTo(source):
+    raise newException(IOError,
+      "materialize Location source contains destination: " & $source)
+
+  createDir($artifact_dir)
+  let parts = splitFile(source)
+  let stem = $parts.name
+  if stem.len == 0:
+    raise newException(IOError,
+      "materialize Location has no file name: " & $source)
+
+  var suffix = 0
+  while true:
+    let candidate = stem & (if suffix == 0: "" else: "-" & $suffix) &
+      parts.ext
+    let destination = artifact_dir / Path(candidate)
+    if not materialized_name_used(materialized_names, candidate) and
+        not fileExists($destination) and not dirExists($destination):
+      if source_is_file:
+        ## Check immediately before the file copy, not only during path setup.
+        if not source.isRelativeTo(runtime_dir):
+          raise newException(IOError,
+            "materialize Location is outside runtime directory: " & $source)
+        copyFile($source, $destination)
+      else:
+        if not source.isRelativeTo(runtime_dir):
+          raise newException(IOError,
+            "materialize Location is outside runtime directory: " & $source)
+        copyDir($source, $destination)
+      materialized_names.add(candidate)
+      return candidate
+    inc suffix
 
 proc allocate_request_id[A](context: RuntimeContext[A]): RequestId =
   echo "runtime: allocate request id"

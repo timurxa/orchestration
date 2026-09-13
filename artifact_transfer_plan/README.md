@@ -34,14 +34,14 @@ Implemented:
 - one-channel scheduler: typed activations live in `pending_ready`, while
   `gek_ready` carries only an ID; runtime loop performs one blocking channel
   read;
-- generated submit boundary carrying `input_meta`, `runtime_dir`, and
-  `working_dir`; deterministic injected transport remains available;
+- generated submit boundary carrying `input_meta`, `runtime_dir`,
+  `working_dir`, and materialized input; deterministic injected transport
+  remains available;
 - Codex POSIX readers, main-thread JSON ownership, shutdown joining, and
   existing dynamic-tool plumbing.
 
 Still missing:
 
-- recursive input materialization and path-based `Location` copying;
 - typed output decoding;
 - generated `finish_work` tool/callback integration;
 - artifact-aware real Codex transport and full failure/end-to-end coverage.
@@ -113,7 +113,7 @@ Never overload current `RuntimeEvent.request_id` for both.
 | --- | --- | --- | --- |
 | 0 | Baseline, contracts, progress tracking | complete | Existing tests compile/pass; no source behavior change |
 | 1 | Artifact metadata and run-root allocation | complete | Metadata survives raw, `it`, `so`, joins; isolated roots verified |
-| 3 | Compile-time materialization walker | not started | Nested input renders and copies correctly |
+| 3 | Compile-time materialization walker | complete | Nested input renders and copies correctly |
 | 4 | Output schema and decoder | partial | Valid/invalid structured outputs handled without defaults |
 | 5 | Generated submit integration | partial | Fake transport receives real materialized spec |
 | 6 | `finish_work` event protocol | not started | Invalid calls retry; valid calls acknowledge and complete |

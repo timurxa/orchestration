@@ -574,6 +574,417 @@ proc artifact_info(
 
 proc is_void_type(type_expr: NimNode): bool
 
+type
+  ArtifactNodeKind = enum
+    ank_inline
+    ank_location
+    ank_object
+    ank_variant
+    ank_tuple
+    ank_seq
+    ank_option
+    ank_option_none
+
+  ArtifactNode = ref object
+    kind: ArtifactNodeKind
+    type_expr: NimNode
+    needs_runtime_cast: bool
+    type_name: string
+    tag_name: NimNode
+    fields: seq[ArtifactField]
+    branches: seq[ArtifactBranch]
+    element: ArtifactNode
+
+  ArtifactField = object
+    name: string
+    selector: NimNode
+    node: ArtifactNode
+
+  ArtifactBranch = object
+    tags: seq[NimNode]
+    is_else: bool
+    fields: seq[ArtifactField]
+
+  ArtifactWalkCallback[T] = proc(
+    node: ArtifactNode;
+    value, path: NimNode;
+    state: var T
+  ): NimNode
+
+proc artifact_type_inst(type_node: NimNode): NimNode =
+  let type_inst = type_node.getTypeInst
+  if type_inst.kind in {nnkTupleTy, nnkTupleConstr}:
+    return copyNimTree(type_inst)
+  if type_inst.kind == nnkBracketExpr and type_inst.len == 2 and
+      is_named(type_inst[0], "typeDesc"):
+    return copyNimTree(type_inst[1])
+  copyNimTree(type_inst)
+
+proc artifact_unwrapped_type(type_node: NimNode): NimNode =
+  result = artifact_type_inst(type_node)
+  while result.kind notin {nnkTupleTy, nnkTupleConstr} and
+      result.getTypeImpl.kind == nnkDistinctTy:
+    result = artifact_type_inst(result.getTypeImpl[0])
+
+proc artifact_is_location(type_node: NimNode): bool =
+  var current = artifact_type_inst(type_node)
+  while true:
+    if is_named(current, "Location"):
+      return true
+    if current.kind in {nnkTupleTy, nnkTupleConstr}:
+      return false
+    let type_impl = current.getTypeImpl
+    if type_impl.kind != nnkDistinctTy:
+      return false
+    current = artifact_type_inst(type_impl[0])
+
+proc artifact_is_inline(type_node: NimNode): bool =
+  let type_inst = artifact_unwrapped_type(type_node)
+  if type_inst.kind in {nnkTupleTy, nnkTupleConstr}:
+    return false
+  case type_inst.repr
+  of "bool", "char", "string", "cstring",
+     "int", "int8", "int16", "int32", "int64",
+     "uint", "uint8", "uint16", "uint32", "uint64",
+     "float32", "float64":
+    true
+  else:
+    type_inst.getTypeImpl.kind == nnkEnumTy
+
+proc artifact_field_name(field: NimNode; index: int): NimNode =
+  if field[index].kind == nnkPostfix:
+    field[index][1]
+  else:
+    field[index]
+
+proc new_artifact_node(kind: ArtifactNodeKind): ArtifactNode =
+  new(result)
+  result.kind = kind
+
+proc artifact_tree(type_node: NimNode): ArtifactNode
+
+proc artifact_fields(
+    fields: NimNode;
+    tuple_fields: bool
+): seq[ArtifactField] =
+  if tuple_fields and fields.kind in {nnkTupleTy, nnkTupleConstr}:
+    for index, field in fields:
+      if field.kind == nnkExprColonExpr and field.len == 2:
+        result.add(ArtifactField(
+          name: field[0].repr,
+          selector: copyNimTree(field[0]),
+          node: artifact_tree(field[1])))
+      else:
+        result.add(ArtifactField(
+          name: "[" & $index & "]",
+          selector: newLit(index),
+          node: artifact_tree(field)))
+    return
+
+  var tuple_index = 0
+  for field in fields:
+    if field.kind != nnkIdentDefs:
+      error("artifact walker only supports plain fields", field)
+    for index in 0 ..< field.len - 2:
+      let name_node = artifact_field_name(field, index)
+      let named = name_node.kind notin {nnkEmpty, nnkIdent} or
+        name_node.strVal != "_"
+      let name = if named: name_node.strVal else: "[" & $tuple_index & "]"
+      let selector = if tuple_fields and not named:
+        newLit(tuple_index)
+      else:
+        copyNimTree(name_node)
+      result.add(ArtifactField(
+        name: name,
+        selector: selector,
+        node: artifact_tree(field[^2])))
+      inc tuple_index
+
+proc artifact_variant_tree(type_node: NimNode): ArtifactNode =
+  let type_impl = artifact_unwrapped_type(type_node).getTypeImpl
+  let fields = type_impl[2]
+  var variant: NimNode
+  var common_fields = newStmtList()
+  for field in fields:
+    if field.kind == nnkRecCase:
+      variant = field
+    else:
+      common_fields.add(field)
+
+  if variant.isNil or variant.len < 2 or variant[0].kind != nnkIdentDefs:
+    error("artifact walker cannot inspect object variant", type_node)
+
+  result = new_artifact_node(ank_variant)
+  result.type_expr = copyNimTree(artifact_unwrapped_type(type_node))
+  result.needs_runtime_cast = not sameType(
+    artifact_type_inst(type_node), result.type_expr)
+  result.tag_name = copyNimTree(artifact_field_name(variant[0], 0))
+  result.fields = artifact_fields(common_fields, false)
+  for branch in variant[1 .. ^1]:
+    case branch.kind
+    of nnkOfBranch:
+      var branch_fields = artifact_fields(branch[^1], false)
+      for tag_index in 0 ..< branch.len - 1:
+        result.branches.add(ArtifactBranch(
+          tags: @[copyNimTree(branch[tag_index])],
+          is_else: false,
+          fields: branch_fields))
+    of nnkElse:
+      result.branches.add(ArtifactBranch(
+        tags: @[],
+        is_else: true,
+        fields: artifact_fields(branch[0], false)))
+    else:
+      error("artifact walker cannot inspect object variant branch", branch)
+
+proc artifact_tree(type_node: NimNode): ArtifactNode =
+  let type_inst = artifact_type_inst(type_node)
+  if artifact_is_location(type_inst):
+    return new_artifact_node(ank_location)
+  if artifact_is_inline(type_inst):
+    result = new_artifact_node(ank_inline)
+    result.type_name = artifact_unwrapped_type(type_inst).repr
+    return
+
+  if type_inst.kind == nnkBracketExpr and type_inst.len == 2:
+    if is_named(type_inst[0], "seq"):
+      result = new_artifact_node(ank_seq)
+      result.type_expr = copyNimTree(type_inst)
+      result.element = artifact_tree(type_inst[1])
+      return
+    if is_named(type_inst[0], "Option"):
+      result = new_artifact_node(ank_option)
+      result.type_expr = copyNimTree(type_inst)
+      result.element = artifact_tree(type_inst[1])
+      return
+
+  let normalized_type = artifact_unwrapped_type(type_inst)
+  let shape = normalized_type.getTypeImpl
+  case shape.kind
+  of nnkBracketExpr:
+    if shape.len == 2 and is_named(shape[0], "seq"):
+      result = new_artifact_node(ank_seq)
+      result.type_expr = copyNimTree(normalized_type)
+      result.needs_runtime_cast = not sameType(type_inst, normalized_type)
+      result.element = artifact_tree(shape[1])
+      return
+    if shape.len == 2 and is_named(shape[0], "Option"):
+      result = new_artifact_node(ank_option)
+      result.type_expr = copyNimTree(normalized_type)
+      result.needs_runtime_cast = not sameType(type_inst, normalized_type)
+      result.element = artifact_tree(shape[1])
+      return
+  of nnkObjectTy:
+    for field in shape[2]:
+      if field.kind == nnkRecCase:
+        return artifact_variant_tree(type_inst)
+    result = new_artifact_node(ank_object)
+    result.type_expr = copyNimTree(normalized_type)
+    result.needs_runtime_cast = not sameType(type_inst, normalized_type)
+    result.fields = artifact_fields(shape[2], false)
+    return
+  of nnkTupleTy, nnkTupleConstr:
+    result = new_artifact_node(ank_tuple)
+    result.type_expr = copyNimTree(normalized_type)
+    result.needs_runtime_cast = not sameType(type_inst, normalized_type)
+    result.fields = artifact_fields(shape, true)
+    return
+  else:
+    discard
+  error("cannot walk artifact type " & type_inst.repr, type_node)
+
+proc append_artifact_field_path(path: NimNode; name: string): NimNode =
+  if path.kind == nnkStrLit:
+    if path.strVal.len == 0:
+      return newLit(name)
+    if name.len > 0 and name[0] == '[':
+      return newLit(path.strVal & name)
+    return newLit(path.strVal & "." & name)
+  let separator = if name.len > 0 and name[0] == '[': "" else: "."
+  let suffix = newLit(separator & name)
+  quote do: `path` & `suffix`
+
+proc append_artifact_sequence_path(path, index: NimNode): NimNode =
+  let path_copy = copyNimTree(path)
+  let index_copy = copyNimTree(index)
+  quote do:
+    `path_copy` & "[" & $(int(`index_copy`) + 1) & "]"
+
+proc artifact_field_value(value, selector: NimNode): NimNode =
+  if selector.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit,
+      nnkInt64Lit}:
+    return newTree(nnkBracketExpr, copyNimTree(value), copyNimTree(selector))
+  newTree(nnkDotExpr, copyNimTree(value), copyNimTree(selector))
+
+proc artifact_option_value(value: NimNode): NimNode =
+  newCall(bindSym("get"), copyNimTree(value))
+
+proc artifact_runtime_value(node: ArtifactNode; value: NimNode): NimNode =
+  if not node.needs_runtime_cast:
+    return copyNimTree(value)
+  newTree(nnkCast, copyNimTree(node.type_expr), copyNimTree(value))
+
+proc walk_artifact_tree*[T](
+    node: ArtifactNode;
+    value, path: NimNode;
+    state: var T;
+    callback: ArtifactWalkCallback[T]
+): NimNode =
+  ## Callback may replace any node. Nil means structural descent continues.
+  let replacement = callback(node, value, path, state)
+  if not replacement.isNil:
+    return replacement
+
+  case node.kind
+  of ank_inline, ank_location, ank_option_none:
+    error("artifact walker callback did not handle leaf", value)
+  of ank_object, ank_tuple:
+    result = newStmtList()
+    for field in node.fields:
+      result.add(walk_artifact_tree(
+        field.node,
+        artifact_field_value(value, field.selector),
+        append_artifact_field_path(path, field.name),
+        state,
+        callback))
+  of ank_variant:
+    result = newStmtList()
+    for field in node.fields:
+      result.add(walk_artifact_tree(
+        field.node,
+        artifact_field_value(value, field.selector),
+        append_artifact_field_path(path, field.name),
+        state,
+        callback))
+    let case_statement = newTree(
+      nnkCaseStmt,
+      artifact_field_value(value, node.tag_name))
+    for branch in node.branches:
+      var branch_body = newStmtList()
+      for field in branch.fields:
+        branch_body.add(walk_artifact_tree(
+          field.node,
+          artifact_field_value(value, field.selector),
+          append_artifact_field_path(path, field.name),
+          state,
+          callback))
+      if branch.is_else:
+        case_statement.add(newTree(nnkElse, branch_body))
+      else:
+        var branch_tags = newNimNode(nnkOfBranch)
+        for tag in branch.tags:
+          branch_tags.add(copyNimTree(tag))
+        branch_tags.add(branch_body)
+        case_statement.add(branch_tags)
+    result.add(case_statement)
+  of ank_seq:
+    let index = genSym(nskForVar, "artifact_index")
+    let item = genSym(nskForVar, "artifact_item")
+    let sequence_value = artifact_runtime_value(node, value)
+    result = newTree(
+      nnkForStmt,
+      index,
+      item,
+      newCall(bindSym("pairs"), sequence_value),
+      walk_artifact_tree(
+        node.element,
+        item,
+        append_artifact_sequence_path(path, index),
+        state,
+        callback))
+  of ank_option:
+    let option_value = artifact_runtime_value(node, value)
+    let value_copy = copyNimTree(option_value)
+    let some_body = walk_artifact_tree(
+      node.element,
+      artifact_option_value(option_value),
+      path,
+      state,
+      callback)
+    let none_node = new_artifact_node(ank_option_none)
+    let none_body = callback(none_node, value, path, state)
+    if none_body.isNil:
+      error("artifact walker callback did not handle absent Option", value)
+    result = quote do:
+      if isSome(`value_copy`):
+        `some_body`
+      else:
+        `none_body`
+
+type
+  MaterializeEmitState = object
+    instructions: NimNode
+    runtime_dir: NimNode
+    artifact_dir: NimNode
+    materialized_names: NimNode
+
+proc materialize_callback(
+    node: ArtifactNode;
+    value, path: NimNode;
+    state: var MaterializeEmitState
+): NimNode =
+  case node.kind
+  of ank_inline:
+    let value_copy = copyNimTree(value)
+    let path_copy = copyNimTree(path)
+    let type_name = newLit(node.type_name)
+    let instructions = copyNimTree(state.instructions)
+    quote do:
+      `instructions`.add(
+        `path_copy` & ": " & `type_name` & " = " & $(`value_copy`) & "\n")
+  of ank_location:
+    let copied_name = genSym(nskLet, "materialized_location_name")
+    let runtime_dir = copyNimTree(state.runtime_dir)
+    let artifact_dir = copyNimTree(state.artifact_dir)
+    let materialized_names = copyNimTree(state.materialized_names)
+    let instructions = copyNimTree(state.instructions)
+    let path_copy = copyNimTree(path)
+    let location_value = quote do: cast[string](`value`)
+    quote do:
+      let `copied_name` = copy_location_payload(
+        `runtime_dir`, `artifact_dir`, `location_value`, `materialized_names`)
+      `instructions`.add(
+        `path_copy` & ": location = " & `location_value` &
+        " (materialized as " & `copied_name` & ")\n")
+  of ank_option_none:
+    let instructions = copyNimTree(state.instructions)
+    let path_copy = copyNimTree(path)
+    quote do:
+      `instructions`.add(`path_copy` & ": Option:none\n")
+  else:
+    nil
+
+proc emit_input_materializer(type_expr: NimNode): NimNode =
+  let input = genSym(nskParam, "materializer_input")
+  let input_meta = genSym(nskParam, "materializer_input_meta")
+  let runtime_dir = genSym(nskParam, "materializer_runtime_dir")
+  let artifact_dir = genSym(nskParam, "materializer_artifact_dir")
+  let initial_instructions = genSym(nskParam, "materializer_initial_instructions")
+  let instructions = genSym(nskVar, "materialized_instructions")
+  let materialized_names = genSym(nskVar, "materialized_names")
+  var state = MaterializeEmitState(
+    instructions: instructions,
+    runtime_dir: runtime_dir,
+    artifact_dir: artifact_dir,
+    materialized_names: materialized_names)
+  let body = walk_artifact_tree(
+    artifact_tree(type_expr),
+    input,
+    newLit("input"),
+    state,
+    materialize_callback)
+  let type_copy = copyNimTree(type_expr)
+  quote do:
+    (proc (`input`: `type_copy`; `input_meta`: ArtifactMeta;
+        `runtime_dir`, `artifact_dir`: Path;
+        `initial_instructions`: string): string {.nimcall.} =
+      discard `input_meta`
+      var `instructions` = `initial_instructions`
+      var `materialized_names`: seq[string] = @[]
+      `body`
+      `instructions`
+    )
+
 proc emit_debug_value(type_expr, output: NimNode): NimNode =
   ## Keep debug materialization typed. String outputs get visible evidence;
   ## other types use a legal typed zero until per-type factories are added.
@@ -629,10 +1040,29 @@ proc lower_model_call(
   let submit_input_meta = genSym(nskParam, "model_input_meta")
   let submit_working_dir = genSym(nskParam, "model_working_dir")
   let typed_input = genSym(nskLet, "model_typed_input")
+  let materialized_input = genSym(nskLet, "model_materialized_input")
   let submit_unpacked = if input_type.is_void_type:
     newEmptyNode()
   else:
     registry.emit_artifact_unpack(input_type, submit_input)
+  let input_materializer = if input_type.is_void_type:
+    newEmptyNode()
+  else:
+    emit_input_materializer(input_type)
+  let materialized_input_call = if input_type.is_void_type:
+    newLit("")
+  else:
+    newCall(
+      input_materializer,
+      typed_input,
+      submit_input_meta,
+      newDotExpr(copyNimTree(submit_context), ident("runtime_dir")),
+      submit_working_dir,
+      newLit(""))
+  let materialized_input_value = if input_type.is_void_type:
+    newLit("")
+  else:
+    materialized_input
   let typed_context = if input_type.is_void_type:
     newLit("")
   else:
@@ -654,6 +1084,7 @@ proc lower_model_call(
       profile: `profile_expr`,
       prompt: `prompt_expr`,
       typed_context: `typed_context`,
+      materialized_input: `materialized_input_value`,
       input_meta: `submit_input_meta`,
       runtime_dir: `submit_context`.runtime_dir,
       working_dir: `submit_working_dir`,
@@ -673,9 +1104,18 @@ proc lower_model_call(
     quote do:
       `output_schema_echo`
       let `typed_input` = `submit_unpacked`
-      let `llm_spec_name` = `llm_spec_value`
-      `submit_llm_symbol`(`submit_context`, `submit_request_id`,
-        `llm_spec_name`)
+      try:
+        let `materialized_input` = `materialized_input_call`
+        let `llm_spec_name` = `llm_spec_value`
+        `submit_llm_symbol`(`submit_context`, `submit_request_id`,
+          `llm_spec_name`)
+      except CatchableError as error:
+        var event: RuntimeEvent[`artifact_name`]
+        event.kind = rev_model_error
+        event.request_id = `submit_request_id`
+        event.message = error.msg
+        event.has_message = true
+        enqueue_runtime_event(`submit_context`, event)
   let submit = quote do:
     (proc (`submit_context`: RuntimeContext[`artifact_name`];
         `submit_request_id`: RequestId;

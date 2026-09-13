@@ -7,9 +7,9 @@ Make generated model nodes prepare real artifact-aware `LlmCallSpec`.
 ## Status
 
 Partial. Generated submit passes input metadata, runtime directory, working
-directory, output kind, and materializer to the injected transport. It still
-uses the debug tool, debug materializer, typed-context stringification, and
-schema echo.
+directory, materialized input, output kind, and materializer to the injected
+transport. It still uses the debug tool, debug output materializer,
+typed-context stringification, and schema echo.
 
 ## Files
 
