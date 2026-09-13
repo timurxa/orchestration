@@ -32,7 +32,7 @@ proc inspect_generated_transport[A](
   )
   event.materialize = spec.materialize
   event.has_output = true
-  addLast(context.events, event)
+  enqueue_runtime_event(context, event)
 
 vecherinka(generated_solve):
   > generated_entry GeneratedInput ~> string {.entry.}:
@@ -105,7 +105,7 @@ proc debug_submit(
   )
   event.materialize = materialize_debug_string
   event.has_output = true
-  addLast(context.events, event)
+  enqueue_runtime_event(context, event)
 
 let fake_submit = ModelSubmitter[string](debug_submit)
 

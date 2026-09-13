@@ -7,7 +7,8 @@ record and remaining-work plan for the runtime.
 
 ## State
 
-Current work: merged Slice 4/5 complete; real LLM decoding/transport remains.
+Current work: merged Slice 4/5 plus structural POSIX IPC plumbing complete;
+real LLM decoding and Codex agent messaging remain.
 
 Slices 1 through 3 are implemented in
 [`src/vecherinka_runtime.nim`](/Users/alex/areas/productive/orchestration/src/vecherinka_runtime.nim)
@@ -39,8 +40,9 @@ The deterministic transport materializes a typed debug Artifact and queues a
 deferred event without Codex. Existing generated packers remain on `Flow` for
 future real response materialization.
 
-Next work: generated real LLM-output decoding and the later Codex/POSIX
-transport. Neither is wired by this slice.
+Next work: generated real LLM-output decoding and Codex agent messaging.
+POSIX readers and main-thread channel routing are now wired structurally, but
+no agent message submission is included.
 
 Progress ledger:
 
@@ -56,8 +58,10 @@ Progress ledger:
   passed under Nim 2.3.1, `--threads:on`, and ARC.
 - [ ] Generated real LLM-output adapter: deferred. Merged Slice 4/5 only
   implements its deterministic debug stand-in.
-- [ ] Real Codex transport: intentionally deferred; not a numbered slice in
-  this plan.
+- [x] Structural Codex/POSIX input plumbing: context-owned event channel, concurrent
+  stdout/stderr readers, framing, stop wakeup, and main-thread event handling.
+- [ ] Codex agent messaging: intentionally deferred until its contract is
+  defined.
 
 ### Merged Slice 4/5 implementation record
 
@@ -90,8 +94,10 @@ Implemented in `src/vecherinka_runtime.nim` and
   internal errors. The erased callback preserves generic code generation and
   isolates that workaround.
 
-No Codex message, POSIX pipe, reader thread, Cilk worker, or reader-owned plan
-mutation was added.
+No Codex agent message, Cilk worker, or reader-owned plan mutation was added.
+Readers now perform POSIX pipe framing and send events through the runtime
+context channel; the main thread
+solely owns `CodexRuntime` and `WorkPlan`.
 
 Current code:
 
@@ -299,7 +305,8 @@ type
   ) {.nimcall.}
 
   RuntimeContext[A] = ref object
-    events: Deque[RuntimeEvent[A]]
+    events: Channel[GlobalEvent]
+    events_open: bool
     transport: LlmTransport[A]
     ## Optional handwritten ModelSubmitter remains test compatibility only.
     submitter: ModelSubmitter[A]
@@ -406,10 +413,9 @@ proc execute_flows[A](
 
   while not plan.finished:
     drain_ready_batch(context, plan)
-    drain_available_events(context, plan)
 
     if plan.ready.len == 0 and not plan.finished:
-      wait_for_event(context.events)
+      handle_global_event(plan, recv_global_event(plan.context))
 ```
 
 `drain_ready_batch` has a bounded budget so a large immediate recipe cannot
@@ -680,7 +686,8 @@ proc suspend_model[A](
 The generated submit may invoke transport before `suspend_model` returns, but
 the main loop cannot consume its completion Event until current dispatch
 returns. Thus pending entry is installed before any completion can be handled.
-Fake and future real transports share one deferred asynchronous contract.
+Fake and future real transports share one deferred asynchronous contract. Their
+runtime completion values enter the context channel as `gek_runtime` events.
 
 The generated preparation callback owns only Artifact-level recipe data:
 
@@ -861,7 +868,7 @@ proc debug_transport[A](
   event.output = output
   event.materialize = spec.materialize
   event.has_output = true
-  context.events.addLast(event)
+  enqueue_runtime_event(context, event) # serializes into context channel
 ```
 
 `debug_transport` must never resume inline. It only exercises generated
@@ -924,12 +931,10 @@ fully before the outer continuation runs. No recipe mutation occurs.
 Record a `wk_so` WorkNode only if expansion provenance is needed. It is not
 required for scheduling.
 
-## Event and transport architecture (future boundary)
+## Event and transport architecture
 
-The following remains the eventual app-server architecture, but it is not part
-of the merged Slice 4/5 implementation. That slice stops at a generated fake
-completion Event, so there is no agent message, Codex JSON response, POSIX pipe,
-or reader thread to wire yet.
+The structural app-server boundary is now present. Agent message submission and
+real model-output decoding remain future work.
 
 ```nim
 type
@@ -946,23 +951,25 @@ type
 ```
 
 One reader thread blocks on the Codex stdout POSIX descriptor. One reader
-thread blocks on stderr. Each owns a partial-line buffer and sends line Events.
-Neither parses JSON or mutates runtime state.
+thread blocks on stderr. Each owns a partial-line buffer and sends line Events
+through the context-owned channel. Neither parses JSON or mutates runtime state.
 
-The main thread:
+The main thread, acting as messenger/coordinator, now:
 
 1. drains ready activations for a bounded batch;
-2. drains available Events;
-3. parses stdout JSON;
-4. calls existing `CodexRuntime.handle_message` / `accept_json`;
-5. handles model results and resumes activations;
-6. waits on the Event channel only when no ready activation exists.
+2. blocks on `recv_global_event(plan.context)` when ready work is empty;
+3. dispatches `gek_runtime` completions into the Vecherinka executor;
+4. parses stdout JSON;
+5. calls existing `CodexRuntime.handle_message` / `accept_json`;
+6. handles model results and resumes activations.
 
-Callbacks enqueue Events. They never re-enter `handle_activation`.
+Callbacks enqueue Events. They never re-enter `handle_activation`. The main
+thread is the sole owner of `CodexRuntime`; no separate messenger thread owns
+or receives it.
 
-Do not create an `ev_work_ready` event for every immediate continuation. The
-main-owned ready deque is simpler and avoids needless channel traffic. Self-
-events remain useful for model/tool callbacks and other asynchronous boundaries.
+Do not create an event for every immediate continuation. The main-owned ready
+deque is simpler and avoids needless channel traffic. Runtime completions and
+reader input remain channel events.
 
 Shutdown order:
 
@@ -995,6 +1002,9 @@ release pending model callback state
 - Reader threads never parse JSON.
 - Generated submit plus fake/raw transport obey one deferred-completion
   contract.
+- Global event channel remains open until both readers have joined.
+- Reader threads borrow child descriptors; `CodexRuntime` remains their owner.
+- Main thread is sole owner of `CodexRuntime` and handles stdout JSON.
 
 ## Implementation order
 
@@ -1188,7 +1198,7 @@ proc debug_transport[A](
   event.output = output
   event.materialize = spec.materialize
   event.has_output = true
-  context.events.addLast(event)
+  enqueue_runtime_event(context, event)
 ```
 
 The current debug helper produces a legal typed value for every registered
@@ -1212,6 +1222,22 @@ tool registry, and completion routing rather than semantic model text.
   remain correct;
 - no Codex process, message send, pipe reader, or thread-owned plan mutation
   appears in the diff.
+
+### Structural POSIX IPC plumbing: implemented
+
+`src/vecherinka_runtime.nim` now provides one `RuntimeContext`-owned
+`Channel[GlobalEvent]`,
+one reader thread per Codex output descriptor, independent JSONL framing, EOF
+events, reader errors, and a private stop pipe. `execute_flows` initializes a
+Codex runtime when one is not supplied, opens the channel, starts readers,
+runs the blocking unified loop, then joins readers, closes the channel, and
+deinitializes an owned Codex runtime.
+`GlobalEventMessenger` and `drain_global_events` call existing Codex JSON
+acceptance only from the `CodexRuntime` owner thread.
+
+`src/vecherinka_runtime_ipc_test.nim` covers split/multiple lines, CRLF,
+unterminated final lines, concurrent stdout/stderr drainage, EOF, and waking
+blocked readers during shutdown. No Codex agent message path is included.
 
 ## Required tests
 

@@ -40,7 +40,7 @@ proc debug_generated_transport[A](
   )
   event.materialize = spec.materialize
   event.has_output = true
-  addLast(context.events, event)
+  enqueue_runtime_event(context, event)
 
 const cheap = "gpt-5.6-luna".minimal
 

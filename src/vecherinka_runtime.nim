@@ -3,8 +3,9 @@
 ## Included by `vecherinka.nim`. Keep compile-time AST and macro machinery out
 ## of this fragment.
 
-import std/[sugar, deques, json, options, tables]
+import std/[sugar, deques, json, options, tables, posix, strutils, os]
 import codex_json
+import codex_runtime
 
 type
   ProfileSpec* = object
@@ -126,13 +127,18 @@ type
     tool_name*: string
     arguments*: JsonNode
 
+  ModelMaterializer*[A] = proc(
+    output_kind: int;
+    output: LlmOutput
+  ): A {.nimcall.}
+
   LlmCallSpec*[A] = object
     profile*: ProfileSpec
     prompt*: string
     typed_context*: string
     tools*: DynamicToolRegistry
     output_kind*: int
-    materialize*: proc(output_kind: int; output: LlmOutput): A {.nimcall.}
+    materialize*: ModelMaterializer[A]
 
   RuntimeEventKind* = enum
     rev_model_artifact,
@@ -147,12 +153,61 @@ type
     has_output*: bool
     output_kind*: int
     output*: LlmOutput
-    materialize*: proc(output_kind: int; output: LlmOutput): A {.nimcall.}
+    materialize*: ModelMaterializer[A]
     has_message*: bool
     message*: string
 
+  GlobalEventKind* = enum
+    gek_runtime,
+    gek_stdout_line,
+    gek_stderr_line,
+    gek_stdout_closed,
+    gek_stderr_closed,
+    gek_reader_error,
+    gek_process_exit,
+    gek_shutdown
+
+  GlobalEvent* = object
+    ## Transport events contain copied wire data only. Readers never receive
+    ## or mutate CodexRuntime, WorkPlan, Flow, or RuntimeContext.
+    kind*: GlobalEventKind
+    message*: string
+    request_id*: RequestId
+    runtime_kind*: RuntimeEventKind
+    has_output*: bool
+    output_kind*: int
+    output_tool_name*: string
+    output_arguments*: string
+    output_materializer*: pointer
+    has_message*: bool
+
+  CodexReaderArgs = object
+    fd: cint
+    stop_fd: cint
+    events: ptr Channel[GlobalEvent]
+    line_kind: GlobalEventKind
+    closed_kind: GlobalEventKind
+
+  CodexReaders* = object
+    stop_pipe*: array[0..1, cint]
+    output_fd*: cint
+    error_fd*: cint
+    output_thread: Thread[CodexReaderArgs]
+    error_thread: Thread[CodexReaderArgs]
+    output_started*: bool
+    error_started*: bool
+    active*: bool
+
+  GlobalEventMessenger* = object
+    ## Main-thread state for global transport events. CodexRuntime remains
+    ## exclusively owned by that same thread.
+    stdout_closed*: bool
+    stderr_closed*: bool
+    process_exited*: bool
+
   RuntimeContext*[A] = ref object
-    events*: Deque[RuntimeEvent[A]]
+    events*: Channel[GlobalEvent]
+    events_open*: bool
     submitter*: ModelSubmitter[A]
     transport*: LlmTransport[A]
     next_request_id*: int64
@@ -182,6 +237,276 @@ type
     finished*: bool
     failed*: bool
 
+proc open_global_events*[A](context: RuntimeContext[A]) =
+  ## Open once before reader threads start; close only after all readers join.
+  if context.events_open:
+    raise newException(ValueError, "global event channel already open")
+  context.events.open()
+  context.events_open = true
+
+proc close_global_events*[A](context: RuntimeContext[A]) =
+  ## Channel lifetime is a main-thread responsibility.
+  if context.events_open:
+    context.events.close()
+    context.events_open = false
+
+proc send_global_event*(events: ptr Channel[GlobalEvent]; event: GlobalEvent) {.gcsafe.} =
+  ## Reader-side send. Caller must keep channel open until readers stop.
+  events[].send(event)
+
+proc send_global_event*[A](context: RuntimeContext[A]; event: GlobalEvent) =
+  if not context.events_open:
+    raise newException(ValueError, "global event channel is not open")
+  context.events.send(event)
+
+proc enqueue_runtime_event*[A](
+    context: RuntimeContext[A];
+    event: RuntimeEvent[A]
+) =
+  ## Runtime callbacks publish value-only events; main loop handles them later.
+  if not context.events_open:
+    raise newException(ValueError, "global event channel is not open")
+  var global_event = GlobalEvent(
+    kind: gek_runtime,
+    request_id: event.request_id,
+    runtime_kind: event.kind,
+    has_output: event.has_output,
+    output_kind: event.output_kind,
+    output_materializer: cast[pointer](event.materialize),
+    has_message: event.has_message,
+    message: event.message)
+  if event.has_output:
+    global_event.output_tool_name = event.output.tool_name
+    global_event.output_arguments = $event.output.arguments
+  send_global_event(context, global_event)
+
+proc recv_global_event*[A](context: RuntimeContext[A]): GlobalEvent =
+  context.events.recv()
+
+proc try_recv_global_event*[A](context: RuntimeContext[A]): tuple[data_available: bool, event: GlobalEvent] =
+  let received = context.events.tryRecv()
+  (data_available: received.dataAvailable, event: received.msg)
+
+proc reader_error_message(operation: string; error_code: cint): string =
+  operation & " failed (errno " & $error_code & ")"
+
+proc emit_pending_lines(
+    pending: var string;
+    line_kind: GlobalEventKind;
+    events: ptr Channel[GlobalEvent]
+) {.gcsafe.} =
+  ## Each loop removes one complete line; remaining bytes stay local to reader.
+  while true:
+    let newline = pending.find('\n')
+    if newline < 0:
+      break
+    var line = pending[0 ..< newline]
+    if line.len > 0 and line[^1] == '\r':
+      line.setLen(line.len - 1)
+    send_global_event(events, GlobalEvent(kind: line_kind, message: line))
+    if newline + 1 >= pending.len:
+      pending.setLen(0)
+    else:
+      pending = pending[newline + 1 .. ^1]
+
+proc read_codex_stream(args: CodexReaderArgs) {.thread, gcsafe.} =
+  var watched = [
+    TPollfd(fd: args.fd, events: POLLIN, revents: 0),
+    TPollfd(fd: args.stop_fd, events: POLLIN, revents: 0)
+  ]
+  var pending = ""
+  var reached_eof = false
+
+  while true:
+    var poll_result: cint
+    while true:
+      poll_result = poll(addr watched[0], Tnfds(2), -1)
+      if poll_result >= 0 or errno != EINTR:
+        break
+    if poll_result < 0:
+      send_global_event(args.events, GlobalEvent(
+        kind: gek_reader_error,
+        message: reader_error_message("poll", errno)))
+      break
+
+    if watched[1].revents != 0:
+      break
+
+    let stream_events = watched[0].revents
+    if (stream_events and POLLNVAL) != 0:
+      send_global_event(args.events, GlobalEvent(
+        kind: gek_reader_error,
+        message: reader_error_message("poll descriptor", EBADF)))
+      break
+    if (stream_events and POLLERR) != 0 and
+        (stream_events and POLLIN) == 0 and
+        (stream_events and POLLHUP) == 0:
+      send_global_event(args.events, GlobalEvent(
+        kind: gek_reader_error,
+        message: reader_error_message("stream poll", EIO)))
+      break
+
+    if (stream_events and (POLLIN or POLLHUP or POLLERR)) == 0:
+      continue
+
+    var buffer: array[4096, byte]
+    var count: int
+    while true:
+      count = read(args.fd, addr buffer[0], buffer.len)
+      if count >= 0 or errno != EINTR:
+        break
+    if count > 0:
+      var chunk = newString(count)
+      copyMem(addr chunk[0], addr buffer[0], count)
+      pending.add(chunk)
+      emit_pending_lines(pending, args.line_kind, args.events)
+    elif count == 0:
+      reached_eof = true
+      break
+    else:
+      send_global_event(args.events, GlobalEvent(
+        kind: gek_reader_error,
+        message: reader_error_message("read", errno)))
+      break
+
+  if reached_eof:
+    if pending.len > 0:
+      if pending[^1] == '\r':
+        pending.setLen(pending.len - 1)
+      send_global_event(args.events, GlobalEvent(kind: args.line_kind, message: pending))
+    send_global_event(args.events, GlobalEvent(kind: args.closed_kind))
+
+proc start_codex_readers_impl(
+    readers: var CodexReaders;
+    events: ptr Channel[GlobalEvent];
+    output_fd, error_fd: cint
+) =
+  ## Child descriptors are borrowed. CodexRuntime owns their eventual close.
+  if readers.active:
+    raise newException(ValueError, "Codex readers already active")
+  if output_fd < 0 or error_fd < 0:
+    raise newException(ValueError, "invalid Codex output descriptor")
+  if pipe(readers.stop_pipe) != 0:
+    raise newException(IOError, reader_error_message("stop pipe", errno))
+
+  readers.output_fd = output_fd
+  readers.error_fd = error_fd
+  readers.output_started = false
+  readers.error_started = false
+  readers.active = true
+
+  try:
+    createThread(
+      readers.output_thread,
+      read_codex_stream,
+      CodexReaderArgs(
+        fd: output_fd,
+        stop_fd: readers.stop_pipe[0],
+        events: events,
+        line_kind: gek_stdout_line,
+        closed_kind: gek_stdout_closed))
+    readers.output_started = true
+    createThread(
+      readers.error_thread,
+      read_codex_stream,
+      CodexReaderArgs(
+        fd: error_fd,
+        stop_fd: readers.stop_pipe[0],
+        events: events,
+        line_kind: gek_stderr_line,
+        closed_kind: gek_stderr_closed))
+    readers.error_started = true
+  except CatchableError:
+    var signal = 'x'
+    discard write(readers.stop_pipe[1], addr signal, 1)
+    if readers.output_started:
+      readers.output_thread.joinThread()
+    if readers.error_started:
+      readers.error_thread.joinThread()
+    discard close(readers.stop_pipe[0])
+    discard close(readers.stop_pipe[1])
+    readers.active = false
+    raise
+
+proc start_codex_readers*[A](
+    readers: var CodexReaders;
+    context: RuntimeContext[A];
+    output_fd, error_fd: cint
+) =
+  if context.isNil or not context.events_open:
+    raise newException(ValueError, "global event channel is not open")
+  start_codex_readers_impl(
+    readers,
+    addr context.events,
+    output_fd,
+    error_fd)
+
+proc start_codex_readers*[A](
+    readers: var CodexReaders;
+    context: RuntimeContext[A];
+    runtime: ptr CodexRuntime
+) =
+  ## Descriptor lookup happens on the owning main thread before readers start.
+  if runtime.isNil:
+    raise newException(ValueError, "Codex readers require CodexRuntime owner")
+  start_codex_readers(
+    readers,
+    context,
+    runtime.output_handle(),
+    runtime.error_handle())
+
+proc stop_codex_readers*(readers: var CodexReaders) =
+  ## Wake and join readers before channel or borrowed descriptor cleanup.
+  if not readers.active:
+    return
+  var signal = 'x'
+  discard write(readers.stop_pipe[1], addr signal, 1)
+  if readers.output_started:
+    readers.output_thread.joinThread()
+  if readers.error_started:
+    readers.error_thread.joinThread()
+  discard close(readers.stop_pipe[0])
+  discard close(readers.stop_pipe[1])
+  readers.output_started = false
+  readers.error_started = false
+  readers.active = false
+
+proc new_global_event_messenger*(): GlobalEventMessenger =
+  GlobalEventMessenger(
+    stdout_closed: false,
+    stderr_closed: false,
+    process_exited: false)
+
+proc handle_global_event*(
+    messenger: var GlobalEventMessenger;
+    runtime: ptr CodexRuntime;
+    event: GlobalEvent
+) =
+  ## Main-thread coordinator. Only this path touches CodexRuntime protocol state.
+  case event.kind
+  of gek_runtime:
+    discard
+  of gek_stdout_line:
+    if runtime.isNil:
+      raise newException(ValueError, "stdout event requires CodexRuntime owner")
+    discard runtime.accept_json(parseJson(event.message))
+  of gek_stderr_line:
+    discard
+  of gek_stdout_closed:
+    messenger.stdout_closed = true
+    if messenger.stderr_closed and not runtime.isNil:
+      messenger.process_exited = not runtime.is_running()
+  of gek_stderr_closed:
+    messenger.stderr_closed = true
+    if messenger.stdout_closed and not runtime.isNil:
+      messenger.process_exited = not runtime.is_running()
+  of gek_process_exit:
+    messenger.process_exited = true
+  of gek_reader_error:
+    raise newException(IOError, event.message)
+  of gek_shutdown:
+    discard
+
 proc minimal*(model: string): ProfileSpec =
   ProfileSpec(model: model, effort: re_minimal)
 proc low*(model: string): ProfileSpec =
@@ -209,11 +534,10 @@ proc new_runtime_context*[A](
   dump submitter.isNil
   dump transport.isNil
   new result
-  result.events = initDeque[RuntimeEvent[A]]()
+  result.events_open = false
   result.submitter = submitter
   result.transport = transport
   result.next_request_id = 0
-  dump result.events.len
 
 proc allocate_request_id[A](context: RuntimeContext[A]): RequestId =
   echo "runtime: allocate request id"
@@ -436,7 +760,7 @@ proc default_model_submit[A](
   event.request_id = request_id
   event.message = "no model submitter configured"
   event.has_message = true
-  addLast(context.events, event)
+  enqueue_runtime_event(context, event)
 
 proc default_llm_transport[A](
     context: RuntimeContext[A];
@@ -456,7 +780,7 @@ proc default_llm_transport[A](
     event.request_id = request_id
     event.message = "LLM spec has no output materializer"
     event.has_message = true
-    addLast(context.events, event)
+    enqueue_runtime_event(context, event)
     return
   let output = LlmOutput(
     tool_name: "debug_return",
@@ -469,7 +793,7 @@ proc default_llm_transport[A](
   event.output = output
   event.materialize = spec.materialize
   event.has_output = true
-  addLast(context.events, event)
+  enqueue_runtime_event(context, event)
 
 proc submit_llm*[A](
     context: RuntimeContext[A];
@@ -680,14 +1004,14 @@ proc handle_activation*[A](
 
   deliver_resume(plan, activation.resume, value)
 
-proc handle_event[A](
+proc handle_runtime_event[A](
     plan: var WorkPlan[A];
-    event: RuntimeEvent[A]
+    event: GlobalEvent
 ) =
   echo "runtime: handle event"
-  dump event.kind
+  dump event.runtime_kind
   dump event.request_id
-  case event.kind
+  case event.runtime_kind
   of rev_model_artifact:
     let key = request_id_key(event.request_id)
     if not plan.pending_models.hasKey(key):
@@ -703,10 +1027,16 @@ proc handle_event[A](
     if not event.has_output:
       fail_plan(plan, "model completion has no output")
       return
-    if event.materialize.isNil:
+    if event.output_materializer.isNil:
       fail_plan(plan, "model completion has no materializer")
       return
-    let artifact = event.materialize(event.output_kind, event.output)
+    if event.output_arguments.len == 0:
+      fail_plan(plan, "model completion has no encoded output")
+      return
+    let materialize = cast[ModelMaterializer[A]](event.output_materializer)
+    let artifact = materialize(event.output_kind, LlmOutput(
+      tool_name: event.output_tool_name,
+      arguments: parseJson(event.output_arguments)))
     node.output = some(artifact)
     node.state = ws_done
     echo "runtime: model artifact accepted"
@@ -726,6 +1056,22 @@ proc handle_event[A](
     echo "runtime: shutdown event"
     plan.finished = true
 
+proc handle_global_event[A](
+    plan: var WorkPlan[A];
+    messenger: var GlobalEventMessenger;
+    runtime: ptr CodexRuntime;
+    event: GlobalEvent
+) =
+  ## One main-thread dispatcher handles both transport and Vecherinka events.
+  case event.kind
+  of gek_runtime:
+    handle_runtime_event(plan, event)
+  of gek_stdout_line, gek_stderr_line, gek_stdout_closed, gek_stderr_closed,
+      gek_process_exit, gek_reader_error:
+    messenger.handle_global_event(runtime, event)
+  of gek_shutdown:
+    plan.finished = true
+
 proc drain_ready_batch*[A](
     plan: var WorkPlan[A];
     limit: int = 64
@@ -741,57 +1087,82 @@ proc drain_ready_batch*[A](
   dump handled
   dump plan.ready.len
 
-proc drain_events*[A](plan: var WorkPlan[A]) =
-  echo "runtime: drain events"
-  dump plan.context.events.len
-  var handled = 0
-  while not plan.finished and plan.context.events.len > 0:
-    let event = popFirst(plan.context.events)
-    inc handled
-    handle_event(plan, event)
-  dump handled
-  dump plan.context.events.len
+proc drain_global_events[A](
+    plan: var WorkPlan[A];
+    messenger: var GlobalEventMessenger;
+    runtime: ptr CodexRuntime;
+    limit: int = 64
+): int =
+  ## Unified main-thread drainer. Channel recv is intentionally blocking.
+  while result < limit:
+    let event = recv_global_event(plan.context)
+    inc result
+    handle_global_event(plan, messenger, runtime, event)
+    if plan.finished:
+      break
 
-proc run_work_plan*[A](plan: var WorkPlan[A]) =
+proc run_work_plan*[A](
+    plan: var WorkPlan[A];
+    runtime: ptr CodexRuntime = nil
+) =
+  if not plan.context.events_open:
+    raise newException(ValueError, "global event channel is not open")
+  var messenger = new_global_event_messenger()
   var iteration = 0
   while not plan.finished:
     inc iteration
     echo "runtime: scheduler iteration"
     dump iteration
     dump plan.ready.len
-    dump plan.context.events.len
+    dump plan.context.events_open
     drain_ready_batch(plan)
-    drain_events(plan)
-    if plan.ready.len == 0 and plan.context.events.len == 0 and
-        not plan.finished:
-      ## Real submitters are added in a later slice. A missing event here is a
-      ## scheduler bug, not permission to recurse or busy-spin.
-      fail_plan(plan, "work plan stalled with no ready work or event")
+    if not plan.finished and plan.ready.len == 0:
+      discard drain_global_events(plan, messenger, runtime, 1)
 
 proc execute_flows*[A](
     top_level_flows: seq[Flow[A]];
     input: A;
     submitter: ModelSubmitter[A] = nil;
-    transport: LlmTransport[A] = nil
+    transport: LlmTransport[A] = nil;
+    runtime: ptr CodexRuntime = nil
 ): WorkPlan[A] =
+  ## The main thread owns runtime protocol state. A supplied runtime is
+  ## borrowed; otherwise this call owns the complete Codex lifecycle.
   echo "runtime: execute flows"
   dump top_level_flows.len
   let context = new_runtime_context(submitter, transport)
-  result = init_work_plan(top_level_flows, context)
-  echo "runtime: enqueue entry activation"
-  dump result.entry.kind
-  addLast(result.ready, Activation[A](
-    flow: result.entry,
-    input: input,
-    parent: none(WorkID),
-    resume: Resume[A](kind: rk_finished)
-  ))
-  echo "runtime: run work plan"
-  run_work_plan(result)
-  echo "runtime: execution complete"
-  dump result.finished
-  dump result.failed
-  dump result.nodes.len
+  var owned_runtime = false
+  var active_runtime = runtime
+  var readers: CodexReaders
+  var readers_started = false
+  try:
+    if active_runtime.isNil:
+      active_runtime = init_codex_runtime(getCurrentDir())
+      owned_runtime = true
+    open_global_events(context)
+    start_codex_readers(readers, context, active_runtime)
+    readers_started = true
+    result = init_work_plan(top_level_flows, context)
+    echo "runtime: enqueue entry activation"
+    dump result.entry.kind
+    addLast(result.ready, Activation[A](
+      flow: result.entry,
+      input: input,
+      parent: none(WorkID),
+      resume: Resume[A](kind: rk_finished)
+    ))
+    echo "runtime: run work plan"
+    run_work_plan(result, active_runtime)
+    echo "runtime: execution complete"
+    dump result.finished
+    dump result.failed
+    dump result.nodes.len
+  finally:
+    if readers_started:
+      stop_codex_readers(readers)
+    close_global_events(context)
+    if owned_runtime:
+      deinit_codex_runtime(active_runtime)
 
 proc execute_flows*[A](top_level_flows: seq[Flow[A]]) =
   ## Compatibility entry point used by the current generated solve wrapper.
