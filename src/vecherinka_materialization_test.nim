@@ -68,15 +68,16 @@ proc inspect_materialization[A](
   doAssert readFile($spec.working_dir / "shared-1.txt") == "one"
   doAssert readFile($spec.working_dir / "shared-2.txt") == "two"
 
-  var event: RuntimeEvent[A]
-  event.kind = rev_model_artifact
-  event.request_id = request_id
-  event.output_kind = spec.output_kind
-  event.output = LlmOutput(
-    tool_name: "finish_work",
-    arguments: %*"generated")
-  event.materialize = spec.materialize
-  event.has_output = true
+  let event = RuntimeEvent[A](
+    kind: rev_model_artifact,
+    request_id: request_id,
+    output_kind: spec.output_kind,
+    output: LlmOutput(
+      tool_name: "finish_work",
+      arguments: %*"generated"),
+    materialize: spec.materialize,
+    tool_request_id: none(RequestId),
+    output_meta: none(ArtifactMeta))
   enqueue_runtime_event(context, event)
 
 vecherinka(generated_materialize):

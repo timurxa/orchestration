@@ -143,19 +143,19 @@ type
 
   RuntimeEvent*[A] = object
     request_id*: RequestId
-    kind*: RuntimeEventKind
-    ## Keep typed artifact construction on the runtime thread. Events carry
-    ## only transport output plus the generated materializer.
-    has_output*: bool
-    output_kind*: int
-    output*: LlmOutput
-    materialize*: ModelMaterializer[A]
-    has_tool_request_id*: bool
-    tool_request_id*: RequestId
-    has_output_meta*: bool
-    output_meta*: ArtifactMeta
-    has_message*: bool
-    message*: string
+    case kind*: RuntimeEventKind
+    of rev_model_artifact:
+      ## Keep typed artifact construction on the runtime thread. Events carry
+      ## only transport output plus the generated materializer.
+      output_kind*: int
+      output*: LlmOutput
+      materialize*: ModelMaterializer[A]
+      tool_request_id*: Option[RequestId]
+      output_meta*: Option[ArtifactMeta]
+    of rev_model_error:
+      error_message*: string
+    of rev_shutdown:
+      discard
 
   GlobalEventKind* = enum
     gek_runtime,
@@ -171,21 +171,28 @@ type
   GlobalEvent* = object
     ## Events contain copied transport data or a main-thread work ID. Readers
     ## never receive or mutate CodexRuntime, WorkPlan, Flow, or RuntimeContext.
-    kind*: GlobalEventKind
-    message*: string
-    request_id*: RequestId
-    ready_id*: uint64
-    runtime_kind*: RuntimeEventKind
-    has_output*: bool
-    output_kind*: int
-    output_tool_name*: string
-    output_arguments*: string
-    output_materializer*: pointer
-    has_tool_request_id*: bool
-    tool_request_id*: RequestId
-    has_output_meta*: bool
-    output_meta*: ArtifactMeta
-    has_message*: bool
+    case kind*: GlobalEventKind
+    of gek_runtime:
+      request_id*: RequestId
+      case runtime_kind*: RuntimeEventKind
+      of rev_model_artifact:
+        output_kind*: int
+        output_tool_name*: string
+        output_arguments*: string
+        output_materializer*: pointer
+        tool_request_id*: Option[RequestId]
+        output_meta*: Option[ArtifactMeta]
+      of rev_model_error:
+        error_message*: string
+      of rev_shutdown:
+        discard
+    of gek_ready:
+      ready_id*: uint64
+    of gek_stdout_line, gek_stderr_line, gek_reader_error:
+      message*: string
+    of gek_stdout_closed, gek_stderr_closed, gek_process_exit,
+        gek_shutdown:
+      discard
 
   CodexReaderArgs = object
     fd: cint
@@ -282,22 +289,30 @@ proc enqueue_runtime_event*[A](
   ## Runtime callbacks publish value-only events; main loop handles them later.
   if not context.events_open:
     raise newException(ValueError, "global event channel is not open")
-  var global_event = GlobalEvent(
-    kind: gek_runtime,
-    request_id: event.request_id,
-    runtime_kind: event.kind,
-    has_output: event.has_output,
-    output_kind: event.output_kind,
-    output_materializer: cast[pointer](event.materialize),
-    has_tool_request_id: event.has_tool_request_id,
-    tool_request_id: event.tool_request_id,
-    has_output_meta: event.has_output_meta,
-    output_meta: event.output_meta,
-    has_message: event.has_message,
-    message: event.message)
-  if event.has_output:
-    global_event.output_tool_name = event.output.tool_name
-    global_event.output_arguments = $event.output.arguments
+  var global_event: GlobalEvent
+  case event.kind
+  of rev_model_artifact:
+    global_event = GlobalEvent(
+      kind: gek_runtime,
+      request_id: event.request_id,
+      runtime_kind: rev_model_artifact,
+      output_kind: event.output_kind,
+      output_tool_name: event.output.tool_name,
+      output_arguments: $event.output.arguments,
+      output_materializer: cast[pointer](event.materialize),
+      tool_request_id: event.tool_request_id,
+      output_meta: event.output_meta)
+  of rev_model_error:
+    global_event = GlobalEvent(
+      kind: gek_runtime,
+      request_id: event.request_id,
+      runtime_kind: rev_model_error,
+      error_message: event.error_message)
+  of rev_shutdown:
+    global_event = GlobalEvent(
+      kind: gek_runtime,
+      request_id: event.request_id,
+      runtime_kind: rev_shutdown)
   send_global_event(context, global_event)
 
 proc enqueue_llm_output_event*[A](
@@ -309,17 +324,16 @@ proc enqueue_llm_output_event*[A](
 ) {.gcsafe.} =
   ## Callback only copies transport data. Typed decoding stays owner-thread.
   {.cast(gcsafe).}:
-    var event: RuntimeEvent[A]
-    event.kind = rev_model_artifact
-    event.request_id = request_id
-    event.output_kind = output_kind
-    event.output = LlmOutput(
-      tool_name: tool_context.params.tool,
-      arguments: tool_context.params.arguments)
-    event.materialize = materialize
-    event.has_output = true
-    event.has_tool_request_id = true
-    event.tool_request_id = tool_context.request_id
+    let event = RuntimeEvent[A](
+      request_id: request_id,
+      kind: rev_model_artifact,
+      output_kind: output_kind,
+      output: LlmOutput(
+        tool_name: tool_context.params.tool,
+        arguments: tool_context.params.arguments),
+      materialize: materialize,
+      tool_request_id: some(tool_context.request_id),
+      output_meta: none(ArtifactMeta))
     enqueue_runtime_event(context, event)
 
 proc new_llm_tool_data*(
@@ -351,6 +365,13 @@ proc try_recv_global_event*[A](context: RuntimeContext[A]): tuple[data_available
 proc reader_error_message(operation: string; error_code: cint): string =
   operation & " failed (errno " & $error_code & ")"
 
+proc new_line_event(kind: GlobalEventKind; message: string): GlobalEvent =
+  case kind
+  of gek_stdout_line, gek_stderr_line:
+    GlobalEvent(kind: kind, message: message)
+  else:
+    raise newException(ValueError, "invalid line event kind")
+
 proc emit_pending_lines(
     pending: var string;
     line_kind: GlobalEventKind;
@@ -364,7 +385,7 @@ proc emit_pending_lines(
     var line = pending[0 ..< newline]
     if line.len > 0 and line[^1] == '\r':
       line.setLen(line.len - 1)
-    send_global_event(events, GlobalEvent(kind: line_kind, message: line))
+    send_global_event(events, new_line_event(line_kind, line))
     if newline + 1 >= pending.len:
       pending.setLen(0)
     else:
@@ -434,7 +455,7 @@ proc read_codex_stream(args: CodexReaderArgs) {.thread, gcsafe.} =
     if pending.len > 0:
       if pending[^1] == '\r':
         pending.setLen(pending.len - 1)
-      send_global_event(args.events, GlobalEvent(kind: args.line_kind, message: pending))
+      send_global_event(args.events, new_line_event(args.line_kind, pending))
     send_global_event(args.events, GlobalEvent(kind: args.closed_kind))
 
 proc start_codex_readers_impl(
@@ -948,11 +969,10 @@ proc default_model_submit[A](
   dump request_id
   discard input
   discard working_dir
-  var event: RuntimeEvent[A]
-  event.kind = rev_model_error
-  event.request_id = request_id
-  event.message = "no model submitter configured"
-  event.has_message = true
+  let event = RuntimeEvent[A](
+    kind: rev_model_error,
+    request_id: request_id,
+    error_message: "no model submitter configured")
   enqueue_runtime_event(context, event)
 
 proc default_llm_transport[A](
@@ -967,24 +987,24 @@ proc default_llm_transport[A](
   dump spec.output_kind
   dump spec.tools.len
   if spec.materialize.isNil:
-    var event: RuntimeEvent[A]
-    event.kind = rev_model_error
-    event.request_id = request_id
-    event.message = "LLM spec has no output materializer"
-    event.has_message = true
+    let event = RuntimeEvent[A](
+      kind: rev_model_error,
+      request_id: request_id,
+      error_message: "LLM spec has no output materializer")
     enqueue_runtime_event(context, event)
     return
   let output = LlmOutput(
     tool_name: "debug_return",
     arguments: newJObject()
   )
-  var event: RuntimeEvent[A]
-  event.kind = rev_model_artifact
-  event.request_id = request_id
-  event.output_kind = spec.output_kind
-  event.output = output
-  event.materialize = spec.materialize
-  event.has_output = true
+  let event = RuntimeEvent[A](
+    kind: rev_model_artifact,
+    request_id: request_id,
+    output_kind: spec.output_kind,
+    output: output,
+    materialize: spec.materialize,
+    tool_request_id: none(RequestId),
+    output_meta: none(ArtifactMeta))
   enqueue_runtime_event(context, event)
 
 proc submit_llm*[A](
@@ -1176,6 +1196,9 @@ proc handle_runtime_event[A](
     event: GlobalEvent
 ) =
   echo "runtime: handle event"
+  if event.kind != gek_runtime:
+    fail_plan(plan, "non-runtime event passed to runtime handler")
+    return
   dump event.runtime_kind
   dump event.request_id
   case event.runtime_kind
@@ -1191,21 +1214,19 @@ proc handle_runtime_event[A](
     if invocation.output_meta.isNone:
       fail_plan(plan, "model invocation has no output metadata")
       return
-    if not event.has_output:
-      fail_plan(plan, "model completion has no output")
-      return
     if event.output_materializer.isNil:
       fail_plan(plan, "model completion has no materializer")
       return
     if event.output_arguments.len == 0:
       fail_plan(plan, "model completion has no encoded output")
       return
-    let can_ack_tool = event.has_tool_request_id and not runtime.isNil and
-      runtime.server_requests.hasKey(request_id_key(event.tool_request_id))
-    if event.has_tool_request_id and event.output_tool_name != "finish_work":
+    let can_ack_tool = event.tool_request_id.isSome and not runtime.isNil and
+      runtime.server_requests.hasKey(
+        request_id_key(event.tool_request_id.get))
+    if event.tool_request_id.isSome and event.output_tool_name != "finish_work":
       if can_ack_tool:
         runtime.accept_tool_response(
-          event.tool_request_id,
+          event.tool_request_id.get,
           false,
           @[dynamic_tool_text("unexpected completion tool: " &
             event.output_tool_name)])
@@ -1224,7 +1245,7 @@ proc handle_runtime_event[A](
     if not decoded.ok:
       if can_ack_tool:
         runtime.accept_tool_response(
-          event.tool_request_id,
+          event.tool_request_id.get,
           false,
           @[dynamic_tool_text("invalid finish_work result: " & decoded.error)])
         return
@@ -1232,14 +1253,14 @@ proc handle_runtime_event[A](
       return
     let artifact = decoded.value
     let output_meta = invocation.output_meta.get
-    if event.has_output_meta and
-        (event.output_meta.id != output_meta.id or
-         $event.output_meta.artifact_dir != $output_meta.artifact_dir):
+    if event.output_meta.isSome and
+        (event.output_meta.get.id != output_meta.id or
+         $event.output_meta.get.artifact_dir != $output_meta.artifact_dir):
       fail_plan(plan, "model completion output metadata mismatch")
       return
     if can_ack_tool:
       runtime.accept_tool_response(
-        event.tool_request_id,
+        event.tool_request_id.get,
         true,
         @[dynamic_tool_text(event.output_arguments)])
     plan.model_requests.del(key)

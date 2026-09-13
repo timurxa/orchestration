@@ -118,16 +118,16 @@ proc working_dir_flow_submit(
 ) =
   observed_model_working_dirs.add(working_dir)
   doAssert dirExists($working_dir)
-  var event: RuntimeEvent[string]
-  event.kind = rev_model_artifact
-  event.request_id = request_id
-  event.output_kind = 0
-  event.output = LlmOutput(
-    tool_name: "model(" & input & ")",
-    arguments: newJObject()
-  )
-  event.materialize = materialize_debug_string
-  event.has_output = true
+  let event = RuntimeEvent[string](
+    kind: rev_model_artifact,
+    request_id: request_id,
+    output_kind: 0,
+    output: LlmOutput(
+      tool_name: "model(" & input & ")",
+      arguments: newJObject()),
+    materialize: materialize_debug_string,
+    tool_request_id: none(RequestId),
+    output_meta: none(ArtifactMeta))
   enqueue_runtime_event(context, event)
 
 proc debug_submit(
@@ -137,16 +137,16 @@ proc debug_submit(
     working_dir: Path
 ) =
   discard working_dir
-  var event: RuntimeEvent[string]
-  event.kind = rev_model_artifact
-  event.request_id = request_id
-  event.output_kind = 0
-  event.output = LlmOutput(
-    tool_name: "model(" & input & ")",
-    arguments: newJObject()
-  )
-  event.materialize = materialize_debug_string
-  event.has_output = true
+  let event = RuntimeEvent[string](
+    kind: rev_model_artifact,
+    request_id: request_id,
+    output_kind: 0,
+    output: LlmOutput(
+      tool_name: "model(" & input & ")",
+      arguments: newJObject()),
+    materialize: materialize_debug_string,
+    tool_request_id: none(RequestId),
+    output_meta: none(ArtifactMeta))
   enqueue_runtime_event(context, event)
 
 let fake_submit = ModelSubmitter[string](debug_submit)
@@ -358,16 +358,21 @@ block:
   let metadata = ArtifactMeta(
     id: 77,
     artifact_dir: context.run_dir / Path("artifact-77"))
-  var event: RuntimeEvent[string]
-  event.kind = rev_model_artifact
-  event.request_id = RequestId(kind: rid_integer, integer_value: 7)
-  event.has_output_meta = true
-  event.output_meta = metadata
+  let event = RuntimeEvent[string](
+    kind: rev_model_artifact,
+    request_id: RequestId(kind: rid_integer, integer_value: 7),
+    output_kind: 0,
+    output: LlmOutput(
+      tool_name: "finish_work",
+      arguments: newJObject()),
+    materialize: materialize_debug_string,
+    tool_request_id: none(RequestId),
+    output_meta: some(metadata))
   enqueue_runtime_event(context, event)
   let copied = recv_global_event(context)
-  doAssert copied.has_output_meta
-  doAssert copied.output_meta.id == 77
-  doAssert $copied.output_meta.artifact_dir == $metadata.artifact_dir
+  doAssert copied.output_meta.isSome
+  doAssert copied.output_meta.get.id == 77
+  doAssert $copied.output_meta.get.artifact_dir == $metadata.artifact_dir
   close_global_events(context)
 
 block:

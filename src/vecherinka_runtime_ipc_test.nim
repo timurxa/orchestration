@@ -34,12 +34,16 @@ var events = wait_for_events(7)
 stop_codex_readers(readers)
 var messages = initTable[GlobalEventKind, seq[string]]()
 for event in events:
-  messages.mgetOrPut(event.kind, @[]).add(event.message)
+  case event.kind
+  of gek_stdout_line, gek_stderr_line, gek_reader_error:
+    messages.mgetOrPut(event.kind, @[]).add(event.message)
+  else:
+    discard
 
 doAssert messages[gek_stdout_line] == @["{\"id\":1}", "{\"id\":2}", "final partial"]
 doAssert messages[gek_stderr_line] == @["diagnostic one", "diagnostic two"]
-doAssert messages[gek_stdout_closed].len == 1
-doAssert messages[gek_stderr_closed].len == 1
+doAssert not messages.hasKey(gek_stdout_closed)
+doAssert not messages.hasKey(gek_stderr_closed)
 
 var messenger = new_global_event_messenger()
 send_global_event(context, GlobalEvent(kind: gek_stdout_closed))

@@ -1129,11 +1129,10 @@ proc lower_model_call(
         `submit_llm_symbol`(`submit_context`, `submit_request_id`,
           `llm_spec_name`)
       except CatchableError as error:
-        var event: RuntimeEvent[`artifact_name`]
-        event.kind = rev_model_error
-        event.request_id = `submit_request_id`
-        event.message = error.msg
-        event.has_message = true
+        let event = RuntimeEvent[`artifact_name`](
+          kind: rev_model_error,
+          request_id: `submit_request_id`,
+          error_message: error.msg)
         enqueue_runtime_event(`submit_context`, event)
   let submit = quote do:
     (proc (`submit_context`: RuntimeContext[`artifact_name`];

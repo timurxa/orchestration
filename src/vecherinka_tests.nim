@@ -1,6 +1,6 @@
 {.experimental: "callOperator".}
 
-import std/[deques, json, macros, sugar]
+import std/[deques, json, macros, options, sugar]
 import vecherinka
 import codex_json
 
@@ -40,16 +40,16 @@ proc debug_generated_transport[A](
     tool_name: "finish_work",
     arguments: %*{"message": 42}))
   doAssert not rejected.ok
-  var event: RuntimeEvent[A]
-  event.kind = rev_model_artifact
-  event.request_id = request_id
-  event.output_kind = spec.output_kind
-  event.output = LlmOutput(
-    tool_name: "finish_work",
-    arguments: %*{"message": "generated"}
-  )
-  event.materialize = spec.materialize
-  event.has_output = true
+  let event = RuntimeEvent[A](
+    kind: rev_model_artifact,
+    request_id: request_id,
+    output_kind: spec.output_kind,
+    output: LlmOutput(
+      tool_name: "finish_work",
+      arguments: %*{"message": "generated"}),
+    materialize: spec.materialize,
+    tool_request_id: none(RequestId),
+    output_meta: none(ArtifactMeta))
   enqueue_runtime_event(context, event)
 
 const cheap = "gpt-5.6-luna".minimal
