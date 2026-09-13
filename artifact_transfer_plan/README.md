@@ -7,7 +7,7 @@ Restore structured LLM artifact transfer in current Vecherinka runtime.
 Each model call must:
 
 1. Receive typed inline input in prompt instructions.
-2. Receive every input `Location` payload inside isolated working directory.
+2. Receive every input `Location` payload inside an isolated working directory.
 3. Receive output JSON schema through `finish_work`.
 4. Return only schema-valid typed output.
 5. Use runtime-relative `Location` paths; never emit absolute or `..` paths;
@@ -23,133 +23,148 @@ Source references:
 - Current Codex protocol owner: `src/codex_runtime.nim`.
 - Current IPC constraints: `codex_runtime_posix_ipc_guide.md`.
 
+## Revised architecture
+
+Generated `Artifact` remains a data-only tagged union. Compile-time lowering
+continues to construct and process `A` values without knowing runtime storage.
+
+Runtime owns one artifact registry per `RuntimeContext`:
+
+```nim
+type ArtifactRecord*[A] = object
+  data*: A
+  meta*: ArtifactMeta
+
+RuntimeContext[A].artifacts*: Table[ArtifactID, ArtifactRecord[A]]
+```
+
+`ArtifactRecord` is stored only in `RuntimeContext.artifacts`. Its key and
+`meta.id` must match. An `A` may exist independently before registration; a
+registration operation assigns or confirms its `ArtifactID`, attaches its
+`ArtifactMeta`, and inserts the record.
+
+Persistent runtime state stores references:
+
+- `Activation` stores an input `ArtifactID`.
+- `WorkNode` stores optional input/output `ArtifactID` values.
+- `JoinState` stores result-slot IDs and original-input ID.
+- `PendingModel` stores input ID plus reserved output identity/root.
+- `WorkPlan` stores final output ID.
+- events carry IDs, reservation metadata, or transport data, never copied
+  artifact records.
+
+At an execution boundary, the runtime resolves an ID to `ArtifactRecord`,
+unwraps `data` as local `A`, and runs existing flow/model/lift code. Newly
+created `A` values register when they become runtime-held. Pass-through paths
+reuse their existing ID. Generated `Flow[A]` values, raw flow payloads, and
+compile-time pack/unpack logic do not reference `ArtifactRecord`.
+
+The record wrapper replaces paired `A` plus `ArtifactMeta` in runtime state;
+it does not replace `A` in generated flow definitions or active computation.
+
+## Registration and identity rules
+
+- Initial input registers before the entry activation is queued.
+- `fk_raw` registers its independently generated value when execution reaches
+  the runtime handoff.
+- `fk_it` and lift destructuring register newly produced values before they are
+  queued or stored.
+- `fk_so` pass-through reuses the current ID; a child-produced value follows
+  normal registration rules.
+- Fanout branches reuse the input ID.
+- Join coalesce/construct results register as new values.
+- Valid model output registers after schema validation and completion checks. Its fresh
+  working root is reserved earlier for materialization.
+- Failed or rejected model candidates never enter the artifact table.
+
+`ArtifactID` is unique within one `RuntimeContext`. The table is main-thread
+owned, append-oriented storage for the lifetime of that context. Reader
+threads never access it.
+
+`Location` remains a runtime-relative reference. This is required for joins
+whose result can contain locations originating from multiple artifact roots.
+The input record's metadata identifies provenance and the source root;
+materialization resolves the location from the common runtime directory.
+Current plan keeps path policy prompt-owned; no new runtime Location verifier is
+part of this registry change.
+
 ## Current codebase snapshot
 
-Implemented:
+Already present, but based on the old sidecar design:
 
-- metadata sidecar: `ArtifactMeta`, runtime/run roots, fresh model and join
-  artifact directories;
+- `ArtifactMeta`, runtime/run roots, and fresh model/join artifact directories;
 - metadata propagation through activations, continuations, joins, pending
   models, nodes, and runtime events;
-- one-channel scheduler: typed activations live in `pending_ready`, while
-  `gek_ready` carries only an ID; runtime loop performs one blocking channel
-  read;
-- generated submit boundary carrying `input_meta`, `runtime_dir`,
-  `working_dir`, and materialized input; deterministic injected transport
-  remains available;
+- one-channel scheduler with typed activations retained in `pending_ready`;
+- generated submit boundary carrying input `A`, `ArtifactMeta`, runtime root,
+  working root, and materialized input;
 - Codex POSIX readers, main-thread JSON ownership, shutdown joining, and
   existing dynamic-tool plumbing.
 
-Still missing:
+Still missing, plus now requiring registry migration:
 
-- typed output decoding;
+- `ArtifactRecord` and `RuntimeContext.artifacts`;
+- ID-based persistent runtime state;
+- typed output decoding and record publication;
 - generated `finish_work` tool/callback integration;
 - artifact-aware real Codex transport and full failure/end-to-end coverage.
 
-## Design choices
+## Preserved boundaries
 
-### Preserve current runtime shape
+Keep `Flow[A]`, lazy activation, `Resume`, joins, generated tagged artifact
+payloads, injected `LlmTransport`, and main-thread ownership.
 
-Keep `Flow[A]`, lazy activation, `Resume`, joins, generated tagged artifact payloads, injected `LlmTransport`, and main-thread ownership.
+Do not change generated `Flow[A]` storage to records. Do not replace current
+scheduler with historical callback runtime. Port artifact behavior into current
+runtime boundaries.
 
-Do not replace current scheduler with historical callback runtime. Port artifact behavior into current boundaries.
-
-### Metadata sidecar
-
-Current generated artifact union contains typed values only. Add sidecar metadata instead of making every generated artifact type contain filesystem state:
-
-```nim
-type ArtifactID* = uint64
-
-type ArtifactMeta* = object
-  id*: ArtifactID
-  artifact_dir*: Path
-```
-
-Thread metadata beside typed values through activations, model state, joins, and completion events.
-
-This keeps generated `Artifact` pack/unpack logic type-focused. `artifact_dir`
-identifies the physical working directory for one model call. `Location`
-strings are relative to the common runtime directory, so values from different
-artifact directories remain directly composable.
-
-### One fresh root per model call
-
-Each model call gets a fresh destination root. Materialization copies payloads
-into that root. Model output keeps that root. The source tree is not a
-sandboxed immutability contract: the model is instructed to modify only its
-working artifact directory. The `run-*` directory is intentionally created
-under the program CWD and should be ignored by Git.
-
-Initial input uses current process working directory as source root and as the
-runtime-relative `Location` base. Runtime-created output roots live below one
-run directory under that CWD.
-
-### Main-thread coordination
-
-Reader threads only frame stdout/stderr and enqueue events. Main owner performs:
-
-- JSON parsing;
-- Codex state mutation;
-- dynamic-tool routing;
-- schema parsing;
-- tool acknowledgement;
-- artifact delivery.
-
-Dynamic tool callback queues a copied candidate event. It does not capture `WorkPlan` or mutate scheduler state.
-
-### Two request IDs
-
-Keep separate:
-
-- scheduler model request ID, used to find pending model work;
-- Codex server request ID, used to acknowledge `finish_work` call.
-
-Never overload current `RuntimeEvent.request_id` for both.
+The generated submit adapter may continue receiving `input: A` and metadata as
+ordinary processing arguments. Only persistent runtime storage changes to IDs
+and registry records.
 
 ## Slice order
 
 | Slice | Work | Status | Gate |
 | --- | --- | --- | --- |
-| 0 | Baseline, contracts, progress tracking | complete | Existing tests compile/pass; no source behavior change |
-| 1 | Artifact metadata and run-root allocation | complete | Metadata survives raw, `it`, `so`, joins; isolated roots verified |
-| 3 | Compile-time materialization walker | complete | Nested input renders and copies correctly |
-| 4 | Output schema and decoder | partial | Valid/invalid structured outputs handled without defaults |
-| 5 | Generated submit integration | partial | Fake transport receives real materialized spec |
-| 6 | `finish_work` event protocol | not started | Invalid calls retry; valid calls acknowledge and complete |
-| 7 | Real Codex transport | partial | Thread-start ordering and working-directory isolation verified |
-| 8 | Transfer through composition | complete | Multi-root routing is covered by runtime-relative locations; physical copying remains in Slices 3 and 5 |
-| 9 | Failure lifecycle and cleanup | partial | Turn failure, process exit, missing completion, shutdown safe |
-| 10 | End-to-end hardening | not started | Full test matrix, docs, progress closeout |
+| 0 | Baseline and revised registry contracts | rework | Existing tests still pass; target invariants recorded |
+| 1 | Registry, record creation, and ID-based runtime state | rework | All persistent artifact state uses IDs; records live in context table |
+| 3 | Input materialization against resolved records | rework | Nested input renders/copies; generated lowering remains stable |
+| 4 | Output schema, decoder, and record publication | partial | Valid output is registered; invalid output is not |
+| 5 | Generated submit integration | partial | Minimal comptime change; transport receives resolved `A` data |
+| 6 | `finish_work` event protocol | not started | Candidate validation/publish/acknowledgement is retry-safe |
+| 7 | Real Codex transport | partial | Agent receives correct root; event loop uses IDs |
+| 8 | Composition and ID transfer | rework | Fanout/lift/join chains preserve registry references |
+| 9 | Failure lifecycle and cleanup | partial | No dangling IDs, records, pending work, or unsafe roots |
+| 10 | End-to-end hardening | not started | Full registry and transfer matrix passes |
 
-Slices may be committed independently. Each slice must leave current tests green plus its own gate.
+Slices may be committed independently. Each slice must leave current tests
+green plus its own gate.
 
 ## Non-goals
 
 - Generic serialization of arbitrary Nim input values.
 - Passing absolute filesystem paths to model.
-- Passing mutable artifact directory ownership between calls.
+- Passing mutable artifact-directory ownership between calls.
 - Moving JSON parsing into reader threads.
 - Replacing current flow lowering or runtime ownership model with the
   historical callback runtime.
+- Making generated `Flow[A]` values depend on runtime records.
 - Optimizing copies with links, snapshots, or content-addressed storage.
-
-## Detailed execution plan
-
-See `slices/00` through `slices/10`.
 
 ## Final acceptance criteria
 
-- Generated model submit materializes real input.
+- Every runtime-held artifact has exactly one `ArtifactRecord` in the context
+  table, keyed by its ID.
+- Work nodes, joins, activations, pending models, and final output use IDs.
+- Active computation still uses ordinary `A` values.
+- Generated flows and compile-time pack/unpack remain data-only.
+- Generated model submit materializes real input from a resolved record.
 - Prompt includes inline input, strong runtime-relative `Location` instructions,
   output schema, and directory restriction.
 - `finish_work` schema derives from actual output type.
-- Tagged output variants use discriminator-aware schema.
-- Invalid schema returns useful retry feedback.
-- Valid output becomes typed generated artifact.
-- Every successful model output has fresh artifact metadata.
-- Chained call copies previous locations into its own root.
+- Invalid schema returns useful retry feedback and publishes no record.
+- Valid output becomes typed `A`, then one registered artifact record.
+- Chained calls copy previous locations into their own roots.
 - Existing scheduler continuation/join/lift behavior remains intact.
 - Readers remain transport-only.
 - No malformed output reaches continuation.
-- Prompt instructions strongly constrain `Location` paths and working-directory ownership.

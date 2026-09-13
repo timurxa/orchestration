@@ -1,65 +1,49 @@
-# Slice 6 — `finish_work` event protocol
+# Slice 6 — finish_work event protocol
 
 ## Purpose
 
-Connect dynamic tool calls to central output handling and scheduler completion.
+Connect dynamic tool calls to central decoding, registry publication, and ID
+based scheduler completion.
 
 ## Status
 
-Not started. Shared runtime/global event plumbing exists, but no generated
-`finish_work` tool or candidate-validation callback path exists.
-
-## Files
-
-- `src/vecherinka_runtime.nim`
-- `src/codex_runtime.nim`
-- `src/codex_json.nim` only if response helper needs extension
-- event/protocol tests
+Not started.
 
 ## Work
 
-Generated callback captures only per-call state and queues candidate event:
+Generated callback captures only per-call transport state and queues:
 
 - model request ID;
 - Codex tool request ID;
-- tool name;
-- call ID/thread ID/turn ID if required for diagnostics;
+- tool name and diagnostic IDs;
 - copied JSON arguments;
 - output kind;
-- output metadata;
+- pending output reservation identity;
 - generated materializer pointer.
 
-Add event kind for candidate completion, or extend model artifact event with explicit candidate state.
+Callback does not capture or mutate WorkPlan, RuntimeContext table, or records.
 
-Central handler pipeline:
+Central handler:
 
-1. Find pending model using scheduler ID.
-2. Confirm tool name is `finish_work`.
-3. Keep pending entry until validation succeeds.
-4. Run generated schema parser.
-5. On failure, call `accept_tool_response` with `success = false` and useful text. Keep model alive for retry.
-6. On success, acknowledge server request.
-7. Remove pending model.
-8. Store typed output and output metadata in work node.
-9. Deliver continuation.
+1. Find pending model by scheduler request ID.
+2. Confirm tool name finish_work.
+3. Parse and semantically validate candidate.
+4. On failure, negatively acknowledge and retain pending model for retry.
+5. On success, acknowledge server request.
+6. Materialize typed A.
+7. Create and insert ArtifactRecord using reserved metadata.
+8. Store output ArtifactID on WorkNode.
+9. Remove pending model and deliver continuation ID.
 
-Track per-call completion state. Second valid completion receives rejection or is ignored after safe acknowledgement policy; continuation runs once.
-
-Add direct response helper accepting server request ID if current `ToolCallContext` cannot survive event copy.
+Track per-call completion state. Duplicate completion cannot publish twice or
+resume twice. Scheduler ID and Codex request ID remain distinct.
 
 ## Test gate
 
 - callback queues copied event;
-- callback does not mutate `WorkPlan`;
-- invalid schema receives negative response;
-- rejected call remains retryable;
-- valid call receives positive response;
-- valid call reaches continuation once;
-- duplicate completion cannot resume twice;
-- scheduler ID and Codex request ID remain distinct;
+- no table or scheduler mutation occurs in callback;
+- invalid candidate receives useful negative response;
+- valid candidate creates one record and one continuation;
+- duplicate completion is safely rejected or ignored;
 - malformed event fails model cleanly;
 - callback closure remains alive after generated submit returns.
-
-## Done when
-
-Fake dynamic tool call can complete a model node through the same event path as real Codex.

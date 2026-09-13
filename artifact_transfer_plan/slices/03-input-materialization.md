@@ -1,74 +1,42 @@
-# Slice 3 — compile-time input materialization
+# Slice 3 — input materialization from resolved records
 
 ## Purpose
 
-Restore historical recursive materializer for model input.
+Restore the historical recursive materializer while keeping compile-time
+walking and generated model input on ordinary A values.
 
 ## Status
 
-Complete. Generated submit now walks typed input and copies `Location` payloads
-before transport submission.
-
-## Files
-
-- `src/vecherinka_comptime.nim`
-- artifact materialization tests
+Rework required after registry migration.
 
 ## Work
 
-Port and adapt historical walker:
+At model activation, runtime resolves input_id to ArtifactRecord[A], then calls
+the existing generated materializer with record.data and record.meta.
 
-- `materialize_node_kind`;
-- `materialize_tree`;
-- field and variant inspection;
-- sequence and option traversal;
-- instruction rendering;
-- `Location` leaves represented as runtime-relative source paths.
+Generated materializer behavior stays nearly unchanged:
 
-Generated materializer signature should receive:
+- scalar, enum, object, tuple, variant, sequence, option, and distinct wrapper
+  traversal;
+- active variant branch only;
+- one-based sequence paths;
+- explicit absent-option marker;
+- Location payload copy into fresh model working directory.
 
-- typed input value;
-- input metadata;
-- common runtime directory for resolving `Location` values;
-- destination artifact working directory;
-- optional initial instruction text.
+The materializer may keep its current processing signature:
 
-Generated output:
+    input: A
+    input_meta: ArtifactMeta
+    runtime_dir: Path
+    artifact_dir: Path
 
-```text
-problem.goal: string = Fix parser
-problem.codebase: location = repo
-items[1]: string = first
-optional: Option:none
-```
-
-Behavior:
-
-- inline leaves become text;
-- `Location` leaves resolve from the common runtime directory and copy the
-  payload into the supplied working directory;
-- variants visit active branch only;
-- sequences use one-based human paths;
-- absent options emit explicit none marker;
-- copy failures become model submission errors before agent creation.
-
-Resolve aliases and distinct wrappers. Preserve public field names. Reject unsupported object shapes at compile time.
+ArtifactRecord is not emitted into generated code. input_meta is a resolved
+field, not persistent paired runtime storage.
 
 ## Test gate
 
-- scalar input text exact;
-- nested object paths exact;
-- active variant only;
-- inactive variant not copied or rendered;
-- sequence indexes one-based;
-- present option materializes;
-- absent option emits none;
-- file copied;
-- directory copied recursively;
-- missing source reports a copy failure;
-- ordinary strings remain literal;
-- repeated model input gets independent destination copy.
-
-## Done when
-
-Fake transport can inspect complete materialized input instructions and destination tree.
+- Existing scalar/nested/variant/sequence/option/location tests pass.
+- Materializer receives data from the registry lookup.
+- Repeated model inputs copy independently.
+- Missing or invalid sources fail before transport submission.
+- Generated source contains no ArtifactRecord dependency.

@@ -1,6 +1,32 @@
 # Artifact transfer progress
 
-Last updated: 2026-09-13; Slice 1 and scheduler complete; Slice 2 removed by design.
+Last updated: 2026-09-13; architecture revised toward context-owned
+ArtifactRecord storage; revised implementation not started.
+
+## Architecture revision
+
+Previous Slice 1 and Slice 3 records describe old sidecar behavior. They remain
+historical evidence, not completion gates for revised architecture.
+
+Target:
+
+    type ArtifactRecord*[A] = object
+      data*: A
+      meta*: ArtifactMeta
+
+    RuntimeContext[A].artifacts*: Table[ArtifactID, ArtifactRecord[A]]
+
+ArtifactRecord is stored only in RuntimeContext.artifacts. Persistent runtime
+state stores ArtifactID references. Active handlers resolve an ID, use ordinary
+A locally, and register newly created A values before storing or queuing IDs.
+Generated Flow[A], generated Artifact payloads, and compile-time pack/unpack
+remain record-free.
+
+Revised order: registry and ID state; materialization; output decoding and
+publication; finish_work and real transport; composition, failure lifecycle,
+and end-to-end hardening.
+
+Current slice: revised Slice 0 — baseline and registry contracts.
 
 ## Slice 0 baseline
 
@@ -79,11 +105,10 @@ the common runtime directory, so copying by location path does not require
 merging or selecting artifact metadata roots. Physical copy/materialization
 work remains in Slices 3 and 5.
 
-## Current slice
+## Previous implementation status
 
-Slice 3 — input materialization.
-
-Status: complete.
+The records below describe work completed before architecture revision. Slices
+1, 3, and 8 require rework against ArtifactRecord and ArtifactID contracts.
 
 ## Slice 3 record
 
@@ -109,16 +134,16 @@ Issues: existing compiler warnings only.
 
 Next action: Slice 4 output schema and decoder.
 
-## Slice status
+## Revised slice status
 
-- [x] Slice 0 — baseline and contracts
-- [x] Slice 1 — metadata and run-root allocation
-- [x] Slice 3 — input materialization walker
+- [~] Slice 0 — baseline and registry contracts
+- [~] Slice 1 — artifact registry and ID-based runtime state
+- [~] Slice 3 — input materialization from resolved records
 - [~] Slice 4 — output schema and decoder
 - [~] Slice 5 — generated submit integration
 - [ ] Slice 6 — `finish_work` event protocol
 - [~] Slice 7 — real Codex transport
-- [x] Slice 8 — composition and multi-root transfer design
+- [~] Slice 8 — composition and ID transfer
 - [~] Slice 9 — failure lifecycle and cleanup
 - [ ] Slice 10 — end-to-end hardening
 
@@ -146,6 +171,12 @@ Next action: Slice 4 output schema and decoder.
 - Current execution tests cover metadata propagation, fresh model/join roots,
   sequential models, dynamic model flows, distinct-root joins, generated
   transport, and reader lifecycle.
+- Current runtime has no ArtifactRecord table. Activations, nodes, joins, and
+  pending state still store A plus ArtifactMeta or Option[A].
+- Generated Flow[A] is compile-time data and must remain independent of runtime
+  records.
+- Runtime handlers may resolve ArtifactID to A locally; that is not persistent
+  artifact storage.
 - Historical artifact behavior exists in commit `f2ad7bc`.
 
 ### Open issues to watch
@@ -162,14 +193,17 @@ Next action: Slice 4 output schema and decoder.
 
 ### Decision log
 
-- Use metadata sidecar, not generated artifact wrapper, to minimize changes to current `Flow[A]` structure.
+- Use context-owned ArtifactRecord values and ArtifactID references. Keep
+  generated Flow[A] and active computation on A.
+- Reserve model output roots before submission, but publish ArtifactRecord only
+  after typed output validation succeeds.
 - Keep deterministic transport as explicit test seam.
 - Handle output/tool protocol centrally after callback event reaches main owner;
   rely on model instructions for `Location` path discipline.
 - Multi-root joins need no root merge or selection: runtime-relative locations
   keep every branch payload addressable.
 
-### Slice 0 contracts
+### Historical Slice 0 contracts (superseded)
 
 ```nim
 type ArtifactID* = uint64
@@ -186,7 +220,7 @@ type ModelMaterialization*[A] = object
 
 Fixture plan: scalar field; nested object; `Location`; `seq[Location]`; `Option[Location]`; tagged output variant. Add fixtures with Slice 1 tests; no test-source changes in Slice 0.
 
-### Slice 1 implementation plan
+### Historical Slice 1 implementation plan (superseded)
 
 1. In `src/vecherinka_runtime.nim`, add `ArtifactID`/`ArtifactMeta`; add the program-CWD `runtime_dir`, `run_dir`, `next_artifact_id`, borrowed `CodexRuntime` owner, and request-keyed pending agent-start records to `RuntimeContext`.
 2. In `execute_flows`, capture canonical CWD as the runtime-relative Location base; create unique `run-*` below it; pass run root to `init_codex_runtime`; allocate `artifact-N` below run root. Entry metadata uses CWD, never run root.

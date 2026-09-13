@@ -1,59 +1,88 @@
-# Slice 1 — artifact metadata and run-root allocation
+# Slice 1 — artifact registry and ID-based runtime state
 
 ## Purpose
 
-Give every active typed value enough provenance for generated submit to find source payloads and allocate destination payloads.
+Make RuntimeContext the sole owner of ArtifactRecord values. Replace
+persistent A plus ArtifactMeta storage with ArtifactID references while
+keeping active execution and generated flows on A.
 
 ## Status
 
-Complete. Runtime metadata, fresh model/join roots, submit working-directory
-plumbing, and composition coverage are implemented.
+Rework required. Current implementation has directories and sidecar metadata,
+but no registry and still stores typed values in runtime state.
 
 ## Files
 
-- `src/vecherinka_runtime.nim`
-- `src/vecherinka_comptime.nim`
+- src/vecherinka_runtime.nim
 - runtime execution tests
+- generated source fixtures only if needed to prove no comptime dependency
 
-## Work
+## Target types
 
-1. Add `ArtifactID` and `ArtifactMeta`.
-2. Extend `RuntimeContext` with:
-   - runtime directory (program CWD, the base for `Location` values);
-   - run directory;
-   - next artifact ID;
-   - optional `CodexRuntime` owner pointer;
-   - pending agent-start records.
-3. Create one run directory during `execute_flows`.
-4. Add allocator returning fresh `artifact-N` directory and metadata.
-5. Seed entry activation with source root equal to current working directory.
-6. Add metadata to `Activation` and `WorkNode`.
-7. Add metadata to pending model state and runtime/global events.
-8. Change `Flow.fk_model.submit` boundary to accept input metadata and the
-   fresh model working directory.
-9. Preserve metadata through immediate `fk_it`, `fk_so`, and raw continuation paths.
-10. Allocate the output artifact directory before calling `submit`; store its
-    metadata in pending and completed model state.
+    type ArtifactRecord*[A] = object
+      data*: A
+      meta*: ArtifactMeta
 
-## Important invariant
+    RuntimeContext[A].artifacts*: Table[ArtifactID, ArtifactRecord[A]]
 
-Typed artifact payload remains separate from filesystem provenance. Relative
-`Location` strings resolve from the common runtime directory, never from an
-individual artifact directory and never become absolute model-facing values.
+Add main-thread helpers:
+
+- register an independently created A with metadata;
+- look up a record by ID;
+- validate table key and ArtifactMeta.id;
+- reserve output ID/root without publishing an incomplete record.
+
+## Runtime migration
+
+Change persistent fields:
+
+- Activation.input plus artifact_meta becomes artifact_id.
+- WorkNode.input/output become Option[ArtifactID]; remove paired metadata.
+- JoinState.slots become seq[Option[ArtifactID]]; original input becomes ID.
+- PendingModel stores input ID and reserved output identity/root.
+- WorkPlan.output becomes output ID; remove separate output metadata.
+- ready queues carry activations containing IDs.
+- runtime/global events carry IDs or reservation data, never records.
+
+At each handler boundary:
+
+1. Resolve ID from context.artifacts.
+2. Copy or borrow record.data into local A.
+3. Run existing fk_raw, fk_it, fk_so, lift, join, and model logic.
+4. Register newly created A before storing or queuing its ID.
+
+Registration rules:
+
+- initial input registers before entry activation;
+- raw values register when reached;
+- projections and lift-produced values register before handoff;
+- pass-through reuses its ID;
+- fanout reuses input ID;
+- joins register constructed values;
+- model output registers only after successful validation.
+
+Generated Flow[A] fields remain unchanged. Generated model submit can retain
+A and metadata as processing arguments; only runtime-owned storage changes to
+IDs and records.
+
+## Important invariants
+
+- Every runtime-held artifact has one context-table record.
+- No ID is queued before its record exists.
+- No output ID is published before typed output validation succeeds.
+- A fresh model root may exist without a record while model work is pending.
+- Reader threads never access the table.
 
 ## Test gate
 
-Add tests that:
+Add tests for:
 
-- entry input receives current-directory metadata;
-- model allocation creates distinct roots for two model calls;
-- `it` preserves metadata;
-- `so` child receives metadata;
-- work-node input/output metadata is recorded;
-- runtime event preserves metadata through channel serialization fields;
-- source root remains unchanged after allocation.
-- submit receives the pre-created working directory.
-
-## Rollback point
-
-Metadata fields can be removed without changing generated artifact union layout if this slice stays isolated.
+- initial input registration and lookup;
+- raw, it, lift, join, and model registration;
+- pass-through ID preservation;
+- distinct IDs for newly created values;
+- node/join/pending/plan fields storing IDs;
+- unknown ID failure;
+- table key and metadata ID mismatch;
+- source root unchanged after registration;
+- generated Flow[A] lowering unchanged.

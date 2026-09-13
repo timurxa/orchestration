@@ -1,66 +1,46 @@
-# Slice 8 — composition and multi-root transfer
+# Slice 8 — composition and ID transfer
 
 ## Purpose
 
-Prove artifact transfer across current flow composition, including branch boundaries.
+Prove artifact transfer through flow composition using IDs into one global
+per-context registry.
 
 ## Status
 
-Complete for composition and multi-root routing. Metadata survives sequential
-models, `so`, fanout, lift, and distinct-root joins. Physical `Location`
-copying remains part of input materialization in Slices 3 and 5.
-
-## Files
-
-- `src/vecherinka_runtime.nim`
-- `src/vecherinka_comptime.nim` pack/unpack emitters
-- composition tests
+Rework required. Existing tests prove sidecar metadata propagation, not
+registry-backed references.
 
 ## Work
 
 Sequential transfer:
 
-1. Model A writes `result.txt`.
-2. Model B receives typed output from A.
-3. B receives `result.txt` under B's fresh root.
-4. B returns new typed output.
+1. Model A resolves input ID to A data.
+2. Model A creates and publishes one ArtifactRecord.
+3. Model B receives model A's output ID.
+4. Runtime resolves that ID to A data and metadata.
+5. B materializes locations into B's fresh root.
+6. B publishes a new record and output ID.
 
-Immediate transformations:
+Composition rules:
 
-- `fk_it` preserves metadata;
-- `fk_so` preserves metadata into child activation;
-- raw values use current source root;
-- lift preserves source root for non-model transformations.
+- raw/it/lift-created values register before handoff;
+- pass-through paths reuse IDs;
+- fanout branches reuse input ID;
+- join slots store IDs, not A values or metadata;
+- join construction resolves slot IDs to A values, creates new A, and registers
+  one output record;
+- distinct source roots remain addressable through runtime-relative Location
+  values;
+- no directory ownership passes between records.
 
-Fanout/lift joins:
-
-- same-root and distinct-root branch outputs are both addressable because
-  `Location` values are relative to the common runtime directory;
-- the join allocates a fresh artifact ID and directory for its constructed
-  typed value;
-- no branch root is silently selected or merged;
-- all referenced runtime-relative locations retain their source paths after the
-  join.
-
-No composite artifact-root merge is required. A later model materializes any
-referenced payloads into its own fresh working directory from the common
-runtime directory.
+Generated pack/unpack and Flow[A] remain unchanged.
 
 ## Test gate
 
 - two sequential model calls;
-- model after `it`;
-- model inside `so`;
-- model inside lift;
-- model fanout with same root;
-- model fanout with distinct roots;
-- distinct-root join retains both branch locations;
-- branch directory isolation;
+- model after it, so, and lift;
+- same-root and distinct-root fanout;
+- distinct-root join retains both locations;
+- every stored node/join/plan reference resolves through context table;
 - source artifact remains unchanged;
-- continuation sees typed value plus correct metadata.
-
-## Done when
-
-Every supported composition preserves typed payload semantics and filesystem
-provenance. Runtime-relative paths provide multi-root transfer without root
-merging; physical copying is tested by the materialization slices.
+- no persistent runtime field stores copied A plus ArtifactMeta.

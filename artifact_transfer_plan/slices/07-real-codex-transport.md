@@ -2,52 +2,36 @@
 
 ## Purpose
 
-Use current `CodexRuntime` to run one artifact-aware agent turn.
+Run one artifact-aware agent turn while preserving registry ownership and ID
+references.
 
 ## Status
 
-Partial. Codex process lifecycle, POSIX readers, main-thread JSON handling,
-and dynamic-tool primitives exist. Model calls still use deterministic or
-injected transport; per-agent working directories and delayed real turns are
-not integrated.
-
-## Files
-
-- `src/vecherinka_runtime.nim`
-- `src/codex_runtime.nim`
-- transport integration tests
+Partial. Codex lifecycle and readers exist; real artifact-aware turns are not
+integrated.
 
 ## Work
 
-1. Keep deterministic fake transport available by explicit injection.
-2. Add real transport path for `LlmCallSpec`.
-3. Create agent with generated dynamic tools.
-4. Give agent its fresh artifact directory as thread working directory.
-5. Store pending thread-start action keyed by agent/model request.
+1. Keep deterministic fake transport as explicit test seam.
+2. Add real transport for LlmCallSpec.
+3. Resolve model input ID before generated submit.
+4. Create agent with generated dynamic tools and fresh working directory.
+5. Store pending thread-start action keyed by model request ID.
 6. Wait for thread-start response.
-7. Set explicit goal after thread ID exists.
-8. Send actual turn prompt only after thread ID exists.
-9. Route tool calls through current dynamic-tool lookup.
-10. Route all completion/error events to central runtime.
+7. Set goal and send prompt only after thread ID exists.
+8. Route finish_work calls to central event handling.
+9. Publish valid output record, then resume using its ArtifactID.
+10. Route transport errors to terminal model failure.
 
-Current `create_agent` uses runtime-wide `cwd`; add optional per-agent working directory while preserving existing callers.
-
-The prompt must tell the model to modify only that artifact directory. Model
-facing `Location` values remain relative to the common runtime directory.
-
-Do not send prompt from `create_agent` call. Do not send before thread ID.
+RuntimeContext.artifacts remains main-thread owned. Reader threads only enqueue
+copied transport events.
 
 ## Test gate
 
-- synthetic thread-start response triggers pending prompt exactly once;
 - no prompt appears before thread ID;
 - agent receives correct working directory;
 - dynamic tool schema reaches Codex request;
 - tool call reaches finish-work event;
+- successful turn adds exactly one output record;
 - stdout/stderr readers remain independent;
-- fake protocol process can run without network;
-- real end-to-end run succeeds when local Codex state/network available.
-
-## Done when
-
-One real model call can create files, call `finish_work`, and complete scheduler node.
+- shutdown is safe with pending IDs.
