@@ -223,6 +223,7 @@ type
     stdout_closed*: bool
     stderr_closed*: bool
     process_exited*: bool
+    last_stderr*: Option[string]
 
   RuntimeContext*[A] = ref object
     artifacts*: Table[ArtifactID, ArtifactRecord[A]]
@@ -264,6 +265,7 @@ type
     output*: Option[ArtifactID]
     finished*: bool
     failed*: bool
+    failure_message*: Option[string]
 
 when sizeof(pointer) < sizeof(uint64):
   {.fatal: "Vecherinka dynamic tool handles require 64-bit pointers".}
@@ -591,7 +593,43 @@ proc new_global_event_messenger*(): GlobalEventMessenger =
   GlobalEventMessenger(
     stdout_closed: false,
     stderr_closed: false,
-    process_exited: false)
+    process_exited: false,
+    last_stderr: none(string))
+
+proc streams_closed(messenger: GlobalEventMessenger): bool {.inline.} =
+  messenger.stdout_closed and messenger.stderr_closed
+
+proc fail_on_process_exit[A](
+    plan: var WorkPlan[A];
+    messenger: GlobalEventMessenger
+) =
+  ## Child exit is terminal only after both pipes drained and process reaped.
+  ## This preserves final bytes while preventing a dead coordinator receive.
+  if messenger.process_exited and messenger.streams_closed and not plan.finished:
+    plan.failed = true
+    plan.finished = true
+    plan.failure_message = some(
+      if messenger.last_stderr.isSome:
+        "codex app-server exited: " & messenger.last_stderr.get
+      else:
+        "codex app-server exited before work completed")
+
+proc fail_runtime[A](plan: var WorkPlan[A]; message: string) =
+  if plan.finished:
+    return
+  plan.failed = true
+  plan.finished = true
+  plan.failure_message = some(message)
+
+proc codex_process_exit_seen(
+    messenger: var GlobalEventMessenger;
+    runtime: ptr CodexRuntime
+): bool =
+  if messenger.process_exited or runtime.isNil:
+    return messenger.process_exited
+  if not runtime.is_running():
+    messenger.process_exited = true
+  messenger.process_exited
 
 proc handle_global_event*(
     messenger: var GlobalEventMessenger;
@@ -607,15 +645,13 @@ proc handle_global_event*(
       raise newException(ValueError, "stdout event requires CodexRuntime owner")
     discard runtime.accept_json(parseJson(event.message))
   of gek_stderr_line:
-    discard
+    messenger.last_stderr = some(event.message)
   of gek_stdout_closed:
     messenger.stdout_closed = true
-    if messenger.stderr_closed and not runtime.isNil:
-      messenger.process_exited = not runtime.is_running()
+    discard messenger.codex_process_exit_seen(runtime)
   of gek_stderr_closed:
     messenger.stderr_closed = true
-    if messenger.stdout_closed and not runtime.isNil:
-      messenger.process_exited = not runtime.is_running()
+    discard messenger.codex_process_exit_seen(runtime)
   of gek_process_exit:
     messenger.process_exited = true
   of gek_reader_error:
@@ -795,6 +831,7 @@ proc init_work_plan*[A](
   result.next_ready_id = 0
   result.next_join_id = 1
   result.output = none(ArtifactID)
+  result.failure_message = none(string)
 
   for top in top_level_flows:
     if top.isNil or top.kind != fk_top:
@@ -1310,6 +1347,14 @@ proc handle_global_event[A](
   of gek_stdout_line, gek_stderr_line, gek_stdout_closed, gek_stderr_closed,
       gek_process_exit, gek_reader_error:
     messenger.handle_global_event(runtime, event)
+    if event.kind == gek_stdout_line and not runtime.isNil and
+        runtime.initialization_error.isSome:
+      plan.fail_runtime(
+        "codex initialization failed: " & runtime.initialization_error.get)
+    elif event.kind == gek_stderr_line and not runtime.isNil and
+        not runtime.initialized and event.message.strip.startsWith("Error:"):
+      plan.fail_runtime("codex app-server startup failed: " & event.message.strip)
+    plan.fail_on_process_exit(messenger)
   of gek_shutdown:
     plan.finished = true
 
@@ -1321,8 +1366,20 @@ proc run_work_plan*[A](
     raise newException(ValueError, "global event channel is not open")
   var messenger = new_global_event_messenger()
   while not plan.finished:
-    let event = recv_global_event(plan.context)
-    handle_global_event(plan, messenger, runtime, event)
+    let received = try_recv_global_event(plan.context)
+    if received.data_available:
+      handle_global_event(plan, messenger, runtime, received.event)
+    elif not messenger.process_exited and
+        messenger.codex_process_exit_seen(runtime):
+      ## Poll process status while channel is idle. Reader EOF events still
+      ## arrive separately, so exit is not treated as stream completion.
+      handle_global_event(
+        plan,
+        messenger,
+        runtime,
+        GlobalEvent(kind: gek_process_exit))
+    else:
+      sleep(1)
 
 proc execute_flows*[A](
     top_level_flows: seq[Flow[A]];
