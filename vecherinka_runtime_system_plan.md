@@ -851,23 +851,25 @@ proc debug_transport[A](
     request_id: RequestId;
     spec: LlmCallSpec[A]
 ) =
-  let artifact = spec.materialize(spec.output_kind, LlmOutput(
+  let output = LlmOutput(
     tool_name: "debug_return",
-    arguments: debug_json_payload()))
+    arguments: debug_json_payload())
   var event: RuntimeEvent[A]
   event.kind = rev_model_artifact
   event.request_id = request_id
-  new(event.artifact)
-  event.artifact[] = artifact
-  event.has_artifact = true
+  event.output_kind = spec.output_kind
+  event.output = output
+  event.materialize = spec.materialize
+  event.has_output = true
   context.events.addLast(event)
 ```
 
 `debug_transport` must never resume inline. It only exercises generated
-type-specific LLM data, invokes generated response materialization, and queues
-a normal model-artifact Event. It must not call Codex, send an agent message,
-parse a server response, or create reader threads. A test may replace the
-generated materializer or transport to inject more specific fixtures.
+type-specific LLM data and queues raw output plus its generated materializer.
+The runtime thread materializes the Artifact while handling the Event. It must
+not call Codex, send an agent message, parse a server response, or create reader
+threads. A test may replace the generated materializer or transport to inject
+more specific fixtures.
 
 Model completion handling:
 
@@ -885,12 +887,13 @@ proc handle_model_artifact[A](
   let pending = plan.pending_models[key]
   plan.pending_models.del(key)
 
+  let artifact = event.materialize(event.output_kind, event.output)
   var node = plan.nodes[pending.node_id]
-  node.output = some(event.artifact)
+  node.output = some(artifact)
   node.state = ws_done
   plan.nodes[pending.node_id] = node
 
-  deliver_resume(context, plan, pending.resume, event.artifact)
+  deliver_resume(context, plan, pending.resume, artifact)
 ```
 
 Request ID is the authoritative pending lookup key. Work ID remains provenance
@@ -1175,15 +1178,16 @@ proc debug_transport[A](
     request_id: RequestId;
     spec: LlmCallSpec[A]
 ) =
-  let output = spec.materialize(spec.output_kind, LlmOutput(
+  let output = LlmOutput(
     tool_name: "debug_return",
-    arguments: debug_json_payload()))
+    arguments: debug_json_payload())
   var event: RuntimeEvent[A]
   event.kind = rev_model_artifact
   event.request_id = request_id
-  new(event.artifact)
-  event.artifact[] = output
-  event.has_artifact = true
+  event.output_kind = spec.output_kind
+  event.output = output
+  event.materialize = spec.materialize
+  event.has_output = true
   context.events.addLast(event)
 ```
 

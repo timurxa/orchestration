@@ -28,9 +28,7 @@ vecherinka:
 doAssert model_flow.kind == fk_top
 doAssert model_flow.root == "model_flow"
 doAssert model_flow.body.kind == fk_model
-doAssert model_flow.body.profile.model == "gpt-5.6-luna"
-doAssert model_flow.body.profile.effort == re_minimal
-doAssert model_flow.body.prompt == "hello"
+doAssert model_flow.body.submit != nil
 doAssert model_flow_2.kind == fk_top
 doAssert model_flow_2.root == "model_flow_2"
 doAssert model_flow_2.body.kind == fk_ref
@@ -74,9 +72,9 @@ doAssert so_fanned.body.kind == fk_so
 doAssert so_fanned.body.execute != nil
 doAssert so_outer.body.kind == fk_so
 doAssert so_outer.body.continuation.kind == fk_model
-doAssert so_outer.body.continuation.prompt == "outer second"
+doAssert so_outer.body.continuation.submit != nil
 doAssert so_outer.body.continuation.continuation.kind == fk_model
-doAssert so_outer.body.continuation.continuation.prompt == "outer third"
+doAssert so_outer.body.continuation.continuation.submit != nil
 
 vecherinka:
   > first First ~> Second:
@@ -119,11 +117,11 @@ doAssert chained.body.continuation.continuation.kind == fk_ref
 doAssert chained.body.continuation.continuation.name == "third"
 doAssert chained.body.continuation.continuation.continuation.isNil
 doAssert inline_chained.body.kind == fk_model
-doAssert inline_chained.body.prompt == "inline first"
+doAssert inline_chained.body.submit != nil
 doAssert inline_chained.body.continuation.kind == fk_model
-doAssert inline_chained.body.continuation.prompt == "inline second"
+doAssert inline_chained.body.continuation.submit != nil
 doAssert inline_chained.body.continuation.continuation.kind == fk_model
-doAssert inline_chained.body.continuation.continuation.prompt == "inline third"
+doAssert inline_chained.body.continuation.continuation.submit != nil
 doAssert inline_chained.body.continuation.continuation.continuation.isNil
 doAssert right_chained.body.kind == fk_ref
 doAssert right_chained.body.continuation.kind == fk_ref
@@ -244,4 +242,4 @@ doAssert pure_value.body.continuation.isNil
 doAssert pure_local.body.kind == fk_raw
 doAssert pure_chain.body.kind == fk_raw
 doAssert pure_chain.body.continuation.kind == fk_model
-doAssert pure_chain.body.continuation.prompt == "after pure"
+doAssert pure_chain.body.continuation.submit != nil

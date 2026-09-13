@@ -29,9 +29,11 @@ type
       entry*: bool
       body*: Flow[A]
     of fk_model:
-      profile*: ProfileSpec
-      prompt*: string
-      prepare*: proc(input: A): ModelCallSpec[A] {.nimcall.}
+      submit*: proc(
+        context: RuntimeContext[A];
+        request_id: RequestId;
+        input: A
+      ) {.nimcall.}
     of fk_raw:
       value*: A
     of fk_ref:
@@ -124,16 +126,6 @@ type
     tool_name*: string
     arguments*: JsonNode
 
-  ModelCallSpec*[A] = object
-    profile*: ProfileSpec
-    prompt*: string
-    input*: A
-    output_kind*: int
-    debug_output*: proc(output_kind: int; output: LlmOutput): A {.nimcall.}
-    ## Generated full submit adapter. Erased pointer avoids recursive generic
-    ## variant constructor issues; runtime casts only at dispatch boundary.
-    submit*: pointer
-
   LlmCallSpec*[A] = object
     profile*: ProfileSpec
     prompt*: string
@@ -150,10 +142,12 @@ type
   RuntimeEvent*[A] = object
     request_id*: RequestId
     kind*: RuntimeEventKind
-    ## Keep payload storage uniform. Constructors below assign fields after
-    ## allocation; Nim's generic variant constructor crashes for generated A.
-    has_artifact*: bool
-    artifact*: ref A
+    ## Keep typed artifact construction on the runtime thread. Events carry
+    ## only transport output plus the generated materializer.
+    has_output*: bool
+    output_kind*: int
+    output*: LlmOutput
+    materialize*: proc(output_kind: int; output: LlmOutput): A {.nimcall.}
     has_message*: bool
     message*: string
 
@@ -166,19 +160,13 @@ type
   ModelSubmitter*[A] = proc(
     context: RuntimeContext[A];
     request_id: RequestId;
-    spec: ModelCallSpec[A]
+    input: A
   ) {.nimcall.}
 
   LlmTransport*[A] = proc(
     context: RuntimeContext[A];
     request_id: RequestId;
     spec: LlmCallSpec[A]
-  ) {.nimcall.}
-
-  ErasedModelSubmit* = proc(
-    context: pointer;
-    request_id: RequestId;
-    spec: pointer
   ) {.nimcall.}
 
   WorkPlan*[A] = object
@@ -438,12 +426,11 @@ proc accept_join_result[A](
 proc default_model_submit[A](
     context: RuntimeContext[A];
     request_id: RequestId;
-    spec: ModelCallSpec[A]
+    input: A
 ) =
   echo "runtime: default model submit (error path)"
   dump request_id
-  dump spec.prompt
-  discard spec
+  discard input
   var event: RuntimeEvent[A]
   event.kind = rev_model_error
   event.request_id = request_id
@@ -471,19 +458,17 @@ proc default_llm_transport[A](
     event.has_message = true
     addLast(context.events, event)
     return
-  let output = spec.materialize(
-    spec.output_kind,
-    LlmOutput(
-      tool_name: "debug_return",
-      arguments: newJObject()
-    )
+  let output = LlmOutput(
+    tool_name: "debug_return",
+    arguments: newJObject()
   )
   var event: RuntimeEvent[A]
   event.kind = rev_model_artifact
   event.request_id = request_id
-  new(event.artifact)
-  event.artifact[] = output
-  event.has_artifact = true
+  event.output_kind = spec.output_kind
+  event.output = output
+  event.materialize = spec.materialize
+  event.has_output = true
   addLast(context.events, event)
 
 proc submit_llm*[A](
@@ -522,21 +507,8 @@ proc suspend_model[A](
     resume: Resume[A]
 ) =
   echo "runtime: suspend model"
-  dump flow.profile.model
-  dump flow.profile.effort
-  dump flow.prompt
   dump parent
   let node_id = new_work_node(plan, wk_model, parent, some(input))
-  var spec = if flow.prepare.isNil:
-    ModelCallSpec[A](
-      profile: flow.profile,
-      prompt: flow.prompt,
-      input: input,
-      output_kind: -1,
-      debug_output: nil
-    )
-  else:
-    flow.prepare(input)
   let request_id = allocate_request_id(plan.context)
   let pending = PendingModel[A](
     node_id: node_id,
@@ -553,15 +525,14 @@ proc suspend_model[A](
   node.request_id = some(request_id)
   node.state = ws_waiting
 
-  if not spec.submit.isNil:
-    let submitter = cast[ErasedModelSubmit](spec.submit)
-    submitter(cast[pointer](plan.context), request_id, addr spec)
+  if not flow.submit.isNil:
+    flow.submit(plan.context, request_id, input)
   else:
     let submitter = if not plan.context.submitter.isNil:
       plan.context.submitter
     else:
       default_model_submit[A]
-    submitter(plan.context, request_id, spec)
+    submitter(plan.context, request_id, input)
 
 proc begin_fanout[A](
     plan: var WorkPlan[A];
@@ -729,13 +700,13 @@ proc handle_event[A](
       fail_plan(plan, "model completion has unknown work node")
       return
     let node = plan.nodes[pending.node_id]
-    if not event.has_artifact:
-      fail_plan(plan, "model completion has no artifact")
+    if not event.has_output:
+      fail_plan(plan, "model completion has no output")
       return
-    if event.artifact.isNil:
-      fail_plan(plan, "model completion has nil artifact")
+    if event.materialize.isNil:
+      fail_plan(plan, "model completion has no materializer")
       return
-    let artifact = event.artifact[]
+    let artifact = event.materialize(event.output_kind, event.output)
     node.output = some(artifact)
     node.state = ws_done
     echo "runtime: model artifact accepted"

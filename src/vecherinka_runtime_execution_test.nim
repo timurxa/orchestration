@@ -25,12 +25,13 @@ proc inspect_generated_transport[A](
   var event: RuntimeEvent[A]
   event.kind = rev_model_artifact
   event.request_id = request_id
-  new(event.artifact)
-  event.artifact[] = spec.materialize(
-    spec.output_kind,
-    LlmOutput(tool_name: "debug_return", arguments: newJObject())
+  event.output_kind = spec.output_kind
+  event.output = LlmOutput(
+    tool_name: "debug_return",
+    arguments: newJObject()
   )
-  event.has_artifact = true
+  event.materialize = spec.materialize
+  event.has_output = true
   addLast(context.events, event)
 
 vecherinka(generated_solve):
@@ -82,17 +83,28 @@ proc construct_empty(results: seq[string]; input: string): string =
   doAssert results.len == 0
   input & "+empty"
 
+proc materialize_debug_string(
+    output_kind: int;
+    output: LlmOutput
+): string =
+  discard output_kind
+  output.tool_name
+
 proc debug_submit(
     context: RuntimeContext[string];
     request_id: RequestId;
-    spec: ModelCallSpec[string]
+    input: string
 ) =
   var event: RuntimeEvent[string]
   event.kind = rev_model_artifact
   event.request_id = request_id
-  new(event.artifact)
-  event.artifact[] = spec.prompt & "(" & spec.input & ")"
-  event.has_artifact = true
+  event.output_kind = 0
+  event.output = LlmOutput(
+    tool_name: "model(" & input & ")",
+    arguments: newJObject()
+  )
+  event.materialize = materialize_debug_string
+  event.has_output = true
   addLast(context.events, event)
 
 let fake_submit = ModelSubmitter[string](debug_submit)
@@ -109,7 +121,6 @@ block:
 block:
   let model = Flow[string](
     kind: fk_model,
-    prompt: "model",
     continuation: Flow[string](kind: fk_it, projector: add_suffix)
   )
   let result = execute_flows(

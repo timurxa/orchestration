@@ -620,101 +620,54 @@ proc lower_model_call(
 
   let submit_context = genSym(nskParam, "model_context")
   let submit_request_id = genSym(nskParam, "model_request_id")
-  let submit_spec_pointer = genSym(nskParam, "model_spec")
-  let typed_spec_pointer = genSym(nskLet, "typed_model_spec")
-  let submit_spec = newTree(nnkDerefExpr, copyNimTree(typed_spec_pointer))
-  let submit_input = genSym(nskLet, "model_typed_input")
+  let submit_input = genSym(nskParam, "model_input")
+  let typed_input = genSym(nskLet, "model_typed_input")
   let submit_unpacked = if input_type.is_void_type:
     newEmptyNode()
   else:
-    registry.emit_artifact_unpack(input_type, newDotExpr(
-      copyNimTree(submit_spec), ident("input")))
+    registry.emit_artifact_unpack(input_type, submit_input)
   let typed_context = if input_type.is_void_type:
     newLit("")
   else:
     quote do:
-      $`submit_input`
+      $`typed_input`
   let input_type_name = newLit(input_type.repr)
   let output_type_name = newLit(output_type.repr)
   let tools = newCall(bindSym"debug_tool_registry",
     input_type_name, output_type_name)
-  let typed_context_name = genSym(nskLet, "typed_model_context")
   let llm_spec_name = genSym(nskLet, "llm_spec")
   let llm_spec_value = quote do:
     LlmCallSpec[`artifact_name`](
-      profile: `submit_spec`.profile,
-      prompt: `submit_spec`.prompt,
+      profile: `profile_expr`,
+      prompt: `prompt_expr`,
       typed_context: `typed_context`,
       tools: `tools`,
-      output_kind: `submit_spec`.output_kind,
-      materialize: `submit_spec`.debug_output
+      output_kind: `output_kind_value`,
+      materialize: `materializer`
     )
   let submit_llm_symbol = bindSym"submit_llm"
   let submit_body = if input_type.is_void_type:
     quote do:
-      let `typed_spec_pointer` = cast[ptr ModelCallSpec[`artifact_name`]](
-        `submit_spec_pointer`)
-      let `typed_context_name` = cast[RuntimeContext[`artifact_name`]](
-        `submit_context`)
+      discard `submit_input`
       let `llm_spec_name` = `llm_spec_value`
-      `submit_llm_symbol`(`typed_context_name`, `submit_request_id`,
+      `submit_llm_symbol`(`submit_context`, `submit_request_id`,
         `llm_spec_name`)
   else:
     quote do:
-      let `typed_spec_pointer` = cast[ptr ModelCallSpec[`artifact_name`]](
-        `submit_spec_pointer`)
-      let `submit_input` = `submit_unpacked`
-      let `typed_context_name` = cast[RuntimeContext[`artifact_name`]](
-        `submit_context`)
+      let `typed_input` = `submit_unpacked`
       let `llm_spec_name` = `llm_spec_value`
-      `submit_llm_symbol`(`typed_context_name`, `submit_request_id`,
+      `submit_llm_symbol`(`submit_context`, `submit_request_id`,
         `llm_spec_name`)
   let submit = quote do:
-    (proc (`submit_context`: pointer;
+    (proc (`submit_context`: RuntimeContext[`artifact_name`];
         `submit_request_id`: RequestId;
-        `submit_spec_pointer`: pointer) {.nimcall.} =
+        `submit_input`: `artifact_name`) {.nimcall.} =
       `submit_body`
-    )
-  let prepare_input = genSym(nskParam, "prepare_model_artifact")
-  let prepare_unpacked = if input_type.is_void_type:
-    newEmptyNode()
-  else:
-    registry.emit_artifact_unpack(input_type, prepare_input)
-  let prepared_input = genSym(nskLet, "prepared_model_input")
-  let prepare_body = if input_type.is_void_type:
-    quote do:
-      discard `prepare_input`
-      ModelCallSpec[`artifact_name`](
-        profile: `profile_expr`,
-        prompt: `prompt_expr`,
-        input: `prepare_input`,
-        output_kind: `output_kind_value`,
-        debug_output: `materializer`,
-        submit: cast[pointer](`submit`)
-      )
-  else:
-    quote do:
-      let `prepared_input` = `prepare_unpacked`
-      discard `prepared_input`
-      ModelCallSpec[`artifact_name`](
-        profile: `profile_expr`,
-        prompt: `prompt_expr`,
-        input: `prepare_input`,
-        output_kind: `output_kind_value`,
-        debug_output: `materializer`,
-        submit: cast[pointer](`submit`)
-      )
-  let prepare = quote do:
-    (proc (`prepare_input`: `artifact_name`):
-        ModelCallSpec[`artifact_name`] {.nimcall.} =
-      `prepare_body`
     )
   quote do:
     Flow[`artifact_name`](
       kind: fk_model,
-      profile: `profile_expr`,
-      prompt: `prompt_expr`,
-      prepare: `prepare`
+      submit: `submit`
     )
 
 proc lower_it(

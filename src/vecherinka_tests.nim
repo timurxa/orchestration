@@ -33,12 +33,13 @@ proc debug_generated_transport[A](
   var event: RuntimeEvent[A]
   event.kind = rev_model_artifact
   event.request_id = request_id
-  new(event.artifact)
-  event.artifact[] = spec.materialize(
-    spec.output_kind,
-    LlmOutput(tool_name: "debug_return", arguments: newJObject())
+  event.output_kind = spec.output_kind
+  event.output = LlmOutput(
+    tool_name: "debug_return",
+    arguments: newJObject()
   )
-  event.has_artifact = true
+  event.materialize = spec.materialize
+  event.has_output = true
   addLast(context.events, event)
 
 const cheap = "gpt-5.6-luna".minimal
