@@ -26,6 +26,8 @@ proc debug_generated_transport[A](
   dump request_id
   dump spec.output_kind
   dump spec.tools.len
+  dump spec.prompt
+  dump spec.materialized_input
   doAssert spec.tools.len > 0
   doAssert not spec.materialize.isNil
 
@@ -43,9 +45,15 @@ proc debug_generated_transport[A](
 
 const cheap = "gpt-5.6-luna".minimal
 
+type
+  Simple = object
+    message: string
+
 expandMacros: vecherinka(solve):
-  > fix (Codebase, Issues) ~> Codebase {.entry.}:
-    cheap[(Codebase, Issues), Codebase]("Read the issues and fix them in the codebase.")
+  > basic Simple ~> Simple {.entry.}:
+    cheap[Simple, Simple]("Write a welcome message into 'message' field.")
+  # > fix (Codebase, Issues) ~> Codebase {.entry.}:
+  #   cheap[(Codebase, Issues), Codebase]("Read the issues and fix them in the codebase.")
   #
   # > audit (ImplementationRequest, Codebase) ~> Audit:
   #   cheap[(ImplementationRequest, Codebase), Audit]("Audit the codebase for issues based on the implementation request")
@@ -61,7 +69,8 @@ expandMacros: vecherinka(solve):
 let implementation_request = ImplementationRequest("")
 let codebase = Codebase(Location(""))
 let issues = Issues(@[""])
+let simple = Simple(message: "Include 'duck' in your answer!!")
 
 echo "test: calling generated solve"
-solve((codebase, issues), debug_generated_transport)
+solve(simple, debug_generated_transport)
 echo "test: generated solve returned"
