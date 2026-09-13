@@ -15,4 +15,4 @@ vecherinka(solve):
   > entry Input ~> Output {.entry.}:
     first >>> profile[Middle, Output]("second")
 
-solve(Input())
+discard solve(Input())

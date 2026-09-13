@@ -413,9 +413,10 @@ block:
   doAssert dirExists($result.context.artifacts[3].meta.artifact_dir)
 
 block:
-  generated_solve(
+  let generated_value = generated_solve(
     GeneratedInput(value: "actual"),
     inspect_generated_transport)
+  doAssert generated_value == "generated"
   stale_tool_callback(stale_tool_data, stale_tool_context)
   doAssert observed_materialized
   doAssert observed_tool == "finish_work"

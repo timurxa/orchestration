@@ -7,7 +7,7 @@ type
     of vak_0:
       value_0: Simple
 proc solve(input_553648697: Simple;
-           transport_553648698: LlmTransport[VecherinkaArtifact_553648520] = nil) =
+           transport_553648698: LlmTransport[VecherinkaArtifact_553648520] = nil): Simple =
   let data_553648699: seq[Flow[VecherinkaArtifact_553648520]] = @[Flow[
       VecherinkaArtifact_553648520](kind: fk_top, root: "basic", entry: true, body: Flow[
       VecherinkaArtifact_553648520](kind: fk_model, submit: proc (
@@ -17,9 +17,9 @@ proc solve(input_553648697: Simple;
     let model_typed_input_553648653 = block:
       let artifact_553648655 = model_input_553648651
       const
-        loc`gensym23 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        loc`gensym25 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
           line: 1548, column: 6)
-        ploc`gensym23 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1548, 7)"
+        ploc`gensym25 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1548, 7)"
       bind instantiationInfo
       mixin failedAssertImpl
       {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
@@ -92,49 +92,30 @@ proc solve(input_553648697: Simple;
       enqueue_runtime_event(model_context_553648649, event`gensym14)))]
   let input_artifact_553648700 = VecherinkaArtifact_553648520(kind: vak_0,
       value_0: input_553648697)
-  echo ["we have ", len(data_553648699), " top level procs"]
-  discard execute_flows(data_553648699, input_artifact_553648700, nil,
-                        transport_553648698, nil)
+  let work_plan_553648701 = execute_flows(data_553648699, input_artifact_553648700,
+      nil, transport_553648698, nil)
+  if isNone(work_plan_553648701.output):
+    if isSome(work_plan_553648701.failure_message):
+      raise
+        (ref ValueError)(msg: get(work_plan_553648701.failure_message),
+                         parent: nil)
+    raise
+      (ref ValueError)(msg: "vecherinka execution completed without output",
+                       parent: nil)
+  return block:
+    let artifact_553648702 = lookup_artifact(work_plan_553648701.context,
+        get(work_plan_553648701.output)).data
+    const
+      loc`gensym231 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1548, column: 6)
+      ploc`gensym231 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1548, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1548, column: 6).}:
+      if not (artifact_553648702.kind == vak_0):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1548, 7) `artifact_553648702.kind == vak_0` ")
+    artifact_553648702.value_0
 
 test: calling generated solve
-we have 1 top level procs
-runtime: execute flows
-top_level_flows.len = 1
-runtime: new context
-submitter.isNil = true
-transport.isNil = true
-runtime: init work plan
-top_level_flows.len = 1
-runtime: register top flow
-top.root = basic
-top.entry = true
-runtime: work plan ready
-result.roots.len = 1
-result.entry.kind = fk_model
-runtime: enqueue entry invocation
-result.entry.kind = fk_model
-runtime: run work plan
-runtime: handle invocation
-plan.pending_ready.len = 0
-current.kind = fk_model
-runtime: suspend model
-runtime: allocate request id
-context.next_request_id = 0
-result = (kind: rid_integer, integer_value: 0)
-runtime: model request in flight
-request_id = (kind: rid_integer, integer_value: 0)
-plan.model_requests.len = 1
-runtime: submit LLM
-request_id = (kind: rid_integer, integer_value: 0)
-runtime: handle event
-event.runtime_kind = rev_model_artifact
-event.request_id = (kind: rid_integer, integer_value: 0)
-runtime: model artifact accepted
-runtime: deliver destination
-destination.kind = dk_finished
-runtime: plan finished from destination
-runtime: execution complete
-result.finished = true
-result.failed = false
-result.joins.len = 0
-test: generated solve returned
+test: generated solve returned Wrote the welcome message containing “duck” to [message](/Users/alex/areas/productive/orchestration/run-YNXyXACG/artifact-1/message).

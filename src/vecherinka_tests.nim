@@ -45,5 +45,5 @@ let issues = Issues(@[""])
 let simple = Simple(message: "Include 'duck' in your answer!!")
 
 echo "test: calling generated solve"
-solve(simple)
-echo "test: generated solve returned"
+let debug_value = solve(simple)
+echo "test: generated solve returned ", debug_value.message

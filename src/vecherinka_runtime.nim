@@ -3,7 +3,7 @@
 ## Included by `vecherinka.nim`. Keep compile-time AST and macro machinery out
 ## of this fragment.
 
-import std/[sugar, json, options, tables, posix, strutils, os,
+import std/[json, options, tables, posix, strutils, os,
   paths, tempfiles]
 import codex_json
 import codex_runtime
@@ -709,9 +709,6 @@ proc new_runtime_context*[A](
     run_dir: Path = Path("");
     runtime_dir: Path = Path("")
 ): RuntimeContext[A] =
-  echo "runtime: new context"
-  dump submitter.isNil
-  dump transport.isNil
   new result
   result.artifacts = initTable[ArtifactID, ArtifactRecord[A]]()
   result.events_open = false
@@ -847,19 +844,14 @@ proc verify_location_payload*(working_dir: Path; location: string): string =
   ""
 
 proc allocate_request_id[A](context: RuntimeContext[A]): RequestId =
-  echo "runtime: allocate request id"
-  dump context.next_request_id
   result = RequestId(kind: rid_integer,
     integer_value: context.next_request_id)
   inc context.next_request_id
-  dump result
 
 proc init_work_plan*[A](
     top_level_flows: seq[Flow[A]];
     context: RuntimeContext[A]
 ): WorkPlan[A] =
-  echo "runtime: init work plan"
-  dump top_level_flows.len
   result.context = context
   result.roots = initTable[string, Flow[A]]()
   result.joins = initTable[JoinID, JoinState]()
@@ -874,9 +866,6 @@ proc init_work_plan*[A](
   for top in top_level_flows:
     if top.isNil or top.kind != fk_top:
       raise newException(ValueError, "top-level flow is not fk_top")
-    echo "runtime: register top flow"
-    dump top.root
-    dump top.entry
     if result.roots.hasKey(top.root):
       raise newException(ValueError, "duplicate root: " & top.root)
     result.roots[top.root] = top.body
@@ -887,9 +876,6 @@ proc init_work_plan*[A](
 
   if result.entry.isNil:
     raise newException(ValueError, "missing entry root")
-  echo "runtime: work plan ready"
-  dump result.roots.len
-  dump result.entry.kind
 
 proc init_work_plan*[A](
     top_level_flows: seq[Flow[A]]
@@ -907,8 +893,6 @@ proc resolve_root[A](
   roots[name]
 
 proc fail_plan[A](plan: var WorkPlan[A]; message: string) =
-  echo "runtime: fail plan"
-  dump message
   plan.failed = true
   plan.finished = true
   raise newException(ValueError, message)
@@ -971,8 +955,6 @@ proc deliver_destination[A](
 ) =
   plan_assert(plan, not destination.isNil, "nil invocation destination")
 
-  echo "runtime: deliver destination"
-  dump destination.kind
   case destination.kind
   of dk_continue:
     enqueue_ready(plan, new_invocation(
@@ -985,14 +967,11 @@ proc deliver_destination[A](
   of dk_finished:
     plan.output = some(artifact_id)
     plan.finished = true
-    echo "runtime: plan finished from destination"
 
 proc finish_join[A](
     plan: var WorkPlan[A];
     join_id: JoinID
 ) =
-  echo "runtime: finish join"
-  dump join_id
   plan_assert(plan, plan.joins.hasKey(join_id), "unknown join")
   plan_assert(plan, plan.join_invocations.hasKey(join_id),
     "join has no invocation")
@@ -1028,9 +1007,6 @@ proc finish_join[A](
   let output_id = register_generated_artifact(plan.context, output)
   plan.joins.del(join_id)
   plan.join_invocations.del(join_id)
-  echo "runtime: join output ready"
-  dump state.kind
-  dump values.len
   deliver_destination(plan, destination, output_id)
 
 proc accept_join_result[A](
@@ -1039,9 +1015,6 @@ proc accept_join_result[A](
     slot: int;
     artifact_id: ArtifactID
 ) =
-  echo "runtime: accept join result"
-  dump join_id
-  dump slot
   plan_assert(plan, plan.joins.hasKey(join_id), "unknown join result")
 
   let state = plan.joins[join_id]
@@ -1062,8 +1035,6 @@ proc default_model_submit[A](
     input: A;
     working_dir: Path
 ) =
-  echo "runtime: default model submit (error path)"
-  dump request_id
   discard input
   discard working_dir
   let event = RuntimeEvent[A](
@@ -1228,8 +1199,6 @@ proc submit_llm*[A](
     request_id: RequestId;
     spec: LlmCallSpec[A]
 ) =
-  echo "runtime: submit LLM"
-  dump request_id
   let transport = if context.transport.isNil:
     default_llm_transport[A]
   else:
@@ -1242,7 +1211,6 @@ proc suspend_model[A](
     input_id: ArtifactID;
     destination: Destination[A]
 ) =
-  echo "runtime: suspend model"
   let input_record = lookup_artifact(plan.context, input_id)
   let request_id = allocate_request_id(plan.context)
   let output_meta = reserve_artifact_meta(plan.context)
@@ -1255,10 +1223,6 @@ proc suspend_model[A](
   plan_assert(plan, not plan.model_requests.hasKey(key),
     "duplicate model request ID")
   plan.model_requests[key] = invocation
-  echo "runtime: model request in flight"
-  dump request_id
-  dump plan.model_requests.len
-
   if not flow.submit.isNil:
     flow.submit(
       plan.context, request_id, input_record.data, output_meta.artifact_dir)
@@ -1276,8 +1240,6 @@ proc begin_fanout[A](
     input_id: ArtifactID;
     destination: Destination[A]
 ) =
-  echo "runtime: begin fanout"
-  dump flow.branches.len
   let join_id = new_join_state(plan, jk_fanout, flow.branches.len)
   plan.join_invocations[join_id] = new_invocation(
     flow,
@@ -1301,8 +1263,6 @@ proc begin_lift[A](
 ) =
   let original = lookup_artifact(plan.context, input_id).data
   let works = flow.destructure(original)
-  echo "runtime: begin lift"
-  dump works.len
   var seen = newSeq[bool](works.len)
   for work in works:
     plan_assert(plan,
@@ -1338,8 +1298,6 @@ proc handle_invocation*[A](
     plan: var WorkPlan[A];
     invocation: Invocation[A]
 ) =
-  echo "runtime: handle invocation"
-  dump plan.pending_ready.len
   let initial_record = lookup_artifact(plan.context, invocation.input_id)
   var current = invocation.flow
   var destination = invocation.destination
@@ -1347,25 +1305,19 @@ proc handle_invocation*[A](
   var value_id = invocation.input_id
 
   while not current.isNil:
-    dump current.kind
     case current.kind
     of fk_top:
-      echo "runtime: enter top body"
       current = current.body
     of fk_ref:
-      echo "runtime: resolve ref"
-      dump current.name
       destination = prepend_continuation(
         current.continuation,
         destination)
       current = resolve_root(plan.roots, current.name)
     of fk_raw:
-      echo "runtime: raw value"
       value = current.value
       value_id = register_generated_artifact(plan.context, value)
       current = current.continuation
     of fk_it:
-      echo "runtime: apply projector"
       value = current.projector(value)
       value_id = register_generated_artifact(plan.context, value)
       current = current.continuation
@@ -1375,7 +1327,6 @@ proc handle_invocation*[A](
         destination)
       return
     of fk_so:
-      echo "runtime: execute dynamic flow"
       let child = current.execute(value)
       let child_destination = prepend_continuation(current.continuation,
         destination)
@@ -1388,13 +1339,11 @@ proc handle_invocation*[A](
           child_destination))
       return
     of fk_fanout:
-      echo "runtime: suspend fanout"
       begin_fanout(
         plan, current, value_id,
         destination)
       return
     of fk_lift:
-      echo "runtime: suspend lift"
       begin_lift(
         plan, current, value_id,
         destination)
@@ -1407,11 +1356,8 @@ proc handle_runtime_event[A](
     runtime: ptr CodexRuntime;
     event: GlobalEvent
 ) =
-  echo "runtime: handle event"
   plan_assert(plan, event.kind == gek_runtime,
     "non-runtime event passed to runtime handler")
-  dump event.runtime_kind
-  dump event.request_id
   case event.runtime_kind
   of rev_model_artifact:
     let key = request_id_key(event.request_id)
@@ -1476,7 +1422,6 @@ proc handle_runtime_event[A](
     if plan.context.pending_agent_starts.hasKey(key):
       plan.context.pending_agent_starts.del(key)
     let output_id = register_artifact(plan.context, artifact, output_meta)
-    echo "runtime: model artifact accepted"
     deliver_destination(plan, invocation.destination, output_id)
   of rev_model_error:
     let key = request_id_key(event.request_id)
@@ -1485,11 +1430,9 @@ proc handle_runtime_event[A](
     if plan.context.pending_agent_starts.hasKey(key):
       plan.context.pending_agent_starts.del(key)
     plan.failure_message = some(event.error_message)
-    echo "runtime: model error: " & event.error_message
     plan.failed = true
     plan.finished = true
   of rev_shutdown:
-    echo "runtime: shutdown event"
     plan.finished = true
 
 proc handle_global_event[A](
@@ -1558,8 +1501,6 @@ proc execute_flows*[A](
 ): WorkPlan[A] =
   ## The main thread owns runtime protocol state. A supplied runtime is
   ## borrowed; otherwise this call owns the complete Codex lifecycle.
-  echo "runtime: execute flows"
-  dump top_level_flows.len
   let source_root = Path(expandFilename(os.getCurrentDir()))
   let run_dir = create_run_directory(source_root)
   let context = new_runtime_context(
@@ -1579,18 +1520,11 @@ proc execute_flows*[A](
     result = init_work_plan(top_level_flows, context)
     let input_meta = ArtifactMeta(id: 0, artifact_dir: source_root)
     let input_id = register_artifact(context, input, input_meta)
-    echo "runtime: enqueue entry invocation"
-    dump result.entry.kind
     enqueue_ready(result, new_invocation(
       result.entry,
       input_id,
       Destination[A](kind: dk_finished)))
-    echo "runtime: run work plan"
     run_work_plan(result, active_runtime)
-    echo "runtime: execution complete"
-    dump result.finished
-    dump result.failed
-    dump result.joins.len
   finally:
     if readers_started:
       stop_codex_readers(readers)

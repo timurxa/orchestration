@@ -123,7 +123,8 @@ proc main() =
     absent: none(Location),
     literal_path: "repo/file.txt")
 
-  generated_materialize(input, inspect_materialization)
+  let generated_value = generated_materialize(input, inspect_materialization)
+  doAssert generated_value == "generated"
   doAssert observed_spec
   doAssert observed_materialized_input.len > 0
   doAssert observed_working_dir != Path("")
@@ -170,7 +171,12 @@ proc main() =
     kind: iv_file,
     file: Location(fixture_prefix / "missing.txt"))
   observed_spec = false
-  generated_materialize(missing_input, inspect_materialization)
+  var raised = false
+  try:
+    discard generated_materialize(missing_input, inspect_materialization)
+  except ValueError:
+    raised = true
+  doAssert raised
   doAssert not observed_spec
 
 main()

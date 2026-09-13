@@ -1980,6 +1980,7 @@ proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
   if entry_type[1].is_void_type:
     error("vecherinka entry flow domain must be non-void")
   let entry_domain = copyNimTree(entry_type[1])
+  let entry_codomain = copyNimTree(entry_type[2])
 
   # Every pair lowers to one fk_top node. Pair order follows source declaration
   # order, so sequence order stays deterministic and name-independent.
@@ -1997,15 +1998,27 @@ proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
   let input_artifact = context.artifact_registry.emit_artifact_pack(
     entry_domain, input_name)
   let execute_flows = bindSym"execute_flows"
+  let lookup_artifact = bindSym"lookup_artifact"
+  let work_plan_name = genSym(nskLet, "work_plan")
+  let final_artifact = quote do:
+    `lookup_artifact`(`work_plan_name`.context,
+      `work_plan_name`.output.get).data
+  let returned_value = context.artifact_registry.emit_artifact_unpack(
+    entry_codomain, final_artifact)
   let proc_body = quote do:
     let `data_name`: `data_type` = `flow_sequence`
     let `input_artifact_name` = `input_artifact`
-    echo "we have ", `data_name`.len, " top level procs"
-    discard `execute_flows`(`data_name`, `input_artifact_name`,
+    let `work_plan_name` = `execute_flows`(`data_name`, `input_artifact_name`,
       transport = `transport_name`)
+    if `work_plan_name`.output.isNone:
+      if `work_plan_name`.failure_message.isSome:
+        raise newException(ValueError, `work_plan_name`.failure_message.get)
+      raise newException(ValueError,
+        "vecherinka execution completed without output")
+    return `returned_value`
   let generated_proc = quote do:
     proc `proc_name`(`input_name`: `entry_domain`;
-        `transport_name`: LlmTransport[`artifact_name`] = nil) =
+        `transport_name`: LlmTransport[`artifact_name`] = nil): `entry_codomain` =
       `proc_body`
   var generated = newStmtList()
   generated.add(artifact_type)

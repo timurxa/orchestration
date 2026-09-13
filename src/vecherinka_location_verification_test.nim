@@ -78,7 +78,8 @@ vecherinka(verify_generated_locations):
     "verification-model".minimal[string, VerificationOutput]("prompt")
 
 proc main() =
-  verify_generated_locations("input", inspect_verification)
+  let output = verify_generated_locations("input", inspect_verification)
+  doAssert cast[string](output.file) == "result.txt"
   doAssert observed
 
 main()
