@@ -25,7 +25,6 @@ proc debug_generated_transport[A](
   echo "test: generated transport called"
   dump request_id
   dump spec.output_kind
-  dump spec.typed_context
   dump spec.tools.len
   doAssert spec.tools.len > 0
   doAssert not spec.materialize.isNil

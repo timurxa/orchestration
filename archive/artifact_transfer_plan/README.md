@@ -90,22 +90,23 @@ part of this registry change.
 
 ## Current codebase snapshot
 
-Already present, but based on the old sidecar design:
+Already present:
 
 - `ArtifactMeta`, runtime/run roots, and fresh model/join artifact directories;
-- metadata propagation through activations, continuations, joins, pending
-  models, nodes, and runtime events;
+- context-owned `ArtifactRecord` registry with `ArtifactID` lookup and
+  registration invariants;
+- ID propagation through activations, continuations, joins, pending models,
+  nodes, final output, and runtime events;
 - one-channel scheduler with typed activations retained in `pending_ready`;
 - generated submit boundary carrying input `A`, `ArtifactMeta`, runtime root,
   working root, and materialized input;
 - Codex POSIX readers, main-thread JSON ownership, shutdown joining, and
   existing dynamic-tool plumbing.
 
-Still missing, plus now requiring registry migration:
+Still missing:
 
-- `ArtifactRecord` and `RuntimeContext.artifacts`;
-- ID-based persistent runtime state;
-- typed output decoding and record publication;
+- resolved-record input materialization rework;
+- schema-valid typed output decoding and record publication checks;
 - generated `finish_work` tool/callback integration;
 - artifact-aware real Codex transport and full failure/end-to-end coverage.
 
@@ -127,7 +128,7 @@ and registry records.
 | Slice | Work | Status | Gate |
 | --- | --- | --- | --- |
 | 0 | Baseline and revised registry contracts | rework | Existing tests still pass; target invariants recorded |
-| 1 | Registry, record creation, and ID-based runtime state | rework | All persistent artifact state uses IDs; records live in context table |
+| 1 | Registry, record creation, and ID-based runtime state | complete | All persistent artifact state uses IDs; records live in context table |
 | 3 | Input materialization against resolved records | rework | Nested input renders/copies; generated lowering remains stable |
 | 4 | Output schema, decoder, and record publication | partial | Valid output is registered; invalid output is not |
 | 5 | Generated submit integration | partial | Minimal comptime change; transport receives resolved `A` data |

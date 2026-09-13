@@ -956,7 +956,6 @@ proc materialize_callback(
 
 proc emit_input_materializer(type_expr: NimNode): NimNode =
   let input = genSym(nskParam, "materializer_input")
-  let input_meta = genSym(nskParam, "materializer_input_meta")
   let runtime_dir = genSym(nskParam, "materializer_runtime_dir")
   let artifact_dir = genSym(nskParam, "materializer_artifact_dir")
   let initial_instructions = genSym(nskParam, "materializer_initial_instructions")
@@ -975,10 +974,8 @@ proc emit_input_materializer(type_expr: NimNode): NimNode =
     materialize_callback)
   let type_copy = copyNimTree(type_expr)
   quote do:
-    (proc (`input`: `type_copy`; `input_meta`: ArtifactMeta;
-        `runtime_dir`, `artifact_dir`: Path;
+    (proc (`input`: `type_copy`; `runtime_dir`, `artifact_dir`: Path;
         `initial_instructions`: string): string {.nimcall.} =
-      discard `input_meta`
       var `instructions` = `initial_instructions`
       var `materialized_names`: seq[string] = @[]
       `body`
@@ -1037,7 +1034,6 @@ proc lower_model_call(
   let submit_context = genSym(nskParam, "model_context")
   let submit_request_id = genSym(nskParam, "model_request_id")
   let submit_input = genSym(nskParam, "model_input")
-  let submit_input_meta = genSym(nskParam, "model_input_meta")
   let submit_working_dir = genSym(nskParam, "model_working_dir")
   let typed_input = genSym(nskLet, "model_typed_input")
   let materialized_input = genSym(nskLet, "model_materialized_input")
@@ -1055,7 +1051,6 @@ proc lower_model_call(
     newCall(
       input_materializer,
       typed_input,
-      submit_input_meta,
       newDotExpr(copyNimTree(submit_context), ident("runtime_dir")),
       submit_working_dir,
       newLit(""))
@@ -1063,11 +1058,6 @@ proc lower_model_call(
     newLit("")
   else:
     materialized_input
-  let typed_context = if input_type.is_void_type:
-    newLit("")
-  else:
-    quote do:
-      $`typed_input`
   let input_type_name = newLit(input_type.repr)
   let output_type_name = newLit(output_type.repr)
   let tools = newCall(bindSym"debug_tool_registry",
@@ -1083,9 +1073,7 @@ proc lower_model_call(
     LlmCallSpec[`artifact_name`](
       profile: `profile_expr`,
       prompt: `prompt_expr`,
-      typed_context: `typed_context`,
       materialized_input: `materialized_input_value`,
-      input_meta: `submit_input_meta`,
       runtime_dir: `submit_context`.runtime_dir,
       working_dir: `submit_working_dir`,
       tools: `tools`,
@@ -1120,7 +1108,6 @@ proc lower_model_call(
     (proc (`submit_context`: RuntimeContext[`artifact_name`];
         `submit_request_id`: RequestId;
         `submit_input`: `artifact_name`;
-        `submit_input_meta`: ArtifactMeta;
         `submit_working_dir`: Path) {.nimcall.} =
       `submit_body`
     )

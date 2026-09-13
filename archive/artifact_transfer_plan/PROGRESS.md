@@ -1,7 +1,7 @@
 # Artifact transfer progress
 
-Last updated: 2026-09-13; architecture revised toward context-owned
-ArtifactRecord storage; revised implementation not started.
+Last updated: 2026-09-13; revised Slice 1 complete toward context-owned
+ArtifactRecord storage.
 
 ## Architecture revision
 
@@ -26,7 +26,7 @@ Revised order: registry and ID state; materialization; output decoding and
 publication; finish_work and real transport; composition, failure lifecycle,
 and end-to-end hardening.
 
-Current slice: revised Slice 0 — baseline and registry contracts.
+Current slice: revised Slice 3 — input materialization against resolved records.
 
 ## Slice 0 baseline
 
@@ -61,7 +61,26 @@ Files changed: this progress document only; no source or test files.
 
 Issues: pre-existing dirty worktree recorded above.
 
-Next action: Slice 1 implementation plan below.
+Next action: revised Slice 1 implementation.
+
+## Revised Slice 1 record
+
+Status: complete.
+
+Files changed: `src/vecherinka_runtime.nim`,
+`src/vecherinka_runtime_execution_test.nim`.
+
+Result: `RuntimeContext.artifacts` now owns `ArtifactRecord[A]` values. Initial,
+raw, projection, lift, join, and valid model values register there. Activations,
+nodes, joins, pending models, ready work, and final output retain `ArtifactID`
+references only. Runtime handlers resolve IDs into local `A` values; generated
+`Flow[A]` lowering remains record-free. Duplicate IDs, unknown IDs, and table
+key/metadata mismatches fail explicitly.
+
+Tests run: execution, model lowering, interface, IPC, materialization, and
+typed-lift tests; all compile and pass with finite `gtimeout` limits.
+
+Gate: passed. Next action: revised Slice 3 input materialization.
 
 ## Slice 1 record
 
@@ -137,7 +156,7 @@ Next action: Slice 4 output schema and decoder.
 ## Revised slice status
 
 - [~] Slice 0 — baseline and registry contracts
-- [~] Slice 1 — artifact registry and ID-based runtime state
+- [x] Slice 1 — artifact registry and ID-based runtime state
 - [~] Slice 3 — input materialization from resolved records
 - [~] Slice 4 — output schema and decoder
 - [~] Slice 5 — generated submit integration
