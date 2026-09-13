@@ -4,6 +4,10 @@
 import std/[macros, assertions, options]
 import fusion/matching
 import it_projection, lift_pattern_typed
+import schematic
+
+proc json_schema_text[T](): string {.compileTime.} =
+  $toJsonSchema(schemaOf(T))
 
 type
   FlowIRKind* = enum
@@ -636,6 +640,12 @@ proc lower_model_call(
   let tools = newCall(bindSym"debug_tool_registry",
     input_type_name, output_type_name)
   let llm_spec_name = genSym(nskLet, "llm_spec")
+  let output_schema_name = genSym(nskConst, "model_output_schema")
+  let json_schema_text_symbol = bindSym"json_schema_text"
+  let output_schema_echo = quote do:
+    const `output_schema_name` =
+      `json_schema_text_symbol`[`output_type`]()
+    echo `output_schema_name`
   let llm_spec_value = quote do:
     LlmCallSpec[`artifact_name`](
       profile: `profile_expr`,
@@ -648,12 +658,14 @@ proc lower_model_call(
   let submit_llm_symbol = bindSym"submit_llm"
   let submit_body = if input_type.is_void_type:
     quote do:
+      `output_schema_echo`
       discard `submit_input`
       let `llm_spec_name` = `llm_spec_value`
       `submit_llm_symbol`(`submit_context`, `submit_request_id`,
         `llm_spec_name`)
   else:
     quote do:
+      `output_schema_echo`
       let `typed_input` = `submit_unpacked`
       let `llm_spec_name` = `llm_spec_value`
       `submit_llm_symbol`(`submit_context`, `submit_request_id`,

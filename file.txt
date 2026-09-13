@@ -8,26 +8,29 @@ type
       value_0: (Codebase, Issues)
     of vak_1:
       value_1: Codebase
-proc solve(input_553648686: (Codebase, Issues);
-           transport_553648687: LlmTransport[VecherinkaArtifact_553648604] = nil) =
-  let data_553648688: seq[Flow[VecherinkaArtifact_553648604]] = @[Flow[
+proc solve(input_553648687: (Codebase, Issues);
+           transport_553648688: LlmTransport[VecherinkaArtifact_553648604] = nil) =
+  let data_553648689: seq[Flow[VecherinkaArtifact_553648604]] = @[Flow[
       VecherinkaArtifact_553648604](kind: fk_top, root: "fix", entry: true, body: Flow[
       VecherinkaArtifact_553648604](kind: fk_model, submit: proc (
       model_context_553648680: RuntimeContext[VecherinkaArtifact_553648604];
       model_request_id_553648681: RequestId; model_input_553648682: VecherinkaArtifact_553648604) {.
       nimcall.} =
+    const
+      model_output_schema_553648686 = "{\"type\":\"string\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"}"
+    echo ["{\"type\":\"string\",\"$schema\":\"https://json-schema.org/draft/2020-12/schema\"}"]
     let model_typed_input_553648683 = block:
       let artifact_553648684 = model_input_553648682
       const
-        loc`gensym23 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-          line: 1020, column: 6)
-        ploc`gensym23 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1020, 7)"
+        loc`gensym24 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1032, column: 6)
+        ploc`gensym24 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1032, 7)"
       bind instantiationInfo
       mixin failedAssertImpl
       {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-               line: 1020, column: 6).}:
+               line: 1032, column: 6).}:
         if not (artifact_553648684.kind == vak_0):
-          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1020, 7) `artifact_553648684.kind == vak_0` ")
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1032, 7) `artifact_553648684.kind == vak_0` ")
       artifact_553648684.value_0
     let llm_spec_553648685 = LlmCallSpec[VecherinkaArtifact_553648604](
         profile: cheap, prompt: "Read the issues and fix them in the codebase.",
@@ -41,21 +44,22 @@ proc solve(input_553648686: (Codebase, Issues);
           value_1: default_debug_value())
     else:
       const
-        loc`gensym32 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-          line: 614, column: 6)
-        ploc`gensym32 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(614, 7)"
+        loc`gensym33 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 618, column: 6)
+        ploc`gensym33 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(618, 7)"
       bind instantiationInfo
       mixin failedAssertImpl
       {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-               line: 614, column: 6).}:
+               line: 618, column: 6).}:
         if true:
-          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(614, 7) `false` unexpected model output kind")
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(618, 7) `false` unexpected model output kind")
     )
     submit_llm(model_context_553648680, model_request_id_553648681, llm_spec_553648685)))]
-  let input_artifact_553648689 = VecherinkaArtifact_553648604(kind: vak_0,
-      value_0: input_553648686)
-  echo ["we have ", len(data_553648688), " top level procs"]
-  discard execute_flows(data_553648688, input_artifact_553648689, nil, transport_553648687)
+  let input_artifact_553648690 = VecherinkaArtifact_553648604(kind: vak_0,
+      value_0: input_553648687)
+  echo ["we have ", len(data_553648689), " top level procs"]
+  discard execute_flows(data_553648689, input_artifact_553648690, nil,
+                        transport_553648688, nil)
 
 test: calling generated solve
 we have 1 top level procs
@@ -64,7 +68,6 @@ top_level_flows.len = 1
 runtime: new context
 submitter.isNil = true
 transport.isNil = false
-result.events.len = 0
 runtime: init work plan
 top_level_flows.len = 1
 runtime: register top flow
@@ -79,7 +82,7 @@ runtime: run work plan
 runtime: scheduler iteration
 iteration = 1
 plan.ready.len = 1
-plan.context.events.len = 0
+plan.context.events_open = true
 runtime: drain ready batch
 plan.ready.len = 1
 limit = 64
@@ -100,6 +103,7 @@ runtime: model pending
 node_id = 1
 request_id = (kind: rid_integer, integer_value: 0)
 plan.pending_models.len = 0
+{"type":"string","$schema":"https://json-schema.org/draft/2020-12/schema"}
 runtime: submit LLM
 request_id = (kind: rid_integer, integer_value: 0)
 test: generated transport called
@@ -109,18 +113,14 @@ spec.typed_context = (, @[""])
 spec.tools.len = 1
 handled = 1
 plan.ready.len = 0
-runtime: drain events
-plan.context.events.len = 1
 runtime: handle event
-event.kind = rev_model_artifact
+event.runtime_kind = rev_model_artifact
 event.request_id = (kind: rid_integer, integer_value: 0)
 pending.node_id = 1
 runtime: model artifact accepted
 runtime: deliver resume
 resume.kind = rk_finished
 runtime: plan finished from resume
-handled = 1
-plan.context.events.len = 0
 runtime: execution complete
 result.finished = true
 result.failed = false
