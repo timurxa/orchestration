@@ -64,65 +64,44 @@ type
         seq[tuple[result_index: int, input: A]] {.nimcall.}
       construct*: proc(results: seq[A]; input: A): A {.nimcall.}
 
-  WorkID* = uint64
+  JoinID* = uint64
 
-  WorkState* = enum
-    ws_waiting,
-    ws_running,
-    ws_done,
-    ws_failed
+  JoinKind* = enum
+    jk_fanout,
+    jk_lift
 
-  WorkKind* = enum
-    wk_model,
-    wk_fanout,
-    wk_lift,
-    wk_so
+  DestinationKind* = enum
+    dk_continue,
+    dk_join,
+    dk_finished
 
-  ResumeKind* = enum
-    rk_continue,
-    rk_join,
-    rk_finished
-
-  Resume*[A] = ref object
-    case kind*: ResumeKind
-    of rk_continue:
+  Destination*[A] = ref object
+    ## Dynamic destination used only when an invocation yields.
+    case kind*: DestinationKind
+    of dk_continue:
       flow*: Flow[A]
-      next*: Resume[A]
-    of rk_join:
-      join_id*: WorkID
+      next*: Destination[A]
+    of dk_join:
+      join_id*: JoinID
       slot*: int
-    of rk_finished:
+    of dk_finished:
       discard
 
-  Activation*[A] = object
+  Invocation*[A] = ref object
+    ## One dynamic computation. Flow owns executable code; this owns its data
+    ## input and explicit destination after it yields.
     flow*: Flow[A]
     input_id*: ArtifactID
-    parent*: Option[WorkID]
-    resume*: Resume[A]
+    destination*: Destination[A]
+    ## Some only for an in-flight model invocation.
+    output_meta*: Option[ArtifactMeta]
 
-  WorkNode*[A] = ref object
-    id*: WorkID
-    state*: WorkState
-    input*: Option[ArtifactID]
-    output*: Option[ArtifactID]
-    request_id*: Option[RequestId]
-    error_message*: Option[string]
-    case kind*: WorkKind
-    of wk_fanout, wk_lift:
-      remaining*: int
-      slots*: seq[Option[ArtifactID]]
-      resume*: Resume[A]
-      coalesce*: proc(values: seq[A]): A {.nimcall.}
-      construct*: proc(results: seq[A]; input: A): A {.nimcall.}
-    of wk_model, wk_so:
-      discard
-
-  PendingModel*[A] = ref object
-    node_id*: WorkID
-    request_id*: RequestId
-    input_id*: ArtifactID
-    output_meta*: ArtifactMeta
-    resume*: Resume[A]
+  JoinState* = ref object
+    ## Persistent fork/join data only. Control code lives in join_invocations.
+    id*: JoinID
+    kind*: JoinKind
+    remaining*: int
+    slots*: seq[Option[ArtifactID]]
 
   LlmOutput* = object
     ## Structured output passed by fake or real transport. Real Codex parsing
@@ -247,11 +226,12 @@ type
     context*: RuntimeContext[A]
     roots*: Table[string, Flow[A]]
     entry*: Flow[A]
-    pending_ready*: Table[uint64, Activation[A]]
+    pending_ready*: Table[uint64, Invocation[A]]
     next_ready_id*: uint64
-    nodes*: Table[WorkID, WorkNode[A]]
-    pending_models*: Table[string, PendingModel[A]]
-    next_work_id*: WorkID
+    joins*: Table[JoinID, JoinState]
+    join_invocations*: Table[JoinID, Invocation[A]]
+    next_join_id*: JoinID
+    model_requests*: Table[string, Invocation[A]]
     output*: Option[ArtifactID]
     finished*: bool
     failed*: bool
@@ -541,11 +521,11 @@ proc xhigh*(model: string): ProfileSpec =
 
 proc prepend_continuation*[A](
     flow: Flow[A];
-    parent: Resume[A]
-): Resume[A] =
+    destination: Destination[A]
+): Destination[A] =
   if flow.isNil:
-    return parent
-  Resume[A](kind: rk_continue, flow: flow, next: parent)
+    return destination
+  Destination[A](kind: dk_continue, flow: flow, next: destination)
 
 proc new_runtime_context*[A](
     submitter: ModelSubmitter[A] = nil;
@@ -693,11 +673,12 @@ proc init_work_plan*[A](
   dump top_level_flows.len
   result.context = context
   result.roots = initTable[string, Flow[A]]()
-  result.nodes = initTable[WorkID, WorkNode[A]]()
-  result.pending_models = initTable[string, PendingModel[A]]()
-  result.pending_ready = initTable[uint64, Activation[A]]()
+  result.joins = initTable[JoinID, JoinState]()
+  result.join_invocations = initTable[JoinID, Invocation[A]]()
+  result.model_requests = initTable[string, Invocation[A]]()
+  result.pending_ready = initTable[uint64, Invocation[A]]()
   result.next_ready_id = 0
-  result.next_work_id = 1
+  result.next_join_id = 1
   result.output = none(ArtifactID)
 
   for top in top_level_flows:
@@ -735,28 +716,6 @@ proc resolve_root[A](
     raise newException(ValueError, "unknown flow root: " & name)
   roots[name]
 
-proc new_work_node[A](
-    plan: var WorkPlan[A];
-    kind: WorkKind;
-    input_id: Option[ArtifactID]
-): WorkID =
-  echo "runtime: new work node"
-  dump kind
-  dump input_id.isSome
-  if input_id.isSome:
-    discard lookup_artifact(plan.context, input_id.get)
-  result = plan.next_work_id
-  inc plan.next_work_id
-  plan.nodes[result] = WorkNode[A](
-    id: result,
-    kind: kind,
-    state: ws_running,
-    input: input_id,
-    output: none(ArtifactID),
-    request_id: none(RequestId),
-    error_message: none(string)
-  )
-
 proc fail_plan[A](plan: var WorkPlan[A]; message: string) =
   echo "runtime: fail plan"
   dump message
@@ -764,145 +723,158 @@ proc fail_plan[A](plan: var WorkPlan[A]; message: string) =
   plan.finished = true
   raise newException(ValueError, message)
 
-proc mark_node_failed[A](
+proc new_join_state[A](
     plan: var WorkPlan[A];
-    node_id: WorkID;
-    message: string
-) =
-  echo "runtime: mark node failed"
-  dump node_id
-  dump message
-  if plan.nodes.hasKey(node_id):
-    let node = plan.nodes[node_id]
-    node.state = ws_failed
-    node.error_message = some(message)
-  plan.failed = true
-  plan.finished = true
+    kind: JoinKind;
+    slot_count: int
+): JoinID =
+  if slot_count < 0:
+    fail_plan(plan, "join slot count cannot be negative")
+    return
+  result = plan.next_join_id
+  inc plan.next_join_id
+  plan.joins[result] = JoinState(
+    id: result,
+    kind: kind,
+    remaining: slot_count,
+    slots: newSeq[Option[ArtifactID]](slot_count))
 
 proc accept_join_result[A](
     plan: var WorkPlan[A];
-    join_id: WorkID;
+    join_id: JoinID;
     slot: int;
     artifact_id: ArtifactID
 )
 
+proc new_invocation[A](
+    flow: Flow[A];
+    input_id: ArtifactID;
+    destination: Destination[A]
+): Invocation[A] =
+  Invocation[A](
+    flow: flow,
+    input_id: input_id,
+    destination: destination,
+    output_meta: none(ArtifactMeta))
+
 proc enqueue_ready[A](
     plan: var WorkPlan[A];
-    activation: Activation[A]
+    invocation: Invocation[A]
 ) =
-  ## Typed activation stays owner-thread state; channel carries only its ID.
-  discard lookup_artifact(plan.context, activation.input_id)
+  ## Typed invocation stays owner-thread state; channel carries only its ID.
+  discard lookup_artifact(plan.context, invocation.input_id)
   inc plan.next_ready_id
   let ready_id = plan.next_ready_id
-  plan.pending_ready[ready_id] = activation
+  plan.pending_ready[ready_id] = invocation
   send_global_event(plan.context, GlobalEvent(
     kind: gek_ready,
     ready_id: ready_id))
 
-proc deliver_resume[A](
+proc deliver_destination[A](
     plan: var WorkPlan[A];
-    resume: Resume[A];
+    destination: Destination[A];
     artifact_id: ArtifactID
 ) =
-  if resume.isNil:
-    fail_plan(plan, "nil resume destination")
+  if destination.isNil:
+    fail_plan(plan, "nil invocation destination")
     return
 
-  echo "runtime: deliver resume"
-  dump resume.kind
-  case resume.kind
-  of rk_continue:
-    enqueue_ready(plan, Activation[A](
-      flow: resume.flow,
-      input_id: artifact_id,
-      parent: none(WorkID),
-      resume: resume.next
+  echo "runtime: deliver destination"
+  dump destination.kind
+  case destination.kind
+  of dk_continue:
+    enqueue_ready(plan, new_invocation(
+      destination.flow,
+      artifact_id,
+      destination.next
     ))
-  of rk_join:
-    accept_join_result(plan, resume.join_id, resume.slot, artifact_id)
-  of rk_finished:
+  of dk_join:
+    accept_join_result(plan, destination.join_id, destination.slot, artifact_id)
+  of dk_finished:
     plan.output = some(artifact_id)
     plan.finished = true
-    echo "runtime: plan finished from resume"
+    echo "runtime: plan finished from destination"
 
 proc finish_join[A](
     plan: var WorkPlan[A];
-    join_id: WorkID
+    join_id: JoinID
 ) =
   echo "runtime: finish join"
   dump join_id
-  if not plan.nodes.hasKey(join_id):
+  if not plan.joins.hasKey(join_id):
     fail_plan(plan, "unknown join")
     return
 
-  let node = plan.nodes[join_id]
-  case node.kind
-  of wk_fanout, wk_lift:
-    if node.remaining != 0:
-      fail_plan(plan, "join finalized before all results arrived")
-      return
-
-    var values = newSeq[A](node.slots.len)
-    for index, slot in node.slots:
-      if slot.isNone:
-        fail_plan(plan, "join has missing result slot")
-        return
-      values[index] = lookup_artifact(plan.context, slot.get).data
-
-    var output: A
-    case node.kind
-    of wk_fanout:
-      output = node.coalesce(values)
-    of wk_lift:
-      let input_id = node.input
-      if input_id.isNone:
-        fail_plan(plan, "lift join has no original input")
-        return
-      let original = lookup_artifact(plan.context, input_id.get).data
-      output = node.construct(values, original)
-    of wk_model, wk_so:
-      discard
-    let output_id = register_generated_artifact(plan.context, output)
-    node.output = some(output_id)
-    node.state = ws_done
-    echo "runtime: join output ready"
-    dump node.kind
-    dump values.len
-    deliver_resume(plan, node.resume, output_id)
-  of wk_model, wk_so:
-    fail_plan(plan, "work node is not a join")
+  if not plan.join_invocations.hasKey(join_id):
+    fail_plan(plan, "join has no invocation")
     return
+
+  let state = plan.joins[join_id]
+  let invocation = plan.join_invocations[join_id]
+  if state.remaining != 0:
+    fail_plan(plan, "join finalized before all results arrived")
+    return
+
+  var values = newSeq[A](state.slots.len)
+  for index, slot in state.slots:
+    if slot.isNone:
+      fail_plan(plan, "join has missing result slot")
+      return
+    values[index] = lookup_artifact(plan.context, slot.get).data
+
+  if invocation.flow.isNil:
+    fail_plan(plan, "join invocation has no flow")
+    return
+
+  var output: A
+  case state.kind
+  of jk_fanout:
+    if invocation.flow.kind != fk_fanout or invocation.flow.coalesce.isNil:
+      fail_plan(plan, "fanout join has invalid flow")
+      return
+    output = invocation.flow.coalesce(values)
+  of jk_lift:
+    if invocation.flow.kind != fk_lift or invocation.flow.construct.isNil:
+      fail_plan(plan, "lift join has invalid flow")
+      return
+    let original = lookup_artifact(plan.context, invocation.input_id).data
+    output = invocation.flow.construct(values, original)
+
+  let destination = invocation.destination
+  let output_id = register_generated_artifact(plan.context, output)
+  plan.joins.del(join_id)
+  plan.join_invocations.del(join_id)
+  echo "runtime: join output ready"
+  dump state.kind
+  dump values.len
+  deliver_destination(plan, destination, output_id)
 
 proc accept_join_result[A](
     plan: var WorkPlan[A];
-    join_id: WorkID;
+    join_id: JoinID;
     slot: int;
     artifact_id: ArtifactID
 ) =
   echo "runtime: accept join result"
   dump join_id
   dump slot
-  if not plan.nodes.hasKey(join_id):
+  if not plan.joins.hasKey(join_id):
     fail_plan(plan, "unknown join result")
     return
 
-  let node = plan.nodes[join_id]
-  case node.kind
-  of wk_fanout, wk_lift:
-    discard lookup_artifact(plan.context, artifact_id)
-    if slot < 0 or slot >= node.slots.len:
-      fail_plan(plan, "invalid join slot")
-      return
-    if node.slots[slot].isSome:
-      fail_plan(plan, "duplicate join result")
-      return
+  let state = plan.joins[join_id]
+  discard lookup_artifact(plan.context, artifact_id)
+  if slot < 0 or slot >= state.slots.len:
+    fail_plan(plan, "invalid join slot")
+    return
+  if state.slots[slot].isSome:
+    fail_plan(plan, "duplicate join result")
+    return
 
-    node.slots[slot] = some(artifact_id)
-    dec node.remaining
-    if node.remaining == 0:
-      finish_join(plan, join_id)
-  of wk_model, wk_so:
-    fail_plan(plan, "work node is not a join")
+  state.slots[slot] = some(artifact_id)
+  dec state.remaining
+  if state.remaining == 0:
+    finish_join(plan, join_id)
     return
 
 proc default_model_submit[A](
@@ -986,30 +958,25 @@ proc suspend_model[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
     input_id: ArtifactID;
-    resume: Resume[A]
+    destination: Destination[A]
 ) =
   echo "runtime: suspend model"
   let input_record = lookup_artifact(plan.context, input_id)
-  let node_id = new_work_node(
-    plan, wk_model, some(input_id))
   let request_id = allocate_request_id(plan.context)
   let output_meta = reserve_artifact_meta(plan.context)
-  let pending = PendingModel[A](
-    node_id: node_id,
-    request_id: request_id,
+  let invocation = Invocation[A](
+    flow: flow,
     input_id: input_id,
-    output_meta: output_meta,
-    resume: prepend_continuation(flow.continuation, resume)
-  )
-  echo "runtime: model pending"
-  dump node_id
+    destination: prepend_continuation(flow.continuation, destination),
+    output_meta: some(output_meta))
+  let key = request_id_key(request_id)
+  if plan.model_requests.hasKey(key):
+    fail_plan(plan, "duplicate model request ID")
+    return
+  plan.model_requests[key] = invocation
+  echo "runtime: model request in flight"
   dump request_id
-  dump plan.pending_models.len
-  plan.pending_models[request_id_key(request_id)] = pending
-
-  let node = plan.nodes[node_id]
-  node.request_id = some(request_id)
-  node.state = ws_waiting
+  dump plan.model_requests.len
 
   if not flow.submit.isNil:
     flow.submit(
@@ -1026,32 +993,21 @@ proc begin_fanout[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
     input_id: ArtifactID;
-    parent: Option[WorkID];
-    resume: Resume[A]
+    destination: Destination[A]
 ) =
   echo "runtime: begin fanout"
   dump flow.branches.len
-  dump parent
-  let join_id = new_work_node(
-    plan, wk_fanout, some(input_id))
-  let node = plan.nodes[join_id]
-  case node.kind
-  of wk_fanout:
-    node.remaining = flow.branches.len
-    node.slots = newSeq[Option[ArtifactID]](flow.branches.len)
-    node.resume = prepend_continuation(flow.continuation, resume)
-    node.coalesce = flow.coalesce
-  of wk_lift, wk_model, wk_so:
-    fail_plan(plan, "created non-fanout join node")
-    return
+  let join_id = new_join_state(plan, jk_fanout, flow.branches.len)
+  plan.join_invocations[join_id] = new_invocation(
+    flow,
+    input_id,
+    prepend_continuation(flow.continuation, destination))
 
   for index, branch in flow.branches:
-    enqueue_ready(plan, Activation[A](
-      flow: branch,
-      input_id: input_id,
-      parent: some(join_id),
-      resume: Resume[A](kind: rk_join, join_id: join_id, slot: index)
-    ))
+    enqueue_ready(plan, new_invocation(
+      branch,
+      input_id,
+      Destination[A](kind: dk_join, join_id: join_id, slot: index)))
 
   if flow.branches.len == 0:
     finish_join(plan, join_id)
@@ -1060,14 +1016,12 @@ proc begin_lift[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
     input_id: ArtifactID;
-    parent: Option[WorkID];
-    resume: Resume[A]
+    destination: Destination[A]
 ) =
   let original = lookup_artifact(plan.context, input_id).data
   let works = flow.destructure(original)
   echo "runtime: begin lift"
   dump works.len
-  dump parent
   var seen = newSeq[bool](works.len)
   for work in works:
     if work.result_index < 0 or work.result_index >= works.len:
@@ -1083,46 +1037,36 @@ proc begin_lift[A](
       fail_plan(plan, "lift result indexes are not contiguous")
       return
 
-  let join_id = new_work_node(
-    plan, wk_lift, some(input_id))
-  let node = plan.nodes[join_id]
-  case node.kind
-  of wk_lift:
-    node.remaining = works.len
-    node.slots = newSeq[Option[ArtifactID]](works.len)
-    node.resume = prepend_continuation(flow.continuation, resume)
-    node.construct = flow.construct
-  of wk_fanout, wk_model, wk_so:
-    fail_plan(plan, "created non-lift join node")
-    return
+  let join_id = new_join_state(plan, jk_lift, works.len)
+  plan.join_invocations[join_id] = new_invocation(
+    flow,
+    input_id,
+    prepend_continuation(flow.continuation, destination))
 
   for work in works:
-    let work_id = register_generated_artifact(plan.context, work.input)
-    enqueue_ready(plan, Activation[A](
-      flow: flow.inner,
-      input_id: work_id,
-      parent: some(join_id),
-      resume: Resume[A](
-        kind: rk_join,
+    let input_artifact_id = register_generated_artifact(plan.context, work.input)
+    enqueue_ready(plan, new_invocation(
+      flow.inner,
+      input_artifact_id,
+      Destination[A](
+        kind: dk_join,
         join_id: join_id,
-        slot: work.result_index
-      )
-    ))
+        slot: work.result_index)))
 
   if works.len == 0:
     finish_join(plan, join_id)
 
-proc handle_activation*[A](
+proc handle_invocation*[A](
     plan: var WorkPlan[A];
-    activation: Activation[A]
+    invocation: Invocation[A]
 ) =
-  echo "runtime: handle activation"
+  echo "runtime: handle invocation"
   dump plan.pending_ready.len
-  dump activation.parent
-  let initial_record = lookup_artifact(plan.context, activation.input_id)
-  var current = activation.flow
+  let initial_record = lookup_artifact(plan.context, invocation.input_id)
+  var current = invocation.flow
+  var destination = invocation.destination
   var value = initial_record.data
-  var value_id = activation.input_id
+  var value_id = invocation.input_id
 
   while not current.isNil:
     dump current.kind
@@ -1133,6 +1077,9 @@ proc handle_activation*[A](
     of fk_ref:
       echo "runtime: resolve ref"
       dump current.name
+      destination = prepend_continuation(
+        current.continuation,
+        destination)
       current = resolve_root(plan.roots, current.name)
     of fk_raw:
       echo "runtime: raw value"
@@ -1147,37 +1094,35 @@ proc handle_activation*[A](
     of fk_model:
       suspend_model(
         plan, current, value_id,
-        activation.resume)
+        destination)
       return
     of fk_so:
       echo "runtime: execute dynamic flow"
       let child = current.execute(value)
-      let child_resume = prepend_continuation(current.continuation,
-        activation.resume)
+      let child_destination = prepend_continuation(current.continuation,
+        destination)
       if child.isNil:
-        deliver_resume(plan, child_resume, value_id)
+        deliver_destination(plan, child_destination, value_id)
       else:
-        enqueue_ready(plan, Activation[A](
-          flow: child,
-          input_id: value_id,
-          parent: activation.parent,
-          resume: child_resume
-        ))
+        enqueue_ready(plan, new_invocation(
+          child,
+          value_id,
+          child_destination))
       return
     of fk_fanout:
       echo "runtime: suspend fanout"
       begin_fanout(
         plan, current, value_id,
-        activation.parent, activation.resume)
+        destination)
       return
     of fk_lift:
       echo "runtime: suspend lift"
       begin_lift(
         plan, current, value_id,
-        activation.parent, activation.resume)
+        destination)
       return
 
-  deliver_resume(plan, activation.resume, value_id)
+  deliver_destination(plan, destination, value_id)
 
 proc handle_runtime_event[A](
     plan: var WorkPlan[A];
@@ -1189,16 +1134,17 @@ proc handle_runtime_event[A](
   case event.runtime_kind
   of rev_model_artifact:
     let key = request_id_key(event.request_id)
-    if not plan.pending_models.hasKey(key):
+    if not plan.model_requests.hasKey(key):
       fail_plan(plan, "unknown model completion")
       return
-    let pending = plan.pending_models[key]
-    dump pending.node_id
-    plan.pending_models.del(key)
-    if not plan.nodes.hasKey(pending.node_id):
-      fail_plan(plan, "model completion has unknown work node")
+    let invocation = plan.model_requests[key]
+    plan.model_requests.del(key)
+    if invocation.flow.isNil or invocation.flow.kind != fk_model:
+      fail_plan(plan, "model completion has invalid invocation")
       return
-    let node = plan.nodes[pending.node_id]
+    if invocation.output_meta.isNone:
+      fail_plan(plan, "model invocation has no output metadata")
+      return
     if not event.has_output:
       fail_plan(plan, "model completion has no output")
       return
@@ -1212,28 +1158,23 @@ proc handle_runtime_event[A](
     let artifact = materialize(event.output_kind, LlmOutput(
       tool_name: event.output_tool_name,
       arguments: parseJson(event.output_arguments)))
-    let output_meta = pending.output_meta
+    let output_meta = invocation.output_meta.get
     if event.has_output_meta and
         (event.output_meta.id != output_meta.id or
          $event.output_meta.artifact_dir != $output_meta.artifact_dir):
       fail_plan(plan, "model completion output metadata mismatch")
       return
     let output_id = register_artifact(plan.context, artifact, output_meta)
-    node.output = some(output_id)
-    node.state = ws_done
     echo "runtime: model artifact accepted"
-    deliver_resume(plan, pending.resume, output_id)
+    deliver_destination(plan, invocation.destination, output_id)
   of rev_model_error:
     let key = request_id_key(event.request_id)
-    if not plan.pending_models.hasKey(key):
+    if not plan.model_requests.hasKey(key):
       fail_plan(plan, "unknown model error")
       return
-    let pending = plan.pending_models[key]
-    plan.pending_models.del(key)
-    if not event.has_message:
-      mark_node_failed(plan, pending.node_id, "model error has no message")
-    else:
-      mark_node_failed(plan, pending.node_id, event.message)
+    plan.model_requests.del(key)
+    plan.failed = true
+    plan.finished = true
   of rev_shutdown:
     echo "runtime: shutdown event"
     plan.finished = true
@@ -1250,11 +1191,11 @@ proc handle_global_event[A](
     handle_runtime_event(plan, event)
   of gek_ready:
     if not plan.pending_ready.hasKey(event.ready_id):
-      fail_plan(plan, "unknown ready activation")
+      fail_plan(plan, "unknown ready invocation")
       return
-    let activation = plan.pending_ready[event.ready_id]
+    let invocation = plan.pending_ready[event.ready_id]
     plan.pending_ready.del(event.ready_id)
-    handle_activation(plan, activation)
+    handle_invocation(plan, invocation)
   of gek_stdout_line, gek_stderr_line, gek_stdout_closed, gek_stderr_closed,
       gek_process_exit, gek_reader_error:
     messenger.handle_global_event(runtime, event)
@@ -1302,20 +1243,18 @@ proc execute_flows*[A](
     result = init_work_plan(top_level_flows, context)
     let input_meta = ArtifactMeta(id: 0, artifact_dir: source_root)
     let input_id = register_artifact(context, input, input_meta)
-    echo "runtime: enqueue entry activation"
+    echo "runtime: enqueue entry invocation"
     dump result.entry.kind
-    enqueue_ready(result, Activation[A](
-      flow: result.entry,
-      input_id: input_id,
-      parent: none(WorkID),
-      resume: Resume[A](kind: rk_finished)
-    ))
+    enqueue_ready(result, new_invocation(
+      result.entry,
+      input_id,
+      Destination[A](kind: dk_finished)))
     echo "runtime: run work plan"
     run_work_plan(result, active_runtime)
     echo "runtime: execution complete"
     dump result.finished
     dump result.failed
-    dump result.nodes.len
+    dump result.joins.len
   finally:
     if readers_started:
       stop_codex_readers(readers)

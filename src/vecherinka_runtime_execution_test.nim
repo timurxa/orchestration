@@ -152,8 +152,9 @@ block:
   )
   let result = execute_flows(@[top("immediate", immediate, true)], "seed")
   doAssert artifact_value(result.context, result.output.get) == "replaced+it"
-  doAssert result.nodes.len == 0
   doAssert result.pending_ready.len == 0
+  doAssert result.joins.len == 0
+  doAssert result.model_requests.len == 0
   doAssert result.next_ready_id == 1
   doAssert result.output.get == 2
   doAssert result.context.artifacts.len == 3
@@ -172,16 +173,12 @@ block:
   doAssert result.finished
   doAssert not result.failed
   doAssert artifact_value(result.context, result.output.get) == "model(seed)+it"
-  doAssert result.nodes.len == 1
-  doAssert result.nodes[1].kind == wk_model
-  doAssert result.nodes[1].state == ws_done
-  doAssert result.nodes[1].input.get == 0
-  doAssert result.nodes[1].output.get == 1
-  doAssert artifact_value(result.context, result.nodes[1].output.get) == "model(seed)"
+  doAssert artifact_value(result.context, 1) == "model(seed)"
   doAssert result.context.artifacts[1].meta.id == 1
   doAssert dirExists($result.context.artifacts[1].meta.artifact_dir)
   doAssert result.output.get == 2
   doAssert result.pending_ready.len == 0
+  doAssert result.model_requests.len == 0
   doAssert result.next_ready_id == 2
 
 block:
@@ -196,6 +193,66 @@ block:
   )
   let result = execute_flows(@[entry, worker], "seed")
   doAssert artifact_value(result.context, result.output.get) == "seed+it"
+
+block:
+  let worker = top(
+    "worker",
+    Flow[string](kind: fk_it, projector: add_suffix)
+  )
+  let entry = top(
+    "entry",
+    Flow[string](
+      kind: fk_ref,
+      name: "worker",
+      continuation: Flow[string](kind: fk_it, projector: add_suffix_2)),
+    true
+  )
+  let result = execute_flows(@[entry, worker], "seed")
+  doAssert artifact_value(result.context, result.output.get) ==
+    "seed+it+it2"
+
+block:
+  let worker = top(
+    "worker",
+    Flow[string](kind: fk_it, projector: add_suffix)
+  )
+  let middle = top(
+    "middle",
+    Flow[string](
+      kind: fk_ref,
+      name: "worker",
+      continuation: Flow[string](kind: fk_it, projector: add_suffix_2))
+  )
+  let entry = top(
+    "entry",
+    Flow[string](
+      kind: fk_ref,
+      name: "middle",
+      continuation: Flow[string](kind: fk_it, projector: add_suffix)),
+    true
+  )
+  let result = execute_flows(@[entry, middle, worker], "seed")
+  doAssert artifact_value(result.context, result.output.get) ==
+    "seed+it+it2+it"
+
+block:
+  let worker = top(
+    "worker",
+    Flow[string](
+      kind: fk_model,
+      continuation: Flow[string](kind: fk_it, projector: add_suffix))
+  )
+  let entry = top(
+    "entry",
+    Flow[string](
+      kind: fk_ref,
+      name: "worker",
+      continuation: Flow[string](kind: fk_it, projector: add_suffix_2)),
+    true
+  )
+  let result = execute_flows(@[entry, worker], "seed", fake_submit)
+  doAssert artifact_value(result.context, result.output.get) ==
+    "model(seed)+it+it2"
 
 block:
   let passthrough = Flow[string](kind: fk_so, execute: no_child)
@@ -215,12 +272,9 @@ block:
   )
   let result = execute_flows(@[top("fan", fan, true)], "seed")
   doAssert artifact_value(result.context, result.output.get) == "seed+it|SEED+it2"
-  doAssert result.nodes.len == 1
-  doAssert result.nodes[1].kind == wk_fanout
-  doAssert result.nodes[1].state == ws_done
-  doAssert result.nodes[1].output.get == 3
   doAssert $result.context.artifacts[3].meta.artifact_dir != $expected_source_root
   doAssert dirExists($result.context.artifacts[3].meta.artifact_dir)
+  doAssert result.joins.len == 0
   doAssert result.output.get == 4
 
 block:
@@ -232,12 +286,9 @@ block:
   )
   let result = execute_flows(@[top("lift", lift, true)], "a,b")
   doAssert artifact_value(result.context, result.output.get) == "a,b=a+it|b+it"
-  doAssert result.nodes.len == 1
-  doAssert result.nodes[1].kind == wk_lift
-  doAssert result.nodes[1].state == ws_done
-  doAssert result.nodes[1].output.get == 5
   doAssert $result.context.artifacts[5].meta.artifact_dir != $expected_source_root
   doAssert dirExists($result.context.artifacts[5].meta.artifact_dir)
+  doAssert result.joins.len == 0
 
 block:
   let empty_lift = Flow[string](
@@ -272,7 +323,6 @@ block:
   let result = execute_flows(@[top("metadata", first, true)], "seed")
   doAssert result.finished
   doAssert not result.failed
-  doAssert result.nodes.len == 2
   doAssert result.context.run_dir != Path("")
   doAssert dirExists($result.context.run_dir)
   doAssert result.context.next_artifact_id == 2
@@ -280,11 +330,8 @@ block:
   doAssert observed_model_working_dirs.len == 2
   doAssert $observed_model_working_dirs[0] !=
     $observed_model_working_dirs[1]
-  doAssert result.nodes[1].input.get == 0
-  doAssert result.nodes[1].output.get == 1
-  doAssert result.nodes[2].input.get == 1
-  doAssert result.nodes[2].output.get == 2
   doAssert result.output.get == 2
+  doAssert result.model_requests.len == 0
 
 proc observed_child_model(value: string): Flow[string] =
   discard value

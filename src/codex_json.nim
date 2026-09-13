@@ -257,7 +257,7 @@ type
     request_id*: RequestId
     params*: DynamicToolCallParams
 
-  DynamicToolCallback* = proc(data: pointer; context: ToolCallContext) {.closure, gcsafe.}
+  DynamicToolCallback* = proc(data: pointer; context: ToolCallContext) {.nimcall, gcsafe.}
 
   DynamicTool* = object
     name*: string
