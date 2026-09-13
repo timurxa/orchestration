@@ -50,11 +50,12 @@ type
     p_pragmatic
 
   ReasoningEffort* = enum
-    re_minimal,
+    re_none,
     re_low,
     re_medium,
     re_high,
-    re_xhigh
+    re_xhigh,
+    re_max
 
   TurnStatus* = enum
     ts_in_progress,
@@ -544,11 +545,12 @@ proc json_node(value: Personality): JsonNode =
 
 proc json_node(value: ReasoningEffort): JsonNode =
   case value:
-  of re_minimal: %"minimal"
+  of re_none: %"none"
   of re_low: %"low"
   of re_medium: %"medium"
   of re_high: %"high"
   of re_xhigh: %"xhigh"
+  of re_max: %"max"
 
 proc json_node(value: RequestId): JsonNode =
   case value.kind:
@@ -631,11 +633,12 @@ proc parse_personality(node: JsonNode): Personality =
 
 proc parse_reasoning_effort(node: JsonNode): ReasoningEffort =
   case node.getStr:
-  of "minimal": re_minimal
+  of "none": re_none
   of "low": re_low
   of "medium": re_medium
   of "high": re_high
   of "xhigh": re_xhigh
+  of "max": re_max
   else: raise newException(ValueError, "unknown reasoning effort")
 
 proc parse_turn_status(node: JsonNode): TurnStatus =

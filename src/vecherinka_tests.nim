@@ -1,8 +1,7 @@
 {.experimental: "callOperator".}
 
-import std/[deques, json, macros, options, sugar]
+import std/macros
 import vecherinka
-import codex_json
 
 type
   ImplementationRequest = distinct string
@@ -16,41 +15,6 @@ type
 proc `$`(value: Location): string {.borrow.}
 proc `$`(value: Codebase): string {.borrow.}
 proc `$`(value: Issues): string {.borrow.}
-
-proc debug_generated_transport[A](
-    context: RuntimeContext[A];
-    request_id: RequestId;
-    spec: LlmCallSpec[A]
-) =
-  echo "test: generated transport called"
-  dump request_id
-  dump spec.output_kind
-  dump spec.tools.len
-  dump spec.prompt
-  dump spec.materialized_input
-  doAssert spec.tools.len == 1
-  doAssert spec.tools[0].name == "finish_work"
-  doAssert spec.tools[0].input_schema["type"].getStr == "object"
-  doAssert not spec.materialize.isNil
-  let decoded = spec.materialize(spec.output_kind, LlmOutput(
-    tool_name: "finish_work",
-    arguments: %*{"message": "generated"}))
-  doAssert decoded.ok
-  let rejected = spec.materialize(spec.output_kind, LlmOutput(
-    tool_name: "finish_work",
-    arguments: %*{"message": 42}))
-  doAssert not rejected.ok
-  let event = RuntimeEvent[A](
-    kind: rev_model_artifact,
-    request_id: request_id,
-    output_kind: spec.output_kind,
-    output: LlmOutput(
-      tool_name: "finish_work",
-      arguments: %*{"message": "generated"}),
-    materialize: spec.materialize,
-    tool_request_id: none(RequestId),
-    output_meta: none(ArtifactMeta))
-  enqueue_runtime_event(context, event)
 
 const cheap = "gpt-5.6-luna".minimal
 
@@ -81,5 +45,5 @@ let issues = Issues(@[""])
 let simple = Simple(message: "Include 'duck' in your answer!!")
 
 echo "test: calling generated solve"
-solve(simple, debug_generated_transport)
+solve(simple)
 echo "test: generated solve returned"

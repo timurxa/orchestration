@@ -547,9 +547,16 @@ proc error_handle*(runtime: ptr CodexRuntime): cint = runtime.process.errorHandl
 proc create_agent*(runtime: ptr CodexRuntime; agent_id: AgentId;
     model: string; tools: DynamicToolRegistry = @[];
     developer_instructions: string = "";
-    default_effort: ReasoningEffort = re_low): RequestId =
+    default_effort: ReasoningEffort = re_low;
+    working_dir: string = ""): RequestId =
   if runtime.state.agents.hasKey(agent_id):
     raise newException(ValueError, "agent already exists: " & agent_id)
+  let agent_cwd = if working_dir.len == 0:
+    runtime.cwd
+  else:
+    if not dirExists(working_dir):
+      raise newException(ValueError, "agent working directory is not a directory: " & working_dir)
+    expandFilename(working_dir)
 
   var copied_tools = newSeq[DynamicTool](tools.len)
   for index, tool in tools:
@@ -572,7 +579,7 @@ proc create_agent*(runtime: ptr CodexRuntime; agent_id: AgentId;
     ),
     base_instructions: NullableOption[string](state: nos_none),
     config: NullableOption[Config](state: nos_none),
-    cwd: NullableOption[string](state: nos_value, value: runtime.cwd),
+    cwd: NullableOption[string](state: nos_value, value: agent_cwd),
     developer_instructions: NullableOption[string](state: nos_none),
     sandbox: NullableOption[SandboxMode](
       state: nos_value,

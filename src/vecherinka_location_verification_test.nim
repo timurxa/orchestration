@@ -1,6 +1,6 @@
 {.experimental: "callOperator".}
 
-import std/[json, options, paths, strutils]
+import std/[json, options, os, paths, strutils]
 import vecherinka
 import codex_json
 

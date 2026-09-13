@@ -104,8 +104,7 @@ type
     slots*: seq[Option[ArtifactID]]
 
   LlmOutput* = object
-    ## Structured output passed by fake or real transport. Real Codex parsing
-    ## will populate tool_name and arguments later.
+    ## Structured output passed by fake or real transport.
     tool_name*: string
     arguments*: JsonNode
     ## Runtime-only root used by generated Location verification. Transports
@@ -143,6 +142,13 @@ type
     output_kind*: int
     materialize*: ModelMaterializer[A]
 
+  PendingAgentStart*[A] = object
+    model_request_id*: RequestId
+    agent_id*: AgentId
+    start_request_id*: Option[RequestId]
+    turn_request_id*: Option[RequestId]
+    spec*: LlmCallSpec[A]
+
   RuntimeEventKind* = enum
     rev_model_artifact,
     rev_model_error,
@@ -168,6 +174,7 @@ type
   GlobalEventKind* = enum
     gek_runtime,
     gek_ready,
+    gek_create_agent,
     gek_stdout_line,
     gek_stderr_line,
     gek_stdout_closed,
@@ -197,6 +204,13 @@ type
         discard
     of gek_ready:
       ready_id*: uint64
+    of gek_create_agent:
+      model_request_id*: RequestId
+      agent_id*: AgentId
+      model*: string
+      effort*: ReasoningEffort
+      working_dir*: Path
+      tools*: DynamicToolRegistry
     of gek_stdout_line, gek_stderr_line, gek_reader_error:
       message*: string
     of gek_stdout_closed, gek_stderr_closed, gek_process_exit,
@@ -241,6 +255,7 @@ type
     run_dir*: Path
     next_artifact_id*: ArtifactID
     codex_runtime*: ptr CodexRuntime
+    pending_agent_starts*: Table[string, PendingAgentStart[A]]
 
   ModelSubmitter*[A] = proc(
     context: RuntimeContext[A];
@@ -643,6 +658,8 @@ proc handle_global_event*(
   case event.kind
   of gek_runtime, gek_ready:
     discard
+  of gek_create_agent:
+    discard
   of gek_stdout_line:
     if runtime.isNil:
       raise newException(ValueError, "stdout event requires CodexRuntime owner")
@@ -662,8 +679,11 @@ proc handle_global_event*(
   of gek_shutdown:
     discard
 
+proc none*(model: string): ProfileSpec =
+  ProfileSpec(model: model, effort: re_none)
 proc minimal*(model: string): ProfileSpec =
-  ProfileSpec(model: model, effort: re_minimal)
+  ## Compatibility alias. Codex renamed this effort to `none`.
+  none(model)
 proc low*(model: string): ProfileSpec =
   ProfileSpec(model: model, effort: re_low)
 proc medium*(model: string): ProfileSpec =
@@ -672,6 +692,8 @@ proc high*(model: string): ProfileSpec =
   ProfileSpec(model: model, effort: re_high)
 proc xhigh*(model: string): ProfileSpec =
   ProfileSpec(model: model, effort: re_xhigh)
+proc max*(model: string): ProfileSpec =
+  ProfileSpec(model: model, effort: re_max)
 
 proc prepend_continuation*[A](
     flow: Flow[A];
@@ -700,6 +722,7 @@ proc new_runtime_context*[A](
   result.run_dir = run_dir
   result.next_artifact_id = 0
   result.codex_runtime = nil
+  result.pending_agent_starts = initTable[string, PendingAgentStart[A]]()
 
 proc create_run_directory*(source_root: Path): Path =
   ## Keep run state in a unique child of the program working directory.
@@ -1054,32 +1077,151 @@ proc default_llm_transport[A](
     request_id: RequestId;
     spec: LlmCallSpec[A]
 ) =
-  ## Default transport is deterministic. It exercises generated output
-  ## materialization without opening a Codex process.
-  echo "runtime: default LLM transport"
-  dump request_id
-  dump spec.output_kind
-  dump spec.tools.len
-  if spec.materialize.isNil:
-    let event = RuntimeEvent[A](
+  ## Queue agent creation. Coordinator sends turn only after thread/start
+  ## response installs thread ID in CodexRuntime.
+  if context.codex_runtime.isNil:
+    enqueue_runtime_event(context, RuntimeEvent[A](
       kind: rev_model_error,
       request_id: request_id,
-      error_message: "LLM spec has no output materializer")
-    enqueue_runtime_event(context, event)
+      error_message: "no Codex runtime configured"))
     return
-  let output = LlmOutput(
-    tool_name: "debug_return",
-    arguments: newJObject()
-  )
-  let event = RuntimeEvent[A](
-    kind: rev_model_artifact,
+
+  let key = request_id_key(request_id)
+  if context.pending_agent_starts.hasKey(key):
+    enqueue_runtime_event(context, RuntimeEvent[A](
+      kind: rev_model_error,
+      request_id: request_id,
+      error_message: "duplicate pending agent request"))
+    return
+
+  let agent_id = "vecherinka-agent-" & key
+  context.pending_agent_starts[key] = PendingAgentStart[A](
+    model_request_id: request_id,
+    agent_id: agent_id,
+    start_request_id: none(RequestId),
+    turn_request_id: none(RequestId),
+    spec: spec)
+  send_global_event(context, GlobalEvent(
+    kind: gek_create_agent,
+    model_request_id: request_id,
+    agent_id: agent_id,
+    model: spec.profile.model,
+    effort: spec.profile.effort,
+    working_dir: spec.working_dir,
+    tools: spec.tools))
+
+proc llm_turn_prompt[A](spec: LlmCallSpec[A]): string =
+  ## Generic wrapper avoids copying LlmCallSpec through erased boundaries.
+  result = spec.prompt
+  result.add("\n\nComplete task. Call finish_work exactly once when done.")
+  result.add("\nYou may modify only: " & $spec.working_dir)
+  result.add("\nLocation values are paths relative to: " & $spec.runtime_dir)
+  result.add("\nEvery Location must name an existing file or directory inside the working directory.")
+  if spec.materialized_input.len != 0:
+    result.add("\n\ninput:\n")
+    result.add(spec.materialized_input)
+
+proc enqueue_agent_error[A](context: RuntimeContext[A]; request_id: RequestId;
+    message: string) =
+  enqueue_runtime_event(context, RuntimeEvent[A](
+    kind: rev_model_error,
     request_id: request_id,
-    output_kind: spec.output_kind,
-    output: output,
-    materialize: spec.materialize,
-    tool_request_id: none(RequestId),
-    output_meta: none(ArtifactMeta))
-  enqueue_runtime_event(context, event)
+    error_message: message))
+
+proc begin_agent_creation[A](
+    plan: var WorkPlan[A];
+    runtime: ptr CodexRuntime;
+    event: GlobalEvent
+) =
+  plan_assert(plan, not runtime.isNil, "agent creation requires CodexRuntime")
+  let key = request_id_key(event.model_request_id)
+  plan_assert(plan, plan.model_requests.hasKey(key),
+    "agent creation has unknown model request")
+  plan_assert(plan, plan.context.pending_agent_starts.hasKey(key),
+    "agent creation has no pending context")
+
+  var pending = plan.context.pending_agent_starts[key]
+  plan_assert(plan, pending.start_request_id.isNone,
+    "agent creation already started")
+  plan_assert(plan, pending.agent_id == event.agent_id,
+    "agent creation ID mismatch")
+
+  try:
+    let start_request_id = runtime.create_agent(
+      event.agent_id,
+      event.model,
+      event.tools,
+      "Complete task. Call finish_work exactly once when done.",
+      event.effort,
+      $event.working_dir)
+    pending.start_request_id = some(start_request_id)
+    plan.context.pending_agent_starts[key] = pending
+  except CatchableError as error:
+    plan.context.pending_agent_starts.del(key)
+    enqueue_agent_error(plan.context, event.model_request_id, error.msg)
+
+proc advance_agent_starts[A](
+    plan: var WorkPlan[A];
+    runtime: ptr CodexRuntime
+) =
+  if runtime.isNil:
+    return
+  var completed: seq[string] = @[]
+  for key, pending_value in plan.context.pending_agent_starts.pairs:
+    var pending = pending_value
+    if pending.turn_request_id.isSome:
+      let turn_key = request_id_key(pending.turn_request_id.get)
+      if not runtime.requests.hasKey(turn_key):
+        continue
+      let turn_request = runtime.requests[turn_key]
+      if turn_request.state == rs_failed:
+        enqueue_agent_error(
+          plan.context,
+          pending.model_request_id,
+          if turn_request.error.isSome:
+            turn_request.error.get
+          else:
+            "agent turn failed")
+        completed.add(key)
+      elif turn_request.state == rs_completed:
+        enqueue_agent_error(
+          plan.context,
+          pending.model_request_id,
+          "agent turn completed without finish_work")
+        completed.add(key)
+      continue
+    if pending.start_request_id.isNone:
+      continue
+    let start_request_id = pending.start_request_id.get
+    let start_key = request_id_key(start_request_id)
+    if not runtime.requests.hasKey(start_key):
+      continue
+    let start_request = runtime.requests[start_key]
+    if start_request.state == rs_failed:
+      enqueue_agent_error(
+        plan.context,
+        pending.model_request_id,
+        if start_request.error.isSome:
+          start_request.error.get
+        else:
+          "agent creation failed")
+      completed.add(key)
+      continue
+    if not runtime.agents.hasKey(pending.agent_id) or
+        not runtime.agents[pending.agent_id].thread_id.has_value:
+      continue
+    try:
+      let turn_request_id = runtime.send_agent_message(
+        pending.agent_id,
+        llm_turn_prompt(pending.spec),
+        pending.spec.profile.effort)
+      pending.turn_request_id = some(turn_request_id)
+      plan.context.pending_agent_starts[key] = pending
+    except CatchableError as error:
+      enqueue_agent_error(plan.context, pending.model_request_id, error.msg)
+      completed.add(key)
+  for key in completed:
+    plan.context.pending_agent_starts.del(key)
 
 proc submit_llm*[A](
     context: RuntimeContext[A];
@@ -1331,6 +1473,8 @@ proc handle_runtime_event[A](
     if event.tool_binding_id.isSome:
       retire_llm_tool_binding(event.tool_binding_id.get)
     plan.model_requests.del(key)
+    if plan.context.pending_agent_starts.hasKey(key):
+      plan.context.pending_agent_starts.del(key)
     let output_id = register_artifact(plan.context, artifact, output_meta)
     echo "runtime: model artifact accepted"
     deliver_destination(plan, invocation.destination, output_id)
@@ -1338,6 +1482,10 @@ proc handle_runtime_event[A](
     let key = request_id_key(event.request_id)
     plan_assert(plan, plan.model_requests.hasKey(key), "unknown model error")
     plan.model_requests.del(key)
+    if plan.context.pending_agent_starts.hasKey(key):
+      plan.context.pending_agent_starts.del(key)
+    plan.failure_message = some(event.error_message)
+    echo "runtime: model error: " & event.error_message
     plan.failed = true
     plan.finished = true
   of rev_shutdown:
@@ -1360,9 +1508,13 @@ proc handle_global_event[A](
     let invocation = plan.pending_ready[event.ready_id]
     plan.pending_ready.del(event.ready_id)
     handle_invocation(plan, invocation)
+  of gek_create_agent:
+    begin_agent_creation(plan, runtime, event)
   of gek_stdout_line, gek_stderr_line, gek_stdout_closed, gek_stderr_closed,
       gek_process_exit, gek_reader_error:
     messenger.handle_global_event(runtime, event)
+    if event.kind == gek_stdout_line:
+      advance_agent_starts(plan, runtime)
     if event.kind == gek_stdout_line and not runtime.isNil and
         runtime.initialization_error.isSome:
       plan.fail_runtime(
