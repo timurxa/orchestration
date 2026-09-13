@@ -979,6 +979,33 @@ proc emit_input_materializer(type_expr: NimNode): NimNode =
       `instructions`
     )
 
+type
+  VerifyLocationsEmitState = object
+    working_dir: NimNode
+    errors: NimNode
+
+proc verify_locations_callback(
+    node: ArtifactNode;
+    value, path: NimNode;
+    state: var VerifyLocationsEmitState
+): NimNode =
+  case node.kind
+  of ank_inline, ank_option_none:
+    return newStmtList()
+  of ank_location:
+    let verification_error = genSym(nskLet, "location_verification_error")
+    let working_dir = copyNimTree(state.working_dir)
+    let errors = copyNimTree(state.errors)
+    let path_copy = copyNimTree(path)
+    let location_value = quote do: cast[string](`value`)
+    quote do:
+      let `verification_error` = verify_location_payload(
+        `working_dir`, `location_value`)
+      if `verification_error`.len != 0:
+        `errors`.add(`path_copy` & ": " & `verification_error` & "\n")
+  else:
+    nil
+
 template output_schema_of[T](): untyped =
   schemaOf(T)
 
@@ -1010,6 +1037,24 @@ proc lower_model_call(
   let parsed_value = newDotExpr(parsed_output, ident("value"))
   let packed_output = registry.emit_artifact_pack(output_type, parsed_value)
   let output_tree = artifact_tree(output_type)
+  let location_errors = genSym(nskVar, "location_errors")
+  var verify_state = VerifyLocationsEmitState(
+    working_dir: newDotExpr(
+      copyNimTree(materializer_output), ident("working_dir")),
+    errors: location_errors)
+  let verify_locations_body = walk_artifact_tree(
+    output_tree,
+    parsed_value,
+    newLit("output"),
+    verify_state,
+    verify_locations_callback)
+  let verify_locations = quote do:
+    var `location_errors` = ""
+    `verify_locations_body`
+    if `location_errors`.len != 0:
+      return ModelMaterialization[`artifact_name`](
+        ok: false,
+        error: "invalid finish_work locations: " & `location_errors`)
   let output_contract_expr = if output_tree.kind == ank_variant:
     newCall(
       newTree(nnkBracketExpr,
@@ -1029,6 +1074,7 @@ proc lower_model_call(
           ok: false,
           error: "invalid finish_work result (" &
             $`parsed_output`.issues.len & " schema issues)")
+      `verify_locations`
       return ModelMaterialization[`artifact_name`](
         ok: true,
         value: `packed_output`)

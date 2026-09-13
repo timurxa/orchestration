@@ -108,6 +108,9 @@ type
     ## will populate tool_name and arguments later.
     tool_name*: string
     arguments*: JsonNode
+    ## Runtime-only root used by generated Location verification. Transports
+    ## leave it empty; the owner thread supplies it before materialization.
+    working_dir*: Path
 
   LlmToolBinding* = object
     ## Vecherinka-owned state behind a dynamic tool handle. The handle itself
@@ -808,6 +811,18 @@ proc copy_location_payload*(
       return candidate
     inc suffix
 
+proc verify_location_payload*(working_dir: Path; location: string): string =
+  ## A valid output Location names an existing payload inside this model call.
+  if location.len == 0:
+    return "Location is empty"
+
+  let source = working_dir / Path(location)
+  if not source.isRelativeTo(working_dir):
+    return "Location is outside working directory: " & $source
+  if not fileExists($source) and not dirExists($source):
+    return "Location source does not exist: " & $source
+  ""
+
 proc allocate_request_id[A](context: RuntimeContext[A]): RequestId =
   echo "runtime: allocate request id"
   dump context.next_request_id
@@ -1284,11 +1299,13 @@ proc handle_runtime_event[A](
       plan_assert(plan, false,
         "unexpected completion tool: " & event.output_tool_name)
       return
+    let output_meta = invocation.output_meta.get
     let materialize = cast[ModelMaterializer[A]](event.output_materializer)
     let decoded = try:
       materialize(event.output_kind, LlmOutput(
         tool_name: event.output_tool_name,
-        arguments: parseJson(event.output_arguments)))
+        arguments: parseJson(event.output_arguments),
+        working_dir: output_meta.artifact_dir))
     except CatchableError as error:
       ModelMaterialization[A](ok: false, error: error.msg)
     if not decoded.ok:
@@ -1301,7 +1318,6 @@ proc handle_runtime_event[A](
       plan_assert(plan, false, "invalid model output: " & decoded.error)
       return
     let artifact = decoded.value
-    let output_meta = invocation.output_meta.get
     plan_assert(plan,
       event.output_meta.isNone or
         (event.output_meta.get.id == output_meta.id and
