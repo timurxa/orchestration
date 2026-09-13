@@ -600,28 +600,6 @@ proc lower_model_call(
   let output_kind_value = newLit(output_kind_ordinal)
   let output_kind_type = registry.kind_name
   let output_value_name = output_info.value_name
-  let input = genSym(nskParam, "model_artifact")
-  let output = genSym(nskParam, "model_value")
-  let unpacked = if input_type.is_void_type:
-    newEmptyNode()
-  else:
-    registry.emit_artifact_unpack(input_type, input)
-  let unpacker = if input_type.is_void_type:
-    quote do:
-      (proc (`input`: `artifact_name`): void {.nimcall.} =
-        discard `input`
-      )
-  else:
-    quote do:
-      (proc (`input`: `artifact_name`): `input_type` {.nimcall.} =
-        `unpacked`
-      )
-  let packed = registry.emit_artifact_pack(output_type, output)
-  let packer = quote do:
-    (proc (`output`: `output_type`): `artifact_name` {.nimcall.} =
-      `packed`
-    )
-
   let materializer_kind = genSym(nskParam, "model_output_kind")
   let materializer_output = genSym(nskParam, "model_output")
   let debug_value = emit_debug_value(output_type, materializer_output)
@@ -736,8 +714,6 @@ proc lower_model_call(
       kind: fk_model,
       profile: `profile_expr`,
       prompt: `prompt_expr`,
-      packer: cast[pointer](`packer`),
-      unpacker: cast[pointer](`unpacker`),
       prepare: `prepare`
     )
 

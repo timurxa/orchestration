@@ -31,8 +31,6 @@ type
     of fk_model:
       profile*: ProfileSpec
       prompt*: string
-      packer*: pointer
-      unpacker*: pointer
       prepare*: proc(input: A): ModelCallSpec[A] {.nimcall.}
     of fk_raw:
       value*: A
@@ -219,23 +217,30 @@ proc new_runtime_context*[A](
     submitter: ModelSubmitter[A] = nil;
     transport: LlmTransport[A] = nil
 ): RuntimeContext[A] =
-  echo "initializing new runtime context with event queue, transport, and req id"
+  echo "runtime: new context"
+  dump submitter.isNil
+  dump transport.isNil
   new result
   result.events = initDeque[RuntimeEvent[A]]()
   result.submitter = submitter
   result.transport = transport
   result.next_request_id = 0
+  dump result.events.len
 
 proc allocate_request_id[A](context: RuntimeContext[A]): RequestId =
+  echo "runtime: allocate request id"
+  dump context.next_request_id
   result = RequestId(kind: rid_integer,
     integer_value: context.next_request_id)
   inc context.next_request_id
+  dump result
 
 proc init_work_plan*[A](
     top_level_flows: seq[Flow[A]];
     context: RuntimeContext[A]
 ): WorkPlan[A] =
-  echo "initializing work plan"
+  echo "runtime: init work plan"
+  dump top_level_flows.len
   result.context = context
   result.roots = initTable[string, Flow[A]]()
   result.nodes = initTable[WorkID, WorkNode[A]]()
@@ -247,6 +252,9 @@ proc init_work_plan*[A](
   for top in top_level_flows:
     if top.isNil or top.kind != fk_top:
       raise newException(ValueError, "top-level flow is not fk_top")
+    echo "runtime: register top flow"
+    dump top.root
+    dump top.entry
     if result.roots.hasKey(top.root):
       raise newException(ValueError, "duplicate root: " & top.root)
     result.roots[top.root] = top.body
@@ -257,6 +265,9 @@ proc init_work_plan*[A](
 
   if result.entry.isNil:
     raise newException(ValueError, "missing entry root")
+  echo "runtime: work plan ready"
+  dump result.roots.len
+  dump result.entry.kind
 
 proc init_work_plan*[A](
     top_level_flows: seq[Flow[A]]
@@ -279,8 +290,10 @@ proc new_work_node[A](
     parent: Option[WorkID];
     input: Option[A]
 ): WorkID =
-  echo "new_work_node"
+  echo "runtime: new work node"
   dump kind
+  dump parent
+  dump input.isSome
   result = plan.next_work_id
   inc plan.next_work_id
   plan.nodes[result] = WorkNode[A](
@@ -295,6 +308,8 @@ proc new_work_node[A](
   )
 
 proc fail_plan[A](plan: var WorkPlan[A]; message: string) =
+  echo "runtime: fail plan"
+  dump message
   plan.failed = true
   plan.finished = true
   raise newException(ValueError, message)
@@ -304,6 +319,9 @@ proc mark_node_failed[A](
     node_id: WorkID;
     message: string
 ) =
+  echo "runtime: mark node failed"
+  dump node_id
+  dump message
   if plan.nodes.hasKey(node_id):
     let node = plan.nodes[node_id]
     node.state = ws_failed
@@ -332,6 +350,8 @@ proc deliver_resume[A](
     fail_plan(plan, "nil resume destination")
     return
 
+  echo "runtime: deliver resume"
+  dump resume.kind
   case resume.kind
   of rk_continue:
     addLast(plan.ready, Activation[A](
@@ -345,11 +365,14 @@ proc deliver_resume[A](
   of rk_finished:
     plan.output = some(value)
     plan.finished = true
+    echo "runtime: plan finished from resume"
 
 proc finish_join[A](
     plan: var WorkPlan[A];
     join_id: WorkID
 ) =
+  echo "runtime: finish join"
+  dump join_id
   if not plan.joins.hasKey(join_id):
     fail_plan(plan, "unknown join")
     return
@@ -375,6 +398,9 @@ proc finish_join[A](
     node.output = some(output)
     node.state = ws_done
   plan.joins.del(join_id)
+  echo "runtime: join output ready"
+  dump join.kind
+  dump values.len
   deliver_resume(plan, join.resume, output)
 
 proc finalize_join[A](
@@ -389,6 +415,9 @@ proc accept_join_result[A](
     slot: int;
     value: A
 ) =
+  echo "runtime: accept join result"
+  dump join_id
+  dump slot
   if not plan.joins.hasKey(join_id):
     fail_plan(plan, "unknown join result")
     return
@@ -411,7 +440,9 @@ proc default_model_submit[A](
     request_id: RequestId;
     spec: ModelCallSpec[A]
 ) =
-  echo "default_model_submit"
+  echo "runtime: default model submit (error path)"
+  dump request_id
+  dump spec.prompt
   discard spec
   var event: RuntimeEvent[A]
   event.kind = rev_model_error
@@ -427,6 +458,11 @@ proc default_llm_transport[A](
 ) =
   ## Default transport is deterministic. It exercises generated output
   ## materialization without opening a Codex process.
+  echo "runtime: default LLM transport"
+  dump request_id
+  dump spec.output_kind
+  dump spec.typed_context
+  dump spec.tools.len
   if spec.materialize.isNil:
     var event: RuntimeEvent[A]
     event.kind = rev_model_error
@@ -455,6 +491,8 @@ proc submit_llm*[A](
     request_id: RequestId;
     spec: LlmCallSpec[A]
 ) =
+  echo "runtime: submit LLM"
+  dump request_id
   let transport = if context.transport.isNil:
     default_llm_transport[A]
   else:
@@ -483,7 +521,11 @@ proc suspend_model[A](
     parent: Option[WorkID];
     resume: Resume[A]
 ) =
-  echo "suspend_model"
+  echo "runtime: suspend model"
+  dump flow.profile.model
+  dump flow.profile.effort
+  dump flow.prompt
+  dump parent
   let node_id = new_work_node(plan, wk_model, parent, some(input))
   var spec = if flow.prepare.isNil:
     ModelCallSpec[A](
@@ -501,7 +543,10 @@ proc suspend_model[A](
     request_id: request_id,
     resume: prepend_continuation(flow.continuation, resume)
   )
-  echo "prepended continuation, added to pending model requests"
+  echo "runtime: model pending"
+  dump node_id
+  dump request_id
+  dump plan.pending_models.len
   plan.pending_models[request_id_key(request_id)] = pending
 
   let node = plan.nodes[node_id]
@@ -525,6 +570,9 @@ proc begin_fanout[A](
     parent: Option[WorkID];
     resume: Resume[A]
 ) =
+  echo "runtime: begin fanout"
+  dump flow.branches.len
+  dump parent
   let join_id = new_work_node(plan, wk_fanout, parent, some(input))
   let join = JoinState[A](
     id: join_id,
@@ -556,6 +604,9 @@ proc begin_lift[A](
     resume: Resume[A]
 ) =
   let works = flow.destructure(input)
+  echo "runtime: begin lift"
+  dump works.len
+  dump parent
   var seen = newSeq[bool](works.len)
   for work in works:
     if work.result_index < 0 or work.result_index >= works.len:
@@ -603,7 +654,9 @@ proc handle_activation*[A](
     plan: var WorkPlan[A];
     activation: Activation[A]
 ) =
-  echo "handle_activation"
+  echo "runtime: handle activation"
+  dump plan.ready.len
+  dump activation.parent
   var current = activation.flow
   var value = activation.input
 
@@ -611,19 +664,25 @@ proc handle_activation*[A](
     dump current.kind
     case current.kind
     of fk_top:
+      echo "runtime: enter top body"
       current = current.body
     of fk_ref:
+      echo "runtime: resolve ref"
+      dump current.name
       current = resolve_root(plan.roots, current.name)
     of fk_raw:
+      echo "runtime: raw value"
       value = current.value
       current = current.continuation
     of fk_it:
+      echo "runtime: apply projector"
       value = current.projector(value)
       current = current.continuation
     of fk_model:
       suspend_model(plan, current, value, activation.parent, activation.resume)
       return
     of fk_so:
+      echo "runtime: execute dynamic flow"
       let child = current.execute(value)
       let child_resume = prepend_continuation(current.continuation,
         activation.resume)
@@ -638,10 +697,12 @@ proc handle_activation*[A](
         ))
       return
     of fk_fanout:
+      echo "runtime: suspend fanout"
       begin_fanout(plan, current, value, activation.parent,
         activation.resume)
       return
     of fk_lift:
+      echo "runtime: suspend lift"
       begin_lift(plan, current, value, activation.parent,
         activation.resume)
       return
@@ -652,6 +713,9 @@ proc handle_event[A](
     plan: var WorkPlan[A];
     event: RuntimeEvent[A]
 ) =
+  echo "runtime: handle event"
+  dump event.kind
+  dump event.request_id
   case event.kind
   of rev_model_artifact:
     let key = request_id_key(event.request_id)
@@ -659,6 +723,7 @@ proc handle_event[A](
       fail_plan(plan, "unknown model completion")
       return
     let pending = plan.pending_models[key]
+    dump pending.node_id
     plan.pending_models.del(key)
     if not plan.nodes.hasKey(pending.node_id):
       fail_plan(plan, "model completion has unknown work node")
@@ -673,6 +738,7 @@ proc handle_event[A](
     let artifact = event.artifact[]
     node.output = some(artifact)
     node.state = ws_done
+    echo "runtime: model artifact accepted"
     deliver_resume(plan, pending.resume, artifact)
   of rev_model_error:
     let key = request_id_key(event.request_id)
@@ -686,28 +752,43 @@ proc handle_event[A](
     else:
       mark_node_failed(plan, pending.node_id, event.message)
   of rev_shutdown:
+    echo "runtime: shutdown event"
     plan.finished = true
 
 proc drain_ready_batch*[A](
     plan: var WorkPlan[A];
     limit: int = 64
 ) =
-  echo "drain_ready_batch"
+  echo "runtime: drain ready batch"
+  dump plan.ready.len
+  dump limit
   var handled = 0
   while not plan.finished and plan.ready.len > 0 and handled < limit:
     let activation = popFirst(plan.ready)
     inc handled
     handle_activation(plan, activation)
+  dump handled
+  dump plan.ready.len
 
 proc drain_events*[A](plan: var WorkPlan[A]) =
-  echo "drain_events"
+  echo "runtime: drain events"
+  dump plan.context.events.len
+  var handled = 0
   while not plan.finished and plan.context.events.len > 0:
     let event = popFirst(plan.context.events)
+    inc handled
     handle_event(plan, event)
+  dump handled
+  dump plan.context.events.len
 
 proc run_work_plan*[A](plan: var WorkPlan[A]) =
+  var iteration = 0
   while not plan.finished:
-    echo "while not plan.finished"
+    inc iteration
+    echo "runtime: scheduler iteration"
+    dump iteration
+    dump plan.ready.len
+    dump plan.context.events.len
     drain_ready_batch(plan)
     drain_events(plan)
     if plan.ready.len == 0 and plan.context.events.len == 0 and
@@ -722,18 +803,24 @@ proc execute_flows*[A](
     submitter: ModelSubmitter[A] = nil;
     transport: LlmTransport[A] = nil
 ): WorkPlan[A] =
-  echo "executing flows"
+  echo "runtime: execute flows"
+  dump top_level_flows.len
   let context = new_runtime_context(submitter, transport)
   result = init_work_plan(top_level_flows, context)
-  echo "adding activation for input"
+  echo "runtime: enqueue entry activation"
+  dump result.entry.kind
   addLast(result.ready, Activation[A](
     flow: result.entry,
     input: input,
     parent: none(WorkID),
     resume: Resume[A](kind: rk_finished)
   ))
-  echo "running work plan"
+  echo "runtime: run work plan"
   run_work_plan(result)
+  echo "runtime: execution complete"
+  dump result.finished
+  dump result.failed
+  dump result.nodes.len
 
 proc execute_flows*[A](top_level_flows: seq[Flow[A]]) =
   ## Compatibility entry point used by the current generated solve wrapper.

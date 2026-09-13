@@ -1,7 +1,8 @@
 {.experimental: "callOperator".}
 
-import std/macros
+import std/[deques, json, macros, sugar]
 import vecherinka
+import codex_json
 
 type
   ImplementationRequest = distinct string
@@ -11,6 +12,34 @@ type
     case ok: bool
     of true: discard
     of false: issues: Issues
+
+proc `$`(value: Location): string {.borrow.}
+proc `$`(value: Codebase): string {.borrow.}
+proc `$`(value: Issues): string {.borrow.}
+
+proc debug_generated_transport[A](
+    context: RuntimeContext[A];
+    request_id: RequestId;
+    spec: LlmCallSpec[A]
+) =
+  echo "test: generated transport called"
+  dump request_id
+  dump spec.output_kind
+  dump spec.typed_context
+  dump spec.tools.len
+  doAssert spec.tools.len > 0
+  doAssert not spec.materialize.isNil
+
+  var event: RuntimeEvent[A]
+  event.kind = rev_model_artifact
+  event.request_id = request_id
+  new(event.artifact)
+  event.artifact[] = spec.materialize(
+    spec.output_kind,
+    LlmOutput(tool_name: "debug_return", arguments: newJObject())
+  )
+  event.has_artifact = true
+  addLast(context.events, event)
 
 const cheap = "gpt-5.6-luna".minimal
 
@@ -33,4 +62,6 @@ let implementation_request = ImplementationRequest("")
 let codebase = Codebase(Location(""))
 let issues = Issues(@[""])
 
-solve((codebase, issues))
+echo "test: calling generated solve"
+solve((codebase, issues), debug_generated_transport)
+echo "test: generated solve returned"
