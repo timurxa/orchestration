@@ -20,11 +20,11 @@ const cheap = "gpt-5.6-luna".medium
 
 const manual_agent_prompts = AgentPromptTemplates(
   developer_instructions: checked_prompt(
-    "Complete task. Call finish_work exactly once when done."),
+    "Complete task. Call finish_work exactly once when done. Never narrate."),
   goal: checked_prompt(
-    "Complete task. Call `finish_work` exactly once after completion. Put final result in finish_work arguments."),
+    "Complete task. Call `finish_work` exactly once after completion. Put final result in finish_work arguments. Never narrate."),
   turn_prompt: checked_prompt(
-    "$task\n\nComplete task. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
+    "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
     "task", "input", "working_dir", "runtime_dir"),
   finish_work_description: checked_prompt(
     "Submit final structured result. Call exactly once when task is complete."))
