@@ -882,3 +882,38 @@ suite "artifact_tree generated output verifier":
     check variant.ok
     check variant.value.kind == tkText
     check variant.value.text == "v"
+
+suite "runtime failure containment":
+  test "unknown dynamic tool fails plan without escaping coordinator":
+    var runtime = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))
+    runtime.state = new_runtime_state()
+    runtime.state.agents["agent"] = Agent(
+      id: "agent",
+      thread_id: Nullable[string](has_value: true, value: "thread"),
+      turn_id: none(string),
+      default_effort: re_low,
+      state: as_working,
+      last_error: NullableOption[string](state: nos_none),
+      tools: @[])
+
+    var plan = WorkPlan[JsonNode](
+      context: new_runtime_context[JsonNode]())
+    var messenger = new_global_event_messenger()
+    try:
+      handle_global_event(
+        plan,
+        messenger,
+        runtime,
+        GlobalEvent(
+          kind: gek_stdout_line,
+          message: "{\"id\":7,\"method\":\"item/tool/call\",\"params\":{" &
+            "\"arguments\":{},\"callId\":\"call-7\",\"threadId\":\"thread\"," &
+            "\"tool\":\"finish_wrok\",\"turnId\":\"turn\"}}"))
+      check plan.failed
+      check plan.finished
+      check plan.failure_message.get ==
+        "codex event failed: unknown dynamic tool: finish_wrok"
+      check runtime.server_requests.len == 0
+      check runtime.state.agents["agent"].state == as_error
+    finally:
+      deallocShared(runtime)

@@ -1685,7 +1685,11 @@ proc handle_global_event[A](
         log_fields(("error", %event.message))
       else:
         nil)
-    messenger.handle_global_event(runtime, event)
+    try:
+      messenger.handle_global_event(runtime, event)
+    except CatchableError as error:
+      plan.fail_runtime("codex event failed: " & error.msg)
+      return
     if event.kind == gek_stdout_line:
       advance_agent_starts(plan, runtime)
     if event.kind == gek_stdout_line and not runtime.isNil and

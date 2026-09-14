@@ -359,6 +359,9 @@ proc apply_dynamic_tool_call*(state: var RuntimeState; request: ServerRequest) =
     params: params
   ))
 
+proc accept_tool_response*(runtime: ptr CodexRuntime; request_id: RequestId;
+    success: bool; content_items: seq[DynamicToolContentItem])
+
 proc handle_message*(runtime: ptr CodexRuntime; message: Message) =
   case message.kind:
   of mk_request:
@@ -367,7 +370,35 @@ proc handle_message*(runtime: ptr CodexRuntime; message: Message) =
     apply_server_request(runtime.state, message.server_request)
     case message.server_request.kind:
     of sr_tool_call:
-      apply_dynamic_tool_call(runtime.state, message.server_request)
+      try:
+        apply_dynamic_tool_call(runtime.state, message.server_request)
+      except CatchableError as error:
+        ## External tool requests must receive a response even when the model
+        ## names a tool that this agent does not expose.
+        if runtime.process.isNil:
+          discard remove_server_request(
+            runtime.state,
+            message.server_request.id)
+        else:
+          try:
+            accept_tool_response(
+              runtime,
+              message.server_request.id,
+              false,
+              @[dynamic_tool_text(error.msg)])
+          except CatchableError:
+            discard remove_server_request(
+              runtime.state,
+              message.server_request.id)
+            raise
+        let agent_id = find_agent_for_thread(
+          runtime.state,
+          message.server_request.params.tool_call.thread_id)
+        if agent_id.isSome:
+          var agent = runtime.state.agents[agent_id.get]
+          set_agent_error(agent, error.msg)
+          runtime.state.agents[agent_id.get] = agent
+        raise
     of sr_unknown:
       send_server_response(runtime, ServerResponse(
         id: message.server_request.id,
@@ -406,9 +437,6 @@ proc handle_message*(runtime: ptr CodexRuntime; message: Message) =
 proc accept_json*(runtime: ptr CodexRuntime; node: JsonNode): Message =
   result = parse_message(node, runtime.pending)
   handle_message(runtime, result)
-
-proc accept_tool_response*(runtime: ptr CodexRuntime; request_id: RequestId;
-    success: bool; content_items: seq[DynamicToolContentItem])
 
 proc accept_tool_response*(runtime: ptr CodexRuntime; context: ToolCallContext;
     success: bool; content_items: seq[DynamicToolContentItem]) =
