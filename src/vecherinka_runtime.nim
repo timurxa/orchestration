@@ -24,6 +24,13 @@ type
     model*: string
     effort*: ReasoningEffort
 
+  AgentPromptTemplates* = object
+    ## Prompt text supplied by the application for thread creation and turns.
+    ## Named substitutions are checked by `checked_prompt` when used from the
+    ## comptime façade.
+    developer_instructions*: string
+    turn_prompt*: string
+
   FlowKind* = enum
     fk_top,
     fk_model,
@@ -136,6 +143,7 @@ type
   LlmCallSpec*[A] = object
     profile*: ProfileSpec
     prompt*: string
+    prompt_templates*: AgentPromptTemplates
     materialized_input*: string
     runtime_dir*: Path
     working_dir*: Path
@@ -286,6 +294,14 @@ type
     finished*: bool
     failed*: bool
     failure_message*: Option[string]
+
+const default_agent_prompt_templates* = AgentPromptTemplates(
+  developer_instructions: "Complete task. Call finish_work exactly once when done.",
+  turn_prompt: "$task\n\nComplete task. Call finish_work exactly once when done." &
+    "\nYou may modify only: $working_dir" &
+    "\nLocation values are paths relative to: $runtime_dir" &
+    "\nEvery Location must name an existing file or directory inside the working directory." &
+    "$input")
 
 proc runtime_log*[A](context: RuntimeContext[A]; event, component: string;
     fields: JsonNode = nil) =
@@ -1137,16 +1153,22 @@ proc default_llm_transport[A](
     working_dir: spec.working_dir,
     tools: spec.tools))
 
+proc format_agent_prompt[A](template_text: string; spec: LlmCallSpec[A]): string =
+  ## All supported names are supplied, so a checked template cannot fail here.
+  let input = if spec.materialized_input.len == 0:
+    ""
+  else:
+    "\n\ninput:\n" & spec.materialized_input
+  template_text.format(
+    "task", spec.prompt,
+    "input", input,
+    "working_dir", $spec.working_dir,
+    "runtime_dir", $spec.runtime_dir,
+    "model", spec.profile.model,
+    "effort", $spec.profile.effort)
+
 proc llm_turn_prompt[A](spec: LlmCallSpec[A]): string =
-  ## Generic wrapper avoids copying LlmCallSpec through erased boundaries.
-  result = spec.prompt
-  result.add("\n\nComplete task. Call finish_work exactly once when done.")
-  result.add("\nYou may modify only: " & $spec.working_dir)
-  result.add("\nLocation values are paths relative to: " & $spec.runtime_dir)
-  result.add("\nEvery Location must name an existing file or directory inside the working directory.")
-  if spec.materialized_input.len != 0:
-    result.add("\n\ninput:\n")
-    result.add(spec.materialized_input)
+  format_agent_prompt(spec.prompt_templates.turn_prompt, spec)
 
 proc enqueue_agent_error[A](context: RuntimeContext[A]; request_id: RequestId;
     message: string) =
@@ -1178,7 +1200,9 @@ proc begin_agent_creation[A](
       event.agent_id,
       event.model,
       event.tools,
-      "Complete task. Call finish_work exactly once when done.",
+      format_agent_prompt(
+        pending.spec.prompt_templates.developer_instructions,
+        pending.spec),
       event.effort,
       $event.working_dir)
     pending.start_request_id = some(start_request_id)

@@ -1,7 +1,7 @@
 ## Typed source syntax, compile-time IR, and lowering.
 ## Included by `vecherinka.nim`; import the façade for public use.
 
-import std/[macros, assertions, options]
+import std/[macros, assertions, options, strutils]
 import fusion/matching
 import it_projection, lift_pattern_typed
 import schematic
@@ -221,6 +221,7 @@ type
     flow_procs: seq[FlowProcInfo]
     flow_pairs: seq[FlowPair]
     artifact_registry: ArtifactRegistry
+    prompt_templates: NimNode
 
   FlowRefInfo = object
     id: int
@@ -456,6 +457,70 @@ proc model_call_parts(
     true
   else:
     false
+
+const prompt_substitution_names = [
+  "task", "input", "working_dir", "runtime_dir", "model", "effort"
+]
+
+proc prompt_name_start(value: char): bool =
+  value in {'a'..'z', 'A'..'Z', '_'}
+
+proc prompt_name_char(value: char): bool =
+  prompt_name_start(value) or value in {'0'..'9'}
+
+proc known_prompt_name(name: string): bool =
+  for known in prompt_substitution_names:
+    if cmpIgnoreStyle(name, known) == 0:
+      return true
+  false
+
+proc contains_prompt_name(names: seq[string]; wanted: string): bool =
+  for name in names:
+    if cmpIgnoreStyle(name, wanted) == 0:
+      return true
+  false
+
+proc scan_prompt_names(text: string): tuple[names: seq[string], issue: string] =
+  ## Scan exactly the named subset accepted by `strutils.format`.
+  var index = 0
+  while index < text.len:
+    if text[index] != '$':
+      inc index
+      continue
+    if index + 1 >= text.len:
+      return (result.names, "trailing '$'")
+    let next = text[index + 1]
+    if next == '$':
+      inc index, 2
+      continue
+    if not prompt_name_start(next):
+      return (result.names,
+        "expected named placeholder after '$' at index " & $index)
+    var last = index + 2
+    while last < text.len and prompt_name_char(text[last]):
+      inc last
+    result.names.add(text.substr(index + 1, last - 1))
+    index = last
+
+macro checked_prompt*(prompt_text: untyped; required: varargs[untyped]): untyped =
+  if prompt_text.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    error("checked_prompt requires a string literal", prompt_text)
+  let text = prompt_text.strVal
+  let scanned = scan_prompt_names(text)
+  if scanned.issue.len != 0:
+    error("invalid checked_prompt: " & scanned.issue, prompt_text)
+  for name in scanned.names:
+    if not known_prompt_name(name):
+      error("unknown checked_prompt substitution: $" & name, prompt_text)
+  for expected in required:
+    if expected.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+      error("checked_prompt names must be string literals", expected)
+    let name = expected.strVal
+    if not known_prompt_name(name):
+      error("unknown checked_prompt required substitution: $" & name, expected)
+    if not contains_prompt_name(scanned.names, name):
+      error("checked_prompt missing required substitution: $" & name, prompt_text)
+  newLit(text)
 
 proc fanout_parts(
     node, flow_type: NimNode;
@@ -1387,12 +1452,14 @@ proc emit_model_materializer(
 
 proc emit_model_submitter(
     registry: ArtifactRegistry;
-    input_type, profile, prompt, output_kind_value, output_contract_expr,
+    input_type, profile, prompt, prompt_templates,
+    output_kind_value, output_contract_expr,
     materializer: NimNode
 ): NimNode =
   let artifact_name = registry.artifact_name
   let profile_expr = copyNimTree(profile)
   let prompt_expr = copyNimTree(prompt)
+  let prompt_templates_expr = copyNimTree(prompt_templates)
   let submit_context = genSym(nskParam, "model_context")
   let submit_request_id = genSym(nskParam, "model_request_id")
   let submit_input = genSym(nskParam, "model_input")
@@ -1460,6 +1527,7 @@ proc emit_model_submitter(
     LlmCallSpec[`artifact_name`](
       profile: `profile_expr`,
       prompt: `prompt_expr`,
+      prompt_templates: `prompt_templates_expr`,
       materialized_input: `materialized_input_value`,
       runtime_dir: `submit_context`.runtime_dir,
       working_dir: `submit_working_dir`,
@@ -1508,7 +1576,7 @@ proc emit_model_flow(artifact_name, submit: NimNode): NimNode =
 
 proc lower_model_call(
     registry: var ArtifactRegistry;
-    flow_type, profile, prompt: NimNode
+    flow_type, profile, prompt, prompt_templates: NimNode
 ): NimNode =
   let artifact_name = registry.artifact_name
   let input_type = copyNimTree(flow_type[1])
@@ -1518,7 +1586,8 @@ proc lower_model_call(
   let materializer = registry.emit_model_materializer(
     output_type, output_kind_value)
   let submit = registry.emit_model_submitter(
-    input_type, profile, prompt, output_kind_value, output_contract_expr,
+    input_type, profile, prompt, prompt_templates,
+    output_kind_value, output_contract_expr,
     materializer)
   emit_model_flow(artifact_name, submit)
 
@@ -1747,7 +1816,8 @@ proc lower_flow_expr(
     doAssert model_call_parts(node, flow_type, profile, prompt),
       "unsupported FlowSpec expression; expected model call, pure, lift, or >>>"
     result.head = lower_model_call(
-      context.artifact_registry, flow_type, profile, prompt)
+      context.artifact_registry, flow_type, profile, prompt,
+      context.prompt_templates)
   result.tail = result.head
 
 proc lower_flow_pair(
@@ -2250,8 +2320,11 @@ proc lower_lift(
       construct: `construct`
     )
 
-proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
+proc lower_vecherinka_runtime(
+    body, solve, prompt_templates: NimNode
+): NimNode =
   var context = FlowWalkContext()
+  context.prompt_templates = copyNimTree(prompt_templates)
   walk_flow_specs(body, context)
 
   collect_flow_declarations(body, context)
@@ -2327,9 +2400,16 @@ proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
   generated
 
 macro vecherinka_runtime*(solve: untyped; body: typed): untyped =
-  lower_vecherinka_runtime(body, solve)
+  lower_vecherinka_runtime(body, solve,
+    bindSym("default_agent_prompt_templates"))
 
-proc make_vecherinka(body, solve: NimNode): NimNode =
+macro vecherinka_runtime*(solve, prompt_templates: untyped;
+    body: typed): untyped =
+  lower_vecherinka_runtime(body, solve, prompt_templates)
+
+proc make_vecherinka(
+    body, solve, prompt_templates: NimNode
+): NimNode =
   var refs, procs = newStmtList()
 
   doAssert solve.isNil or solve.kind in {nnkIdent, nnkSym, nnkAccQuoted},
@@ -2365,8 +2445,13 @@ proc make_vecherinka(body, solve: NimNode): NimNode =
 
   let solve_name = newLit(solve.strVal)
   result = quote do:
-    vecherinka_runtime(`solve_name`):
+    vecherinka_runtime(`solve_name`, `prompt_templates`):
       `refs`
 
 macro vecherinka*(solve, body: untyped): untyped =
-  make_vecherinka(body, solve)
+  make_vecherinka(body, solve,
+    bindSym("default_agent_prompt_templates"))
+
+macro vecherinka*(solve, prompt_templates: untyped;
+    body: untyped): untyped =
+  make_vecherinka(body, solve, prompt_templates)

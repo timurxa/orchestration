@@ -18,11 +18,23 @@ proc `$`(value: Issues): string {.borrow.}
 
 const cheap = "gpt-5.6-luna".minimal
 
+const manual_agent_prompts = AgentPromptTemplates(
+  developer_instructions: checked_prompt(
+    "Complete task. Call finish_work exactly once when done."),
+  turn_prompt: checked_prompt(
+    """$task
+
+Complete task. Call finish_work exactly once when done.
+You may modify only: $working_dir
+Location values are paths relative to: $runtime_dir
+Every Location must name an existing file or directory inside the working directory.$input""",
+    "task", "input", "working_dir", "runtime_dir"))
+
 type
   Simple = object
     message: string
 
-expandMacros: vecherinka(solve):
+expandMacros: vecherinka(solve, manual_agent_prompts):
   > basic Simple ~> Simple {.entry.}:
     cheap[Simple, Simple]("Write a welcome message into 'message' field.")
   # > fix (Codebase, Issues) ~> Codebase:

@@ -661,6 +661,23 @@ expandMacros: vecherinka(bad):
     cheap[int, void]("return nothing")
 """, "void")
 
+  test "prompt templates reject missing and unknown substitutions at comptime":
+    check compile_reject("""
+import std/macros
+include vecherinka
+const bad = checked_prompt("$task", "input")
+""", "missing required substitution")
+    check compile_reject("""
+import std/macros
+include vecherinka
+const bad = checked_prompt("$unknown")
+""", "unknown checked_prompt substitution")
+    check compile_reject("""
+import std/macros
+include vecherinka
+const bad = checked_prompt("$#", "task")
+""", "expected named placeholder")
+
   test "Schematic else-branch rejection stays outside artifact_tree":
     check compile_reject("""
 import std/macros
@@ -680,6 +697,21 @@ static:
 """, "else` branches are not supported")
 
 suite "artifact_tree generated output verifier":
+  test "named prompt substitutions render runtime values":
+    let spec = LlmCallSpec[TestOutput](
+      profile: ProfileSpec(model: "test-model", effort: re_low),
+      prompt: "do task",
+      prompt_templates: default_agent_prompt_templates,
+      materialized_input: "input.text: string = value\n",
+      runtime_dir: Path("/runtime"),
+      working_dir: Path("/work"),
+      tools: @[],
+      output_kind: 0,
+      materialize: nil)
+    check format_agent_prompt(
+      "$task|$input|$working_dir|$runtime_dir|$model|$effort", spec) ==
+      "do task|\n\ninput:\ninput.text: string = value\n|/work|/runtime|test-model|re_low"
+
   test "generated contracts emit schemas for verifier and transport":
     let object_schema = toJsonSchema(output_contract(TestOutput))
     check object_schema["type"].getStr == "object"
