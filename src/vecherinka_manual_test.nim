@@ -20,27 +20,26 @@ const cheap = "gpt-5.6-luna".medium
 
 const manual_agent_prompts = AgentPromptTemplates(
   developer_instructions: checked_prompt(
-    "Manual developer instructions. Finish task through finish_work."),
+    "Complete task. Call finish_work exactly once when done."),
   goal: checked_prompt(
-    "Manual goal: complete task; call finish_work exactly once with final result."),
+    "Complete task. Call `finish_work` exactly once after completion. Put final result in finish_work arguments."),
   turn_prompt: checked_prompt(
-    """$task
-
-Manual turn instructions.
-Working directory: $working_dir
-Runtime directory: $runtime_dir
-Input: $input""",
+    "$task\n\nComplete task. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
     "task", "input", "working_dir", "runtime_dir"),
   finish_work_description: checked_prompt(
-    "Manual finish_work description: submit final structured result once."))
+    "Submit final structured result. Call exactly once when task is complete."))
 
 type
   Simple = object
-    message: string
+    number: int
 
 expandMacros: vecherinka(solve, manual_agent_prompts):
-  > basic Simple ~> Simple {.entry.}:
-    cheap[Simple, Simple]("Write a welcome message into 'message' field.")
+  > decrement Simple ~> Simple:
+    cheap[Simple, Simple]("Output a new result with the input number decremented by 1 via the finish work tool call. Do not finish your turn before using the finish work tool.")
+  > top_level Simple ~> Simple {.entry.}:
+    so(Simple, Simple, input) do:
+      if input.number <= 0: pure(input)
+      else: input >>> decrement >>> top_level
   # > fix (Codebase, Issues) ~> Codebase:
   #   cheap[(Codebase, Issues), Codebase]("Read the issues and fix them in the codebase.")
   #
@@ -58,7 +57,7 @@ expandMacros: vecherinka(solve, manual_agent_prompts):
 let implementation_request = ImplementationRequest("")
 let codebase = Codebase(Location(""))
 let issues = Issues(@[""])
-let simple = Simple(message: "Include 'duck' in your answer!!")
+let simple = Simple(number: 4)
 let debug_sink: LogSink = proc(line: string) =
   echo "log: " & line
 let debug_logger = new_structured_logger(
@@ -67,4 +66,4 @@ let debug_logger = new_structured_logger(
 
 echo "test: calling generated solve"
 let debug_value = solve(simple, logger = debug_logger)
-echo "test: generated solve returned ", debug_value.message
+echo "test: generated solve returned ", debug_value.number

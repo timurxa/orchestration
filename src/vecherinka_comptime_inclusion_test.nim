@@ -1138,6 +1138,83 @@ suite "runtime failure containment":
     finally:
       deallocShared(runtime)
 
+  test "protocol stdout log preserves complete message":
+    var lines: seq[string] = @[]
+    let logger = new_structured_logger(
+      proc(line: string) = lines.add(line),
+      ring_capacity = 2)
+    var plan = WorkPlan[JsonNode](
+      context: new_runtime_context[JsonNode](logger = logger))
+    var messenger = new_global_event_messenger()
+    var runtime = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))
+    runtime.state = new_runtime_state()
+    let message = "{\"id\":99,\"result\":{\"text\":\"quote: \\\"\"}}"
+    try:
+      handle_global_event(
+        plan,
+        messenger,
+        runtime,
+        GlobalEvent(kind: gek_stdout_line, message: message))
+      let record = parseJson(lines[0])
+      check record["event"].getStr == "protocol.stdout"
+      check record["fields"]["bytes"].getInt == message.len
+      check record["fields"]["message"].getStr == message
+    finally:
+      deallocShared(runtime)
+
+  test "pending agent survives stdout before creation event":
+    let context = new_runtime_context[JsonNode]()
+    open_global_events(context)
+    var plan = WorkPlan[JsonNode](context: context)
+    var messenger = new_global_event_messenger()
+    var runtime = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))
+    runtime.state = new_runtime_state()
+    let request_id = RequestId(kind: rid_integer, integer_value: 0)
+    plan.model_requests[request_id_key(request_id)] =
+      Invocation[JsonNode](
+        flow: nil,
+        input_id: 0,
+        destination: nil,
+        output_meta: none(ArtifactMeta))
+    context.pending_agent_starts[request_id_key(request_id)] =
+      PendingAgentStart[JsonNode](
+        model_request_id: request_id,
+        agent_id: "pending-agent",
+        start_request_id: none(RequestId),
+        goal_request_id: none(RequestId),
+        turn_request_id: none(RequestId),
+        spec: LlmCallSpec[JsonNode]())
+    try:
+      ## Proof setup: ID is reserved, but gek_create_agent has not yet
+      ## installed the runtime agent or start request.
+      handle_global_event(
+        plan,
+        messenger,
+        runtime,
+        GlobalEvent(kind: gek_stdout_line, message: "{\"id\":99,\"result\":{}}"))
+      check context.pending_agent_starts.hasKey(request_id_key(request_id))
+      check not runtime.state.agents.hasKey("pending-agent")
+
+      ## Creation event establishes barrier; subsequent advancement can now
+      ## validate runtime agent state without deleting valid pending context.
+      handle_global_event(
+        plan,
+        messenger,
+        runtime,
+        GlobalEvent(
+          kind: gek_create_agent,
+          model_request_id: request_id,
+          agent_id: "pending-agent",
+          model: "test-model",
+          effort: re_low,
+          working_dir: Path(""),
+          tools: @[]))
+      check context.pending_agent_starts[request_id_key(request_id)].start_request_id.isSome
+      check runtime.state.agents.hasKey("pending-agent")
+    finally:
+      close_global_events(context)
+      deallocShared(runtime)
+
   test "unknown dynamic tool fails plan without escaping coordinator":
     var runtime = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))
     runtime.state = new_runtime_state()

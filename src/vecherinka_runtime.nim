@@ -1321,6 +1321,12 @@ proc advance_agent_starts[A](
   var completed: seq[string] = @[]
   for key, pending_value in plan.context.pending_agent_starts.pairs:
     var pending = pending_value
+    ## start_request_id is the creation barrier: before gek_create_agent is
+    ## handled, runtime.agents must not contain this reserved ID yet. Waiting
+    ## here preserves the pending context across unrelated stdout events;
+    ## later phases may treat a missing agent as a real disappearance.
+    if pending.start_request_id.isNone:
+      continue
     if not runtime.agents.hasKey(pending.agent_id):
       enqueue_agent_error(
         plan.context,
@@ -1776,15 +1782,21 @@ proc handle_global_event[A](
     of gek_process_exit: "process.exit"
     of gek_reader_error: "reader.error"
     else: "transport.event"
-    plan.context.runtime_log(
-      event_name,
-      "codex",
-      if event.kind == gek_stdout_line or event.kind == gek_stderr_line:
+    let transport_fields =
+      if event.kind == gek_stdout_line:
+        log_fields(
+          ("bytes", %event.message.len),
+          ("message", %event.message))
+      elif event.kind == gek_stderr_line:
         log_fields(("bytes", %event.message.len))
       elif event.kind == gek_reader_error:
         log_fields(("error", %event.message))
       else:
-        nil)
+        nil
+    plan.context.runtime_log(
+      event_name,
+      "codex",
+      transport_fields)
     try:
       messenger.handle_global_event(runtime, event)
     except CatchableError as error:
