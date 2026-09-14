@@ -28,9 +28,11 @@ proc log_fields*(pairs: varargs[(string, JsonNode)]): JsonNode =
   for pair in pairs:
     result[pair[0]] = if pair[1].isNil: newJNull() else: pair[1]
 
-proc new_log_file_sink*(path: string): LogFileSink =
+proc new_log_file_sink*(path: string; append: bool = false): LogFileSink =
+  ## One log file normally belongs to one run. Use append=true only when
+  ## deliberately building a multi-run stream and filter it by run_id.
   new result
-  result.file = open(path, fmAppend)
+  result.file = open(path, if append: fmAppend else: fmWrite)
   result.closed = false
 
 proc sink*(file_sink: LogFileSink): LogSink =
@@ -55,7 +57,10 @@ proc new_structured_logger*(sink: LogSink = nil; run_id: string = "";
     raise newException(ValueError, "ring_capacity cannot be negative")
   new result
   result.sink = sink
-  result.run_id = run_id
+  result.run_id = if run_id.len == 0:
+    "run-" & $getMonoTime().ticks
+  else:
+    run_id
   result.enabled = true
   result.max_event_bytes = max_event_bytes
   result.ring_capacity = ring_capacity

@@ -15,9 +15,12 @@ type
   ArtifactMeta* = object
     id*: ArtifactID
     artifact_dir*: Path
-    ## Direct artifacts used to produce this artifact. Empty means no tracked
-    ## predecessor, including runtime `raw` and `it` artifacts.
+    ## Direct artifacts used to produce this artifact.
     predecessor_ids*: seq[ArtifactID]
+    ## Optional provenance context for human-readable graph output.
+    operation*: string
+    flow_kind*: string
+    request_id*: string
 
   ArtifactRecord*[A] = object
     data*: A
@@ -817,7 +820,10 @@ proc create_run_directory*(source_root: Path): Path =
 
 proc reserve_artifact_meta*[A](
     context: RuntimeContext[A];
-    predecessor_ids: seq[ArtifactID] = @[]
+    predecessor_ids: seq[ArtifactID] = @[];
+    operation: string = "";
+    flow_kind: string = "";
+    request_id: string = ""
 ): ArtifactMeta =
   if context.isNil or $context.run_dir == "":
     raise newException(ValueError, "runtime context has no run directory")
@@ -826,7 +832,10 @@ proc reserve_artifact_meta*[A](
     id: context.next_artifact_id,
     artifact_dir: context.run_dir /
       Path("artifact-" & $context.next_artifact_id),
-    predecessor_ids: predecessor_ids)
+    predecessor_ids: predecessor_ids,
+    operation: operation,
+    flow_kind: flow_kind,
+    request_id: request_id)
   createDir($result.artifact_dir)
   context.runtime_log(
     "artifact.reserve",
@@ -834,14 +843,21 @@ proc reserve_artifact_meta*[A](
     log_fields(
       ("artifact_id", %result.id),
       ("artifact_dir", %($lastPathPart(result.artifact_dir))),
-      ("predecessor_ids", %result.predecessor_ids)))
+      ("predecessor_ids", %result.predecessor_ids),
+      ("operation", %result.operation),
+      ("flow_kind", %result.flow_kind),
+      ("request_id", %result.request_id)))
 
 proc allocate_artifact_meta*[A](
     context: RuntimeContext[A];
-    predecessor_ids: seq[ArtifactID] = @[]
+    predecessor_ids: seq[ArtifactID] = @[];
+    operation: string = "";
+    flow_kind: string = "";
+    request_id: string = ""
 ): ArtifactMeta =
   ## Compatibility name for callers that only reserve identity and root.
-  reserve_artifact_meta(context, predecessor_ids)
+  reserve_artifact_meta(
+    context, predecessor_ids, operation, flow_kind, request_id)
 
 proc register_artifact*[A](
     context: RuntimeContext[A];
@@ -855,13 +871,18 @@ proc register_artifact*[A](
     raise newException(ValueError, "artifact ID already registered: " & $meta.id)
   context.artifacts[meta.id] = ArtifactRecord[A](data: data, meta: meta)
   result = meta.id
+  ## One bounded commit event is canonical provenance input. Consumers can
+  ## reconstruct the graph from these records without a final giant snapshot.
   context.runtime_log(
     "artifact.commit",
     "vecherinka",
     log_fields(
       ("artifact_id", %meta.id),
       ("artifact_dir", %($lastPathPart(meta.artifact_dir))),
-      ("predecessor_ids", %meta.predecessor_ids)))
+      ("predecessor_ids", %meta.predecessor_ids),
+      ("operation", %meta.operation),
+      ("flow_kind", %meta.flow_kind),
+      ("request_id", %meta.request_id)))
 
 proc lookup_artifact*[A](
     context: RuntimeContext[A];
@@ -876,9 +897,13 @@ proc lookup_artifact*[A](
 proc register_generated_artifact[A](
     context: RuntimeContext[A];
     data: A;
-    predecessor_ids: seq[ArtifactID] = @[]
+    predecessor_ids: seq[ArtifactID] = @[];
+    operation: string = "";
+    flow_kind: string = "";
+    request_id: string = ""
 ): ArtifactID =
-  let meta = reserve_artifact_meta(context, predecessor_ids)
+  let meta = reserve_artifact_meta(
+    context, predecessor_ids, operation, flow_kind, request_id)
   register_artifact(context, data, meta)
 
 proc materialized_name_used(names: seq[string]; name: string): bool =
@@ -1134,7 +1159,11 @@ proc finish_join[A](
     if slot.isSome:
       predecessor_ids.add(slot.get)
   let output_id = register_generated_artifact(
-    plan.context, output, predecessor_ids)
+    plan.context,
+    output,
+    predecessor_ids,
+    operation = if state.kind == jk_lift: "join.lift" else: "join.fanout",
+    flow_kind = if state.kind == jk_lift: "fk_lift" else: "fk_fanout")
   plan.context.runtime_log(
     "join.close",
     "vecherinka",
@@ -1474,7 +1503,12 @@ proc suspend_model[A](
 ) =
   let input_record = lookup_artifact(plan.context, input_id)
   let request_id = allocate_request_id(plan.context)
-  let output_meta = reserve_artifact_meta(plan.context, @[input_id])
+  let output_meta = reserve_artifact_meta(
+    plan.context,
+    @[input_id],
+    operation = "model",
+    flow_kind = flow_kind_text(flow),
+    request_id = request_id_key(request_id))
   let invocation = Invocation[A](
     flow: flow,
     input_id: input_id,
@@ -1554,7 +1588,11 @@ proc begin_lift[A](
 
   for work in works:
     let input_artifact_id = register_generated_artifact(
-      plan.context, work.input, @[input_id])
+      plan.context,
+      work.input,
+      @[input_id],
+      operation = "lift.branch",
+      flow_kind = "fk_lift")
     enqueue_ready(plan, new_invocation(
       flow.inner,
       input_artifact_id,
@@ -1593,11 +1631,21 @@ proc handle_invocation*[A](
       current = resolve_root(plan.roots, current.name)
     of fk_raw:
       value = current.value
-      value_id = register_generated_artifact(plan.context, value)
+      value_id = register_generated_artifact(
+        plan.context,
+        value,
+        @[value_id],
+        operation = "raw",
+        flow_kind = "fk_raw")
       current = current.continuation
     of fk_it:
       value = current.projector(value)
-      value_id = register_generated_artifact(plan.context, value)
+      value_id = register_generated_artifact(
+        plan.context,
+        value,
+        @[value_id],
+        operation = "it",
+        flow_kind = "fk_it")
       current = current.continuation
     of fk_model:
       suspend_model(
@@ -1902,7 +1950,12 @@ proc execute_flows*[A](
     result = init_work_plan(top_level_flows, context)
     plan_initialized = true
     let input_meta = ArtifactMeta(
-      id: 0, artifact_dir: source_root, predecessor_ids: @[])
+      id: 0,
+      artifact_dir: source_root,
+      predecessor_ids: @[],
+      operation: "input",
+      flow_kind: "entry",
+      request_id: "")
     let input_id = register_artifact(context, input, input_meta)
     enqueue_ready(result, new_invocation(
       result.entry,

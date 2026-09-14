@@ -33,7 +33,7 @@ type
   Simple = object
     number: int
 
-expandMacros: vecherinka(solve, manual_agent_prompts):
+vecherinka(solve, manual_agent_prompts):
   > decrement Simple ~> Simple:
     cheap[Simple, Simple]("Output a new result with the input number decremented by 1 via the finish work tool call. Do not finish your turn before using the finish work tool.")
   > top_level Simple ~> Simple {.entry.}:
@@ -58,12 +58,14 @@ let implementation_request = ImplementationRequest("")
 let codebase = Codebase(Location(""))
 let issues = Issues(@[""])
 let simple = Simple(number: 4)
-let debug_sink: LogSink = proc(line: string) =
-  echo "log: " & line
+let log_file = new_log_file_sink("manual-test.jsonl")
 let debug_logger = new_structured_logger(
-  debug_sink,
+  log_file.sink,
   run_id = "manual-test")
 
-echo "test: calling generated solve"
-let debug_value = solve(simple, logger = debug_logger)
-echo "test: generated solve returned ", debug_value.number
+try:
+  echo "test: calling generated solve"
+  let debug_value = solve(simple, logger = debug_logger)
+  echo "test: generated solve returned ", debug_value.number
+finally:
+  log_file.close()

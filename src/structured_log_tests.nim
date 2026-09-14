@@ -2,6 +2,10 @@ import std/[json, os, strutils, unittest]
 import structured_log
 
 suite "structured logger":
+  test "assigns a run ID when omitted":
+    let logger = new_structured_logger()
+    check logger.run_id.startsWith("run-")
+
   test "emits ordered JSONL records":
     var lines: seq[string] = @[]
     let logger = new_structured_logger(
@@ -62,9 +66,16 @@ suite "structured logger":
 
   test "file sink writes and closes":
     let path = getTempDir() / "structured-log-test.jsonl"
+    writeFile(path, "stale-run\n")
     let file_sink = new_log_file_sink(path)
     let logger = new_structured_logger(file_sink.sink, "run-file")
     discard logger.emit("run.start", "test")
     file_sink.close()
     check readFile(path).contains("run.start")
+    check not readFile(path).contains("stale-run")
+    let append_sink = new_log_file_sink(path, append = true)
+    let append_logger = new_structured_logger(append_sink.sink, "run-file-2")
+    discard append_logger.emit("run.start", "test")
+    append_sink.close()
+    check readFile(path).count("run.start") == 2
     removeFile(path)
