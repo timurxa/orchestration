@@ -126,9 +126,12 @@ type
     ## is an opaque integer encoded as a pointer and is never dereferenced.
     id*: uint64
     context*: pointer
+    runtime*: ptr CodexRuntime
+    liveness*: CodexRuntimeLiveness
     request_id*: RequestId
     output_kind*: int
     materializer*: pointer
+    retired*: bool
 
   ModelMaterialization*[A] = object
     case ok*: bool
@@ -269,6 +272,7 @@ type
     next_artifact_id*: ArtifactID
     codex_runtime*: ptr CodexRuntime
     pending_agent_starts*: Table[string, PendingAgentStart[A]]
+    model_turn_requests*: Table[string, string]
 
   ModelSubmitter*[A] = proc(
     context: RuntimeContext[A];
@@ -333,8 +337,8 @@ proc llm_tool_handle(binding_id: uint64): pointer {.inline.} =
 proc llm_tool_binding_id(handle: pointer): uint64 {.inline.} =
   cast[uint64](cast[uint](handle))
 
-proc register_llm_tool_binding*(context: pointer; request_id: RequestId;
-    output_kind: int; materializer: pointer): pointer =
+proc register_llm_tool_binding*(context: pointer; runtime: ptr CodexRuntime;
+    request_id: RequestId; output_kind: int; materializer: pointer): pointer =
   ## IDs are never reused: a stale DynamicTool handle can only miss lookup.
   if next_llm_tool_binding_id == high(uint64):
     raise newException(OverflowDefect, "LLM tool binding ID space exhausted")
@@ -343,9 +347,12 @@ proc register_llm_tool_binding*(context: pointer; request_id: RequestId;
   llm_tool_bindings[binding_id] = LlmToolBinding(
     id: binding_id,
     context: context,
+    runtime: runtime,
+    liveness: if runtime.isNil: nil else: runtime.liveness,
     request_id: request_id,
     output_kind: output_kind,
-    materializer: materializer)
+    materializer: materializer,
+    retired: false)
   llm_tool_handle(binding_id)
 
 proc lookup_llm_tool_binding*(handle: pointer): Option[LlmToolBinding] =
@@ -356,15 +363,25 @@ proc lookup_llm_tool_binding*(handle: pointer): Option[LlmToolBinding] =
   some(llm_tool_bindings[binding_id])
 
 proc retire_llm_tool_binding*(binding_id: uint64) =
-  llm_tool_bindings.del(binding_id)
+  if llm_tool_bindings.hasKey(binding_id):
+    var binding = llm_tool_bindings[binding_id]
+    binding.retired = true
+    binding.context = nil
+    llm_tool_bindings[binding_id] = binding
 
-proc retire_llm_tool_bindings*(context: pointer) =
+proc retire_llm_tool_bindings*(context: pointer; purge: bool = false) =
   var retired: seq[uint64] = @[]
   for binding_id, binding in llm_tool_bindings.pairs:
     if binding.context == context:
       retired.add(binding_id)
   for binding_id in retired:
-    llm_tool_bindings.del(binding_id)
+    if purge:
+      llm_tool_bindings.del(binding_id)
+    else:
+      var stale = llm_tool_bindings[binding_id]
+      stale.retired = true
+      stale.context = nil
+      llm_tool_bindings[binding_id] = stale
 
 proc open_global_events*[A](context: RuntimeContext[A]) =
   ## Open once before reader threads start; close only after all readers join.
@@ -590,7 +607,10 @@ proc start_codex_readers_impl(
     readers.error_started = true
   except CatchableError:
     var signal = 'x'
-    discard write(readers.stop_pipe[1], addr signal, 1)
+    if readers.output_started:
+      discard write(readers.stop_pipe[1], addr signal, 1)
+    if readers.error_started:
+      discard write(readers.stop_pipe[1], addr signal, 1)
     if readers.output_started:
       readers.output_thread.joinThread()
     if readers.error_started:
@@ -632,7 +652,10 @@ proc stop_codex_readers*(readers: var CodexReaders) =
   if not readers.active:
     return
   var signal = 'x'
-  discard write(readers.stop_pipe[1], addr signal, 1)
+  if readers.output_started:
+    discard write(readers.stop_pipe[1], addr signal, 1)
+  if readers.error_started:
+    discard write(readers.stop_pipe[1], addr signal, 1)
   if readers.output_started:
     readers.output_thread.joinThread()
   if readers.error_started:
@@ -758,6 +781,7 @@ proc new_runtime_context*[A](
   result.next_artifact_id = 0
   result.codex_runtime = nil
   result.pending_agent_starts = initTable[string, PendingAgentStart[A]]()
+  result.model_turn_requests = initTable[string, string]()
 
 proc create_run_directory*(source_root: Path): Path =
   ## Keep run state in a unique child of the program working directory.
@@ -1143,7 +1167,7 @@ proc default_llm_transport[A](
       error_message: "duplicate pending agent request"))
     return
 
-  let agent_id = "vecherinka-agent-" & key
+  let agent_id = context.codex_runtime.allocate_agent_id()
   context.pending_agent_starts[key] = PendingAgentStart[A](
     model_request_id: request_id,
     agent_id: agent_id,
@@ -1246,7 +1270,9 @@ proc submit_agent_turn[A](
       llm_turn_prompt(pending.spec),
       pending.spec.profile.effort)
     pending.turn_request_id = some(turn_request_id)
-    plan.context.pending_agent_starts[request_id_key(pending.model_request_id)] = pending
+    let model_key = request_id_key(pending.model_request_id)
+    plan.context.pending_agent_starts[model_key] = pending
+    plan.context.model_turn_requests[model_key] = request_id_key(turn_request_id)
     plan.context.runtime_log(
       "agent.turn.submit",
       "codex",
@@ -1275,21 +1301,40 @@ proc advance_agent_starts[A](
   var completed: seq[string] = @[]
   for key, pending_value in plan.context.pending_agent_starts.pairs:
     var pending = pending_value
+    if not runtime.agents.hasKey(pending.agent_id):
+      enqueue_agent_error(
+        plan.context,
+        pending.model_request_id,
+        "agent disappeared before model turn")
+      completed.add(key)
+      continue
+    if runtime.agents[pending.agent_id].state in {as_closed, as_error}:
+      enqueue_agent_error(
+        plan.context,
+        pending.model_request_id,
+        "agent closed before model turn")
+      completed.add(key)
+      continue
     if pending.turn_request_id.isSome:
       let turn_key = request_id_key(pending.turn_request_id.get)
       if not runtime.requests.hasKey(turn_key):
         continue
       let turn_request = runtime.requests[turn_key]
-      if turn_request.state == rs_failed:
+      if turn_request.state in {rs_failed, rs_interrupted}:
         enqueue_agent_error(
           plan.context,
           pending.model_request_id,
           if turn_request.error.isSome:
             turn_request.error.get
           else:
-            "agent turn failed")
+            if turn_request.state == rs_interrupted:
+              "agent turn interrupted"
+            else:
+              "agent turn failed")
         completed.add(key)
       elif turn_request.state == rs_completed:
+        if runtime.state.has_pending_server_request_for_agent(pending.agent_id):
+          continue
         enqueue_agent_error(
           plan.context,
           pending.model_request_id,
@@ -1545,8 +1590,18 @@ proc handle_runtime_event[A](
   case event.runtime_kind
   of rev_model_artifact:
     let key = request_id_key(event.request_id)
-    plan_assert(plan, plan.model_requests.hasKey(key),
-      "unknown model completion")
+    if not plan.model_requests.hasKey(key):
+      plan.context.runtime_log(
+        "model.quarantine",
+        "vecherinka",
+        log_fields(("request_id", %key), ("reason", %"unknown or duplicate")))
+      if event.tool_request_id.isSome and not runtime.isNil and
+          runtime.server_requests.hasKey(request_id_key(event.tool_request_id.get)):
+        runtime.accept_tool_response(
+          event.tool_request_id.get,
+          false,
+          @[dynamic_tool_text("duplicate or stale model completion")])
+      return
     let invocation = plan.model_requests[key]
     plan_assert(plan,
       not invocation.flow.isNil and invocation.flow.kind == fk_model,
@@ -1567,6 +1622,21 @@ proc handle_runtime_event[A](
     let can_ack_tool = event.tool_request_id.isSome and not runtime.isNil and
       runtime.server_requests.hasKey(
         request_id_key(event.tool_request_id.get))
+    if not runtime.isNil and plan.context.model_turn_requests.hasKey(key):
+      let turn_key = plan.context.model_turn_requests[key]
+      let stale = not runtime.requests.hasKey(turn_key) or
+        runtime.requests[turn_key].state in {rs_failed, rs_interrupted}
+      if stale:
+        plan.context.runtime_log(
+          "model.quarantine",
+          "vecherinka",
+          log_fields(("request_id", %key), ("reason", %"terminal turn")))
+        if can_ack_tool:
+          runtime.accept_tool_response(
+            event.tool_request_id.get,
+            false,
+            @[dynamic_tool_text("stale model completion")])
+        return
     if event.tool_request_id.isSome and event.output_tool_name != "finish_work":
       if can_ack_tool:
         runtime.accept_tool_response(
@@ -1613,9 +1683,10 @@ proc handle_runtime_event[A](
         event.tool_request_id.get,
         true,
         @[dynamic_tool_text(event.output_arguments)])
-    if event.tool_binding_id.isSome:
-      retire_llm_tool_binding(event.tool_binding_id.get)
+    ## Keep binding alive until context teardown. A queued duplicate callback
+    ## must still be able to send an idempotent response or be quarantined.
     plan.model_requests.del(key)
+    plan.context.model_turn_requests.del(key)
     if plan.context.pending_agent_starts.hasKey(key):
       plan.context.pending_agent_starts.del(key)
     let output_id = register_artifact(plan.context, artifact, output_meta)
@@ -1628,8 +1699,14 @@ proc handle_runtime_event[A](
     deliver_destination(plan, invocation.destination, output_id)
   of rev_model_error:
     let key = request_id_key(event.request_id)
-    plan_assert(plan, plan.model_requests.hasKey(key), "unknown model error")
+    if not plan.model_requests.hasKey(key):
+      plan.context.runtime_log(
+        "model.quarantine",
+        "vecherinka",
+        log_fields(("request_id", %key), ("reason", %"unknown or duplicate error")))
+      return
     plan.model_requests.del(key)
+    plan.context.model_turn_requests.del(key)
     if plan.context.pending_agent_starts.hasKey(key):
       plan.context.pending_agent_starts.del(key)
     plan.context.runtime_log(
@@ -1784,7 +1861,7 @@ proc execute_flows*[A](
         log_fields(("reason", %"plan initialization failed")))
     if readers_started:
       stop_codex_readers(readers)
-    retire_llm_tool_bindings(cast[pointer](context))
+    retire_llm_tool_bindings(cast[pointer](context), owned_runtime)
     close_global_events(context)
     if owned_runtime:
       deinit_codex_runtime(active_runtime)

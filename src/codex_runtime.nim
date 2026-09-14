@@ -19,6 +19,9 @@ type
     rs_failed,
     rs_interrupted
 
+  CodexRuntimeLiveness* = ref object
+    alive*: bool
+
   Agent* = object
     id*: AgentId
     thread_id*: Nullable[string]
@@ -45,13 +48,20 @@ type
     ## Event turn IDs are not guaranteed to equal the ID in turn/start's
     ## response. Keep explicit aliases to the owning request.
     turn_request_keys*: Table[string, string]
+    ## Terminal aliases remain recognizable without remaining active owners.
+    turn_tombstones*: Table[string, string]
     server_requests*: Table[string, ServerRequest]
+    server_request_tombstones*: Table[string, bool]
+    quarantined_event_count*: int
+    last_quarantined_event*: Option[string]
 
   CodexRuntime* {.requiresInit.} = object
     process: Process
+    liveness*: CodexRuntimeLiveness
     handles_closed: bool
     pending: seq[Message]
     next_request_id: int64
+    next_agent_id: int64
     cwd*: string
     initialized*: bool
     initialization_error*: Option[string]
@@ -65,7 +75,10 @@ proc new_runtime_state*(): RuntimeState =
   result.agents = initTable[AgentId, Agent]()
   result.requests = initTable[string, OutgoingRequest]()
   result.turn_request_keys = initTable[string, string]()
+  result.turn_tombstones = initTable[string, string]()
   result.server_requests = initTable[string, ServerRequest]()
+  result.server_request_tombstones = initTable[string, bool]()
+  result.last_quarantined_event = none(string)
 
 proc find_agent_for_thread(state: var RuntimeState; thread_id: string): Option[AgentId] =
   for agent_id, agent in state.agents.pairs:
@@ -89,23 +102,42 @@ proc set_agent_error(agent: var Agent; message: string) =
 proc clear_agent_error(agent: var Agent) =
   agent.last_error = NullableOption[string](state: nos_null)
 
+proc quarantine(state: var RuntimeState; event: string) =
+  ## Unknown protocol input must not corrupt active state or crash the
+  ## coordinator. Keep a counter and latest reason for diagnostics.
+  inc state.quarantined_event_count
+  state.last_quarantined_event = some(event)
+
 proc bind_turn_request(
     state: var RuntimeState;
     request_key, turn_id: string
-) =
+) : bool =
   ## Every observed turn ID becomes an alias for one accepted request. This
   ## preserves correlation when turn/start and turn/started expose different
   ## identifiers while rejecting cross-request collisions.
   if turn_id.len == 0:
-    raise newException(ValueError, "turn event has empty turn ID")
+    state.quarantine("empty turn ID for " & request_key)
+    return false
+  if state.turn_tombstones.hasKey(turn_id):
+    state.quarantine("late turn alias: " & turn_id)
+    return false
   if state.turn_request_keys.hasKey(turn_id) and
       state.turn_request_keys[turn_id] != request_key:
-    raise newException(ValueError, "turn ID already belongs to another request: " & turn_id)
+    state.quarantine("turn alias collision: " & turn_id)
+    return false
+  var aliases = 0
+  for owner in state.turn_request_keys.values:
+    if owner == request_key:
+      inc aliases
+  if aliases >= 4:
+    state.quarantine("too many turn aliases: " & request_key)
+    return false
   state.turn_request_keys[turn_id] = request_key
   if state.requests.hasKey(request_key):
     var outgoing = state.requests[request_key]
     outgoing.turn_id = some(turn_id)
     state.requests[request_key] = outgoing
+  true
 
 proc unbind_turn_request(state: var RuntimeState; request_key: string) =
   var removed: seq[string] = @[]
@@ -114,6 +146,7 @@ proc unbind_turn_request(state: var RuntimeState; request_key: string) =
       removed.add(turn_id)
   for turn_id in removed:
     state.turn_request_keys.del(turn_id)
+    state.turn_tombstones[turn_id] = request_key
 
 proc request_for_turn(state: var RuntimeState; turn_id: string): Option[string] =
   if not state.turn_request_keys.hasKey(turn_id):
@@ -131,8 +164,52 @@ proc active_turn_request_for_agent(
     return none(string)
   let request_key = state.agents[agent_id].active_turn_request
   if request_key.isSome and state.requests.hasKey(request_key.get):
-    return request_key
+    let request = state.requests[request_key.get]
+    if request.request.kind == mk_turn_start and
+        request.state in {rs_pending, rs_accepted}:
+      return request_key
   none(string)
+
+proc terminalize_turn(
+    state: var RuntimeState;
+    request_key: string;
+    status: RequestState;
+    error: Option[string]
+): bool =
+  if not state.requests.hasKey(request_key):
+    return false
+  var request = state.requests[request_key]
+  if request.request.kind != mk_turn_start or
+      request.state notin {rs_pending, rs_accepted}:
+    return false
+  request.state = status
+  request.error = error
+  state.requests[request_key] = request
+  unbind_turn_request(state, request_key)
+  if request.agent_id.isSome and state.agents.hasKey(request.agent_id.get):
+    var agent = state.agents[request.agent_id.get]
+    if agent.active_turn_request.isSome and
+        agent.active_turn_request.get == request_key:
+      agent.active_turn_request = none(string)
+      agent.turn_id = none(string)
+    if status == rs_failed:
+      set_agent_error(agent, if error.isSome: error.get else: "turn failed")
+    elif status == rs_interrupted:
+      set_agent_error(agent, if error.isSome: error.get else: "turn interrupted")
+    else:
+      agent.state = as_idle
+      clear_agent_error(agent)
+    state.agents[request.agent_id.get] = agent
+  true
+
+proc turn_completion_state(params: NotificationParams): tuple[state: RequestState,
+    error: Option[string]] =
+  if params.turn_status.isSome and params.turn_status.get == ts_failed:
+    return (rs_failed, if params.error_message.isSome:
+      params.error_message else: some("turn failed"))
+  if params.turn_status.isSome and params.turn_status.get == ts_interrupted:
+    return (rs_interrupted, params.error_message)
+  (rs_completed, none(string))
 
 proc apply_success*(state: var RuntimeState; success: Success) =
   let key = request_id_key(success.id)
@@ -140,6 +217,9 @@ proc apply_success*(state: var RuntimeState; success: Success) =
     return
 
   var outgoing = state.requests[key]
+  if outgoing.state in {rs_completed, rs_failed, rs_interrupted}:
+    state.quarantine("late success: " & key)
+    return
   outgoing.result = some(success.raw_result)
   outgoing.state = rs_completed
 
@@ -150,6 +230,16 @@ proc apply_success*(state: var RuntimeState; success: Success) =
     if outgoing.agent_id.isSome:
       let agent_id = outgoing.agent_id.get
       if state.agents.hasKey(agent_id):
+        let existing = find_agent_for_thread(state, success.result.thread_id)
+        if existing.isSome and existing.get != agent_id:
+          state.quarantine("thread ID collision: " & success.result.thread_id)
+          outgoing.state = rs_failed
+          outgoing.error = some("thread ID already belongs to another agent")
+          state.requests[key] = outgoing
+          var agent = state.agents[agent_id]
+          set_agent_error(agent, outgoing.error.get)
+          state.agents[agent_id] = agent
+          return
         var agent = state.agents[agent_id]
         agent.thread_id = nullable_string(success.result.thread_id)
         agent.state = as_idle
@@ -157,7 +247,15 @@ proc apply_success*(state: var RuntimeState; success: Success) =
         state.agents[agent_id] = agent
   of mk_turn_start:
     outgoing.state = rs_accepted
-    outgoing.turn_id = some(success.result.turn_id)
+    state.requests[key] = outgoing
+    if not bind_turn_request(state, key, success.result.turn_id):
+      discard terminalize_turn(
+        state,
+        key,
+        rs_failed,
+        some("turn ID could not be bound"))
+      return
+    outgoing = state.requests[key]
     if outgoing.agent_id.isSome:
       let agent_id = outgoing.agent_id.get
       if state.agents.hasKey(agent_id):
@@ -173,8 +271,6 @@ proc apply_success*(state: var RuntimeState; success: Success) =
     discard
 
   state.requests[key] = outgoing
-  if outgoing.request.kind == mk_turn_start and outgoing.turn_id.isSome:
-    bind_turn_request(state, key, outgoing.turn_id.get)
 
 proc apply_error*(state: var RuntimeState; error: Error) =
   let key = request_id_key(error.id)
@@ -182,23 +278,19 @@ proc apply_error*(state: var RuntimeState; error: Error) =
     return
 
   var outgoing = state.requests[key]
-  outgoing.state = rs_failed
-  outgoing.error = some(error.message)
-  if outgoing.agent_id.isSome:
-    let agent_id = outgoing.agent_id.get
-    if state.agents.hasKey(agent_id):
-      var agent = state.agents[agent_id]
-      set_agent_error(agent, error.message)
-      state.agents[agent_id] = agent
+  if outgoing.state in {rs_completed, rs_failed, rs_interrupted}:
+    state.quarantine("late error: " & key)
+    return
   state.requests[key] = outgoing
   if outgoing.request.kind == mk_turn_start:
-    unbind_turn_request(state, key)
+    discard terminalize_turn(state, key, rs_failed, some(error.message))
+  else:
+    outgoing.state = rs_failed
+    outgoing.error = some(error.message)
+    state.requests[key] = outgoing
     if outgoing.agent_id.isSome and state.agents.hasKey(outgoing.agent_id.get):
       var agent = state.agents[outgoing.agent_id.get]
-      if agent.active_turn_request.isSome and
-          agent.active_turn_request.get == key:
-        agent.active_turn_request = none(string)
-        agent.turn_id = none(string)
+      set_agent_error(agent, error.message)
       state.agents[outgoing.agent_id.get] = agent
 
 proc server_request_thread_id(request: ServerRequest): Option[string] =
@@ -213,6 +305,7 @@ proc server_request_thread_id(request: ServerRequest): Option[string] =
     some(request.params.tool_call.thread_id)
   of sr_auth_tokens_refresh:
     none(string)
+
   of sr_apply_patch_approval:
     some(request.params.apply_patch_approval.conversation_id)
   of sr_exec_command_approval:
@@ -232,20 +325,37 @@ proc server_request_thread_id(request: ServerRequest): Option[string] =
       return some(request.params.unknown["conversationId"].getStr)
     none(string)
 
-proc apply_server_request*(state: var RuntimeState; request: ServerRequest) =
+proc has_pending_server_request_for_agent*(state: var RuntimeState;
+    agent_id: AgentId): bool =
+  if not state.agents.hasKey(agent_id) or
+      not state.agents[agent_id].thread_id.has_value:
+    return false
+  let thread_id = state.agents[agent_id].thread_id.value
+  for request in state.server_requests.values:
+    let request_thread = server_request_thread_id(request)
+    if request_thread.isSome and request_thread.get == thread_id:
+      return true
+  false
+
+proc apply_server_request*(state: var RuntimeState; request: ServerRequest): bool =
   let key = request_id_key(request.id)
+  if state.server_requests.hasKey(key) or
+      state.server_request_tombstones.hasKey(key):
+    state.quarantine("duplicate server request: " & key)
+    return false
   state.server_requests[key] = request
 
   let thread_id = server_request_thread_id(request)
   if thread_id.isNone:
-    return
+    return true
   let agent_id = find_agent_for_thread(state, thread_id.get)
   if agent_id.isNone:
-    return
+    return true
   var agent = state.agents[agent_id.get]
   if agent.state != as_closed and agent.state != as_error:
     agent.state = as_waiting
     state.agents[agent_id.get] = agent
+  true
 
 proc remove_server_request*(state: var RuntimeState; id: RequestId): Option[ServerRequest] =
   let key = request_id_key(id)
@@ -253,6 +363,7 @@ proc remove_server_request*(state: var RuntimeState; id: RequestId): Option[Serv
     return none(ServerRequest)
   let request = state.server_requests[key]
   state.server_requests.del(key)
+  state.server_request_tombstones[key] = true
 
   let thread_id = server_request_thread_id(request)
   if thread_id.isSome:
@@ -278,61 +389,66 @@ proc apply_notification*(state: var RuntimeState; notification: Notification) =
       discard remove_server_request(state, params.request_id.get)
     return
   if not params.thread_id.has_value:
+    if notification.kind in {nk_turn_started, nk_turn_completed, nk_unknown}:
+      state.quarantine("turn event without thread ID: " & notification.method_name)
     return
   let thread_id = params.thread_id.value
   let agent_id = find_agent_for_thread(state, thread_id)
   if agent_id.isNone:
+    state.quarantine("event for unknown thread: " & thread_id)
     return
   let id = agent_id.get
-  var agent = state.agents[id]
 
   case notification.kind:
   of nk_thread_started:
+    var agent = state.agents[id]
     if agent.state == as_starting:
       agent.state = as_idle
+    state.agents[id] = agent
   of nk_turn_started:
-    if params.turn_id.isSome:
-      let request_key = active_turn_request_for_agent(state, id)
-      if request_key.isSome:
-        bind_turn_request(state, request_key.get, params.turn_id.get)
+    if params.turn_id.isNone:
+      state.quarantine("turn started without ID: " & thread_id)
+      return
+    let request_key = active_turn_request_for_agent(state, id)
+    if request_key.isNone:
+      if state.turn_tombstones.hasKey(params.turn_id.get):
+        state.quarantine("late turn started: " & params.turn_id.get)
+      else:
+        state.quarantine("turn started without active request: " & params.turn_id.get)
+      return
+    if bind_turn_request(state, request_key.get, params.turn_id.get):
+      var agent = state.agents[id]
       agent.turn_id = params.turn_id
-    agent.state = as_working
+      agent.state = as_working
+      state.agents[id] = agent
   of nk_turn_completed:
+    var request_key = none(string)
     if params.turn_id.isSome:
-      let request_key = request_for_turn(state, params.turn_id.get)
+      request_key = request_for_turn(state, params.turn_id.get)
       if request_key.isNone:
-        raise newException(ValueError,
-          "completed turn has no owning request: " & params.turn_id.get)
-      var outgoing = state.requests[request_key.get]
-      if outgoing.agent_id.isNone or outgoing.agent_id.get != id:
-        raise newException(ValueError,
-          "completed turn belongs to another agent: " & params.turn_id.get)
-      if params.turn_status.isSome and params.turn_status.get == ts_failed:
-        outgoing.state = rs_failed
-        if params.error_message.isSome:
-          outgoing.error = params.error_message
-        else:
-          outgoing.error = some("turn failed")
-      elif params.turn_status.isSome and params.turn_status.get == ts_interrupted:
-        outgoing.state = rs_interrupted
-      else:
-        outgoing.state = rs_completed
-      state.requests[request_key.get] = outgoing
-      unbind_turn_request(state, request_key.get)
-      if agent.active_turn_request.isSome and
-          agent.active_turn_request.get == request_key.get:
-        agent.active_turn_request = none(string)
-        agent.turn_id = none(string)
-    if params.turn_status.isSome and params.turn_status.get == ts_failed:
-      if params.error_message.isSome:
-        set_agent_error(agent, params.error_message.get)
-      else:
-        set_agent_error(agent, "turn failed")
+        if state.turn_tombstones.hasKey(params.turn_id.get):
+          state.quarantine("duplicate or late turn completion: " & params.turn_id.get)
+          return
+        request_key = active_turn_request_for_agent(state, id)
+        if request_key.isSome:
+          discard bind_turn_request(state, request_key.get, params.turn_id.get)
     else:
-      agent.state = as_idle
+      request_key = active_turn_request_for_agent(state, id)
+    if request_key.isNone:
+      state.quarantine("turn completion without owner: " &
+        (if params.turn_id.isSome: params.turn_id.get else: thread_id))
+      return
+    let request = state.requests[request_key.get]
+    if request.agent_id.isNone or request.agent_id.get != id:
+      state.quarantine("turn completion crossed agent boundary: " &
+        (if params.turn_id.isSome: params.turn_id.get else: request_key.get))
+      return
+    let completion = turn_completion_state(params)
+    discard terminalize_turn(state, request_key.get, completion.state, completion.error)
   of nk_agent_message_delta:
     discard
   of nk_thread_status_changed:
+    var agent = state.agents[id]
     if params.thread_status.isSome:
       case params.thread_status.get:
       of tsk_idle:
@@ -344,30 +460,56 @@ proc apply_notification*(state: var RuntimeState; notification: Notification) =
         else:
           agent.state = as_working
       of tsk_system_error:
+        let request_key = active_turn_request_for_agent(state, id)
+        if request_key.isSome:
+          discard terminalize_turn(state, request_key.get, rs_failed,
+            some("system error"))
+        agent = state.agents[id]
         set_agent_error(agent, "system error")
       of tsk_not_loaded:
+        let request_key = active_turn_request_for_agent(state, id)
+        if request_key.isSome:
+          discard terminalize_turn(state, request_key.get, rs_interrupted,
+            some("thread not loaded"))
+        agent = state.agents[id]
         agent.state = as_closed
+        agent.active_turn_request = none(string)
+        agent.turn_id = none(string)
       of tsk_unknown:
         discard
+    state.agents[id] = agent
   of nk_thread_closed:
+    let request_key = active_turn_request_for_agent(state, id)
+    if request_key.isSome:
+      discard terminalize_turn(state, request_key.get, rs_interrupted,
+        some("thread closed"))
+    var agent = state.agents[id]
     agent.state = as_closed
     agent.turn_id = none(string)
-    if agent.active_turn_request.isSome:
-      unbind_turn_request(state, agent.active_turn_request.get)
-      agent.active_turn_request = none(string)
+    agent.active_turn_request = none(string)
+    state.agents[id] = agent
   of nk_error:
+    let request_key = active_turn_request_for_agent(state, id)
+    if request_key.isSome:
+      discard terminalize_turn(state, request_key.get, rs_failed,
+        if params.error_message.isSome: params.error_message
+        else: some("Codex runtime error"))
+    var agent = state.agents[id]
     if params.error_message.isSome:
       set_agent_error(agent, params.error_message.get)
+    else:
+      set_agent_error(agent, "Codex runtime error")
+    state.agents[id] = agent
   of nk_initialized, nk_server_request_resolved, nk_unknown:
     discard
-
-  state.agents[id] = agent
 
 proc send(stream: Stream; message: JsonNode) =
   stream.writeLine($message)
   stream.flush()
 
 proc send_server_response(runtime: ptr CodexRuntime; response: ServerResponse) =
+  if runtime.process.isNil:
+    return
   send(runtime.process.inputStream, serialize_message(Message(
     kind: mk_server_response,
     server_response: response
@@ -441,7 +583,8 @@ proc handle_message*(runtime: ptr CodexRuntime; message: Message) =
   of mk_request:
     discard
   of mk_server_request:
-    apply_server_request(runtime.state, message.server_request)
+    if not apply_server_request(runtime.state, message.server_request):
+      return
     case message.server_request.kind:
     of sr_tool_call:
       try:
@@ -469,6 +612,15 @@ proc handle_message*(runtime: ptr CodexRuntime; message: Message) =
           runtime.state,
           message.server_request.params.tool_call.thread_id)
         if agent_id.isSome:
+          let turn_request = active_turn_request_for_agent(
+            runtime.state,
+            agent_id.get)
+          if turn_request.isSome:
+            discard terminalize_turn(
+              runtime.state,
+              turn_request.get,
+              rs_failed,
+              some(error.msg))
           var agent = runtime.state.agents[agent_id.get]
           set_agent_error(agent, error.msg)
           runtime.state.agents[agent_id.get] = agent
@@ -500,7 +652,8 @@ proc handle_message*(runtime: ptr CodexRuntime; message: Message) =
   of mk_server_response:
     let key = request_id_key(message.server_response.id)
     if not runtime.state.server_requests.hasKey(key):
-      raise newException(ValueError, "unknown server request: " & key)
+      runtime.state.quarantine("unknown or duplicate server response: " & key)
+      return
     send_server_response(runtime, message.server_response)
     discard remove_server_request(runtime.state, message.server_response.id)
   of mk_success:
@@ -594,6 +747,8 @@ proc stop_codex_runtime*(codex: ptr CodexRuntime) =
   discard codex.process.waitForExit(3_000)
 
 proc deinit_codex_runtime*(codex: ptr CodexRuntime) =
+  if not codex.liveness.isNil:
+    codex.liveness.alive = false
   stop_codex_threads(codex)
   stop_codex_runtime(codex)
   codex.process.close()
@@ -601,7 +756,9 @@ proc deinit_codex_runtime*(codex: ptr CodexRuntime) =
   codex.state.agents.clear()
   codex.state.requests.clear()
   codex.state.turn_request_keys.clear()
+  codex.state.turn_tombstones.clear()
   codex.state.server_requests.clear()
+  codex.state.server_request_tombstones.clear()
   reset(codex.process)
   reset(codex.pending)
   reset(codex.cwd)
@@ -609,7 +766,9 @@ proc deinit_codex_runtime*(codex: ptr CodexRuntime) =
   reset(codex.state.agents)
   reset(codex.state.requests)
   reset(codex.state.turn_request_keys)
+  reset(codex.state.turn_tombstones)
   reset(codex.state.server_requests)
+  reset(codex.state.server_request_tombstones)
   deallocShared(codex)
 
 proc init_codex_runtime*(cwd: string): ptr CodexRuntime =
@@ -618,46 +777,82 @@ proc init_codex_runtime*(cwd: string): ptr CodexRuntime =
   let canonical_cwd = expandFilename(cwd)
 
   result = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))
+  new(result.liveness)
+  result.liveness.alive = true
   result.state = new_runtime_state()
   result.handles_closed = false
   result.pending = @[]
   result.next_request_id = 0
+  result.next_agent_id = 0
   result.cwd = canonical_cwd
   result.initialized = false
   result.initialization_error = none(string)
 
-  result.process = startProcess(
-    command = "codex",
-    workingDir = result.cwd,
-    args = ["app-server"],
-    options = {poUsePath}
-  )
+  try:
+    result.process = startProcess(
+      command = "codex",
+      workingDir = result.cwd,
+      args = ["app-server"],
+      options = {poUsePath}
+    )
+  except CatchableError:
+    result.liveness.alive = false
+    result.state.agents.clear()
+    result.state.requests.clear()
+    result.state.turn_request_keys.clear()
+    result.state.turn_tombstones.clear()
+    result.state.server_requests.clear()
+    result.state.server_request_tombstones.clear()
+    deallocShared(result)
+    result = nil
+    raise
 
-  discard queue_request(
-    result,
-    mk_initialize,
-    Params(
-      kind: mk_initialize,
-      initialize: InitializeParams(
-        capabilities: NullableOption[InitializeCapabilities](
-          state: nos_value,
-          value: InitializeCapabilities(
-            experimental_api: NullableOption[bool](state: nos_value, value: true),
-            opt_out_notification_methods: NullableOption[seq[string]](state: nos_none)
+  try:
+    discard queue_request(
+      result,
+      mk_initialize,
+      Params(
+        kind: mk_initialize,
+        initialize: InitializeParams(
+          capabilities: NullableOption[InitializeCapabilities](
+            state: nos_value,
+            value: InitializeCapabilities(
+              experimental_api: NullableOption[bool](state: nos_value, value: true),
+              opt_out_notification_methods: NullableOption[seq[string]](state: nos_none)
+            )
+          ),
+          client_info: ClientInfo(
+            name: "graph-orchestration",
+            title: NullableOption[string](state: nos_value, value: "Graph Orchestration"),
+            version: "0.1.0"
           )
-        ),
-        client_info: ClientInfo(
-          name: "graph-orchestration",
-          title: NullableOption[string](state: nos_value, value: "Graph Orchestration"),
-          version: "0.1.0"
         )
-      )
-    ),
-    none(AgentId)
-  )
+      ),
+      none(AgentId)
+    )
+  except CatchableError:
+    result.liveness.alive = false
+    stop_codex_runtime(result)
+    result.process.close()
+    result.state.agents.clear()
+    result.state.requests.clear()
+    result.state.turn_request_keys.clear()
+    result.state.turn_tombstones.clear()
+    result.state.server_requests.clear()
+    result.state.server_request_tombstones.clear()
+    deallocShared(result)
+    result = nil
+    raise
 
 proc output_handle*(runtime: ptr CodexRuntime): cint = runtime.process.outputHandle()
 proc error_handle*(runtime: ptr CodexRuntime): cint = runtime.process.errorHandle()
+
+proc allocate_agent_id*(runtime: ptr CodexRuntime): AgentId =
+  while true:
+    result = "vecherinka-agent-" & $runtime.next_agent_id
+    inc runtime.next_agent_id
+    if not runtime.state.agents.hasKey(result):
+      return
 
 proc create_agent*(runtime: ptr CodexRuntime; agent_id: AgentId;
     model: string; tools: DynamicToolRegistry = @[];

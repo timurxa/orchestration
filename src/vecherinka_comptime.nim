@@ -1374,9 +1374,9 @@ proc model_output_contract(output_type: NimNode): NimNode =
     var schema = newCall(newTree(nnkBracketExpr,
       bindSym("output_schema_of"), wire_name))
     if output_tree.kind == ank_seq and output_tree.fixed_array:
-      schema = newCall(newTree(nnkDotExpr, schema, ident("min")),
+      schema = newCall(bindSym("min"), schema,
         newLit(output_tree.fixed_length))
-      schema = newCall(newTree(nnkDotExpr, schema, ident("max")),
+      schema = newCall(bindSym("max"), schema,
         newLit(output_tree.fixed_length))
     newTree(nnkBlockStmt, newEmptyNode(), newStmtList(wire_def, schema))
   elif output_tree.kind == ank_variant:
@@ -1502,6 +1502,14 @@ proc emit_model_submitter(
         if binding.isNone:
           return
         let data = binding.get
+        if data.retired:
+          if not data.runtime.isNil and not data.liveness.isNil and
+              data.liveness.alive:
+            data.runtime.fail_server_request(
+              tool_context.request_id,
+              -32001,
+              "stale finish_work callback")
+          return
         enqueue_llm_output_event(
           cast[RuntimeContext[`artifact_name`]](data.context),
           data.request_id,
@@ -1515,7 +1523,8 @@ proc emit_model_submitter(
     let `output_schema_name` = toJsonSchema(`output_contract_name`)
     let `materializer_name` = `materializer`
     let `tool_data_name` = register_llm_tool_binding(
-      cast[pointer](`submit_context`), `submit_request_id`,
+      cast[pointer](`submit_context`), `submit_context`.codex_runtime,
+      `submit_request_id`,
       `output_kind_value`, cast[pointer](`materializer_name`))
     var `tools_name`: DynamicToolRegistry = @[]
     `tools_name`.register_dynamic_tool(

@@ -884,6 +884,37 @@ suite "artifact_tree generated output verifier":
     check variant.value.text == "v"
 
 suite "runtime failure containment":
+  proc turn_state(): RuntimeState =
+    result = new_runtime_state()
+    result.agents["agent"] = Agent(
+      id: "agent",
+      thread_id: Nullable[string](has_value: true, value: "thread"),
+      turn_id: none(string),
+      active_turn_request: some("i:7"),
+      default_effort: re_low,
+      state: as_working,
+      last_error: NullableOption[string](state: nos_none),
+      tools: @[])
+    let request = Request(
+      kind: mk_turn_start,
+      id: RequestId(kind: rid_integer, integer_value: 7),
+      params: Params(
+        kind: mk_turn_start,
+        turn_start: TurnStartParams(
+          thread_id: "thread",
+          text: "hello",
+          effort: NullableOption[ReasoningEffort](
+            state: nos_value,
+            value: re_low))))
+    result.requests["i:7"] = OutgoingRequest(
+      id: request.id,
+      agent_id: some("agent"),
+      request: request,
+      state: rs_pending,
+      turn_id: none(string),
+      result: none(JsonNode),
+      error: none(string))
+
   test "turn events correlate when server IDs differ from turn start response":
     var state = new_runtime_state()
     state.agents["agent"] = Agent(
@@ -945,6 +976,154 @@ suite "runtime failure containment":
     check state.requests["i:7"].error.get == "network down"
     check state.agents["agent"].active_turn_request.isNone
     check state.turn_request_keys.len == 0
+
+  test "missing alias reconciles against the unique active turn":
+    var state = turn_state()
+    state.apply_success(Success(
+      id: RequestId(kind: rid_integer, integer_value: 7),
+      result: ResponseResult(
+        kind: mk_turn_start,
+        turn_id: "response-turn",
+        turn_status: ts_in_progress),
+      raw_result: parseJson("{\"turn\":\"response-turn\"}")))
+    state.turn_request_keys.clear()
+
+    state.apply_notification(Notification(
+      kind: nk_turn_completed,
+      method_name: "turn/completed",
+      params: NotificationParams(
+        thread_id: Nullable[string](has_value: true, value: "thread"),
+        turn_id: some("event-turn"),
+        turn_status: some(ts_completed))))
+
+    check state.requests["i:7"].state == rs_completed
+    check state.agents["agent"].active_turn_request.isNone
+    check state.turn_request_keys.len == 0
+    check state.turn_tombstones.hasKey("event-turn")
+
+  test "unknown completion is quarantined without corrupting active state":
+    var state = turn_state()
+    var agent = state.agents["agent"]
+    agent.active_turn_request = none(string)
+    state.agents["agent"] = agent
+    state.apply_notification(Notification(
+      kind: nk_turn_completed,
+      method_name: "turn/completed",
+      params: NotificationParams(
+        thread_id: Nullable[string](has_value: true, value: "thread"),
+        turn_id: some("unknown-turn"),
+        turn_status: some(ts_completed))))
+
+    check state.quarantined_event_count == 1
+    check state.requests["i:7"].state == rs_pending
+    check state.agents["agent"].active_turn_request.isNone
+
+  test "duplicate completion is idempotent":
+    var state = turn_state()
+    state.apply_success(Success(
+      id: RequestId(kind: rid_integer, integer_value: 7),
+      result: ResponseResult(
+        kind: mk_turn_start,
+        turn_id: "turn",
+        turn_status: ts_in_progress),
+      raw_result: parseJson("{\"turn\":\"turn\"}")))
+    let completion = Notification(
+      kind: nk_turn_completed,
+      method_name: "turn/completed",
+      params: NotificationParams(
+        thread_id: Nullable[string](has_value: true, value: "thread"),
+        turn_id: some("turn"),
+        turn_status: some(ts_completed)))
+    state.apply_notification(completion)
+    state.apply_notification(completion)
+
+    check state.requests["i:7"].state == rs_completed
+    check state.quarantined_event_count == 1
+    check state.agents["agent"].active_turn_request.isNone
+
+  test "thread close terminalizes active turn":
+    var state = turn_state()
+    state.apply_notification(Notification(
+      kind: nk_thread_closed,
+      method_name: "thread/closed",
+      params: NotificationParams(
+        thread_id: Nullable[string](has_value: true, value: "thread"))))
+
+    check state.requests["i:7"].state == rs_interrupted
+    check state.agents["agent"].state == as_closed
+    check state.agents["agent"].active_turn_request.isNone
+
+  test "duplicate server response is harmless":
+    var runtime = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))
+    runtime.state = new_runtime_state()
+    let request = ServerRequest(
+      id: RequestId(kind: rid_integer, integer_value: 9),
+      kind: sr_unknown,
+      method_name: "unknown",
+      params: ServerRequestParams(kind: sr_unknown, unknown: newJObject()))
+    runtime.state.server_requests["i:9"] = request
+    try:
+      runtime.reply_server_request(request.id, newJNull())
+      runtime.reply_server_request(request.id, newJNull())
+      check runtime.state.server_request_tombstones.hasKey("i:9")
+      check runtime.state.quarantined_event_count == 1
+    finally:
+      deallocShared(runtime)
+
+  test "late success cannot revive a terminal turn":
+    var state = turn_state()
+    state.apply_success(Success(
+      id: RequestId(kind: rid_integer, integer_value: 7),
+      result: ResponseResult(
+        kind: mk_turn_start,
+        turn_id: "turn",
+        turn_status: ts_in_progress),
+      raw_result: parseJson("{\"turn\":\"turn\"}")))
+    state.apply_notification(Notification(
+      kind: nk_thread_closed,
+      method_name: "thread/closed",
+      params: NotificationParams(
+        thread_id: Nullable[string](has_value: true, value: "thread"))))
+    state.apply_success(Success(
+      id: RequestId(kind: rid_integer, integer_value: 7),
+      result: ResponseResult(
+        kind: mk_turn_start,
+        turn_id: "late-turn",
+        turn_status: ts_in_progress),
+      raw_result: parseJson("{\"turn\":\"late-turn\"}")))
+
+    check state.requests["i:7"].state == rs_interrupted
+    check state.agents["agent"].state == as_closed
+    check state.agents["agent"].active_turn_request.isNone
+
+  test "terminal thread status closes active turn":
+    var state = turn_state()
+    state.apply_success(Success(
+      id: RequestId(kind: rid_integer, integer_value: 7),
+      result: ResponseResult(
+        kind: mk_turn_start,
+        turn_id: "turn",
+        turn_status: ts_in_progress),
+      raw_result: parseJson("{\"turn\":\"turn\"}")))
+    state.apply_notification(Notification(
+      kind: nk_thread_status_changed,
+      method_name: "thread/status/changed",
+      params: NotificationParams(
+        thread_id: Nullable[string](has_value: true, value: "thread"),
+        thread_status: some(tsk_system_error))))
+
+    check state.requests["i:7"].state == rs_failed
+    check state.agents["agent"].state == as_error
+    check state.agents["agent"].active_turn_request.isNone
+
+  test "duplicate JSON response becomes quarantine input":
+    var runtime = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))
+    runtime.state = new_runtime_state()
+    try:
+      discard runtime.accept_json(parseJson("{\"id\":99,\"result\":{}}"))
+      check runtime.state.quarantined_event_count == 1
+    finally:
+      deallocShared(runtime)
 
   test "unknown dynamic tool fails plan without escaping coordinator":
     var runtime = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))

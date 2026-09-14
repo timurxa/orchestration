@@ -1159,7 +1159,21 @@ proc parse_message*(node: JsonNode; pending: var seq[Message]): Message =
         found = true
         break
     if not found:
-      raise newException(Defect, "couldn't find matching request with id=" & request_id_key(id))
+      ## A late or duplicate response is transport noise, not a reason to
+      ## tear down the coordinator. RuntimeState records the quarantine.
+      return Message(
+        kind: mk_notification,
+        notification: Notification(
+          kind: nk_unknown,
+          method_name: "orphan response " & request_id_key(id),
+          params: NotificationParams(
+            thread_id: Nullable[string](has_value: false),
+            request_id: none(RequestId),
+            turn_id: none(string),
+            turn_status: none(TurnStatus),
+            thread_status: none(ThreadStatusKind),
+            active_flags: {},
+            error_message: none(string))))
 
     if node.contains("result"):
       let raw_result = node["result"]
