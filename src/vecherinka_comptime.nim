@@ -400,11 +400,14 @@ proc first_flow_spec_type(node: NimNode): NimNode =
 proc walk_flow_specs(node: NimNode; context: var FlowWalkContext) =
   let flow_type = flow_spec_type(node)
   if not flow_type.isNil:
-    ## `void` is a flow endpoint, not a runtime artifact variant.
+    ## A void codomain has no artifact-registry slot. Reject it here, at the
+    ## FlowSpec contract boundary, instead of letting lowering fail later in
+    ## model_output_kind. Void domains remain valid for no-input flows.
+    if flow_type[2].is_named("void"):
+      error("FlowSpec codomain cannot be void", node)
     if not flow_type[1].is_named("void"):
       register_flow_type(context.flow_types, flow_type[1])
-    if not flow_type[2].is_named("void"):
-      register_flow_type(context.flow_types, flow_type[2])
+    register_flow_type(context.flow_types, flow_type[2])
 
   for child in node:
     walk_flow_specs(child, context)
@@ -568,6 +571,9 @@ type
     kind: ArtifactNodeKind
     type_expr: NimNode
     needs_runtime_cast: bool
+    fixed_array: bool
+    fixed_length: int
+    fixed_lower_bound: int
     type_name: string
     tag_name: NimNode
     fields: seq[ArtifactField]
@@ -628,7 +634,10 @@ proc artifact_is_inline(type_node: NimNode): bool =
      "float32", "float64":
     true
   else:
-    type_inst.getTypeImpl.kind == nnkEnumTy
+    let impl = type_inst.getTypeImpl
+    impl.kind == nnkEnumTy or
+      (impl.kind == nnkBracketExpr and impl.len == 2 and
+        is_named(impl[0], "range"))
 
 proc artifact_field_name(field: NimNode; index: int): NimNode =
   if field[index].kind == nnkPostfix:
@@ -639,6 +648,45 @@ proc artifact_field_name(field: NimNode; index: int): NimNode =
 proc new_artifact_node(kind: ArtifactNodeKind): ArtifactNode =
   new(result)
   result.kind = kind
+
+proc artifact_is_option_shape(shape: NimNode): bool =
+  # Alias spelling can disappear in Nim's semantic type implementation. Option
+  # keeps canonical `val`/`has` fields; constrain match to that exact shape.
+  if shape.kind != nnkObjectTy or shape.len < 3 or shape[2].len != 1:
+    return false
+  let fields = shape[2][0]
+  fields.kind == nnkRecList and fields.len == 2 and
+    fields[0].kind == nnkIdentDefs and fields[1].kind == nnkIdentDefs and
+    fields[0].len == 3 and fields[1].len == 3 and
+    fields[0][0].strVal == "val" and fields[1][0].strVal == "has" and
+    fields[1][1].repr == "bool"
+
+proc artifact_array_bounds(index_type: NimNode): tuple[lower, upper: int] =
+  ## Nim permits either an explicit ordinal range or an ordinal index type.
+  ## Both define contiguous ordinals, so one pair of bounds suffices for
+  ## logical paths and fixed-array reconstruction.
+  if index_type.kind == nnkInfix and index_type.len == 3 and
+      is_named(index_type[0], ".."):
+    return (index_type[1].intVal.int, index_type[2].intVal.int)
+  case index_type.repr
+  of "bool": return (0, 1)
+  of "char": return (0, 255)
+  of "int8": return (-128, 127)
+  of "uint8": return (0, 255)
+  of "int16": return (-32768, 32767)
+  of "uint16": return (0, 65535)
+  of "int32": return (int low(int32), int high(int32))
+  of "uint32": return (0, int high(uint32))
+  of "int": return (int low(int), int high(int))
+  else:
+    let impl = index_type.getTypeImpl
+    if impl.kind == nnkEnumTy:
+      return (0, int(impl.len) - 1)
+    if impl.kind == nnkBracketExpr and impl.len == 2 and
+        is_named(impl[0], "range"):
+      return artifact_array_bounds(impl[1])
+  error("artifact walker cannot inspect fixed array index type " &
+    index_type.repr, index_type)
 
 proc artifact_tree(type_node: NimNode): ArtifactNode
 
@@ -653,6 +701,20 @@ proc artifact_fields(
           name: field[0].repr,
           selector: copyNimTree(field[0]),
           node: artifact_tree(field[1])))
+      elif field.kind == nnkIdentDefs and field.len >= 3:
+        # Compiler semantic trees represent named tuple slots as IdentDefs;
+        # source tuple constructors represent them as ExprColonExpr. In both
+        # cases each slot has one selector and one child artifact node.
+        for name_index in 0 ..< field.len - 2:
+          let name_node = artifact_field_name(field, name_index)
+          let named = name_node.kind notin {nnkEmpty, nnkIdent} or
+            name_node.strVal != "_"
+          let name = if named: name_node.strVal else: "[" & $index & "]"
+          let selector = if named: copyNimTree(name_node) else: newLit(index)
+          result.add(ArtifactField(
+            name: name,
+            selector: selector,
+            node: artifact_tree(field[^2])))
       else:
         result.add(ArtifactField(
           name: "[" & $index & "]",
@@ -720,10 +782,33 @@ proc artifact_variant_tree(type_node: NimNode): ArtifactNode =
 proc artifact_tree(type_node: NimNode): ArtifactNode =
   let type_inst = artifact_type_inst(type_node)
   if artifact_is_location(type_inst):
-    return new_artifact_node(ank_location)
+    result = new_artifact_node(ank_location)
+    # Keep exact distinct wrapper for typed fixed-array/schema reconstruction;
+    # Location's wire representation remains string inside Schematic.
+    result.type_expr = copyNimTree(artifact_type_inst(type_node))
+    return
+  let normalized_type = artifact_unwrapped_type(type_inst)
+  let shape = normalized_type.getTypeImpl
+  let type_repr = normalized_type.repr
+  if type_repr in ["char", "cstring"] or shape.repr in ["char", "cstring"]:
+    error("cannot use artifact type " & type_inst.repr &
+      "; use Location or seq", type_node)
+  if is_named(type_inst, "JsonNode") or
+      (type_inst.kind == nnkBracketExpr and is_named(type_inst[0], "Table")) or
+      (shape.kind == nnkRefTy and shape.len == 1 and
+        shape[0].repr == "JsonNodeObj") or
+      (shape.kind == nnkObjectTy and shape.repr.contains("KeyValuePairSeq") and
+        shape.repr.contains("counter")):
+    error("cannot use artifact type " & type_inst.repr &
+      "; use Location or seq", type_node)
   if artifact_is_inline(type_inst):
     result = new_artifact_node(ank_inline)
-    result.type_name = artifact_unwrapped_type(type_inst).repr
+    result.type_expr = copyNimTree(normalized_type)
+    # Nim's sameType can collapse a distinct scalar during semantic typing;
+    # spelling still proves the wrapper is present and `$` needs the base.
+    result.needs_runtime_cast = not sameType(type_inst, normalized_type) or
+      type_inst.repr != normalized_type.repr
+    result.type_name = normalized_type.repr
     return
 
   if type_inst.kind == nnkBracketExpr and type_inst.len == 2:
@@ -738,15 +823,26 @@ proc artifact_tree(type_node: NimNode): ArtifactNode =
       result.element = artifact_tree(type_inst[1])
       return
 
-  let normalized_type = artifact_unwrapped_type(type_inst)
-  let shape = normalized_type.getTypeImpl
   case shape.kind
   of nnkBracketExpr:
+    if shape.len == 2 and is_named(shape[0], "set"):
+      error("cannot use artifact type " & type_inst.repr &
+        "; use seq", type_node)
     if shape.len == 2 and is_named(shape[0], "seq"):
       result = new_artifact_node(ank_seq)
       result.type_expr = copyNimTree(normalized_type)
       result.needs_runtime_cast = not sameType(type_inst, normalized_type)
       result.element = artifact_tree(shape[1])
+      return
+    if shape.len == 3 and is_named(shape[0], "array"):
+      result = new_artifact_node(ank_seq)
+      result.type_expr = copyNimTree(normalized_type)
+      result.needs_runtime_cast = not sameType(type_inst, normalized_type)
+      result.fixed_array = true
+      let bounds = artifact_array_bounds(shape[1])
+      result.fixed_lower_bound = bounds.lower
+      result.fixed_length = bounds.upper - bounds.lower + 1
+      result.element = artifact_tree(shape[2])
       return
     if shape.len == 2 and is_named(shape[0], "Option"):
       result = new_artifact_node(ank_option)
@@ -754,7 +850,22 @@ proc artifact_tree(type_node: NimNode): ArtifactNode =
       result.needs_runtime_cast = not sameType(type_inst, normalized_type)
       result.element = artifact_tree(shape[1])
       return
+  of nnkRefTy:
+    error("cannot use artifact type " & type_inst.repr &
+      "; ref objects are forbidden", type_node)
+  of nnkPtrTy:
+    error("cannot use artifact type " & type_inst.repr &
+      "; pointers are forbidden", type_node)
+  of nnkProcTy:
+    error("cannot use artifact type " & type_inst.repr &
+      "; proc values are forbidden", type_node)
   of nnkObjectTy:
+    if artifact_is_option_shape(shape):
+      result = new_artifact_node(ank_option)
+      result.type_expr = copyNimTree(normalized_type)
+      result.needs_runtime_cast = not sameType(type_inst, normalized_type)
+      result.element = artifact_tree(shape[2][0][0][^2])
+      return
     for field in shape[2]:
       if field.kind == nnkRecCase:
         return artifact_variant_tree(type_inst)
@@ -784,11 +895,17 @@ proc append_artifact_field_path(path: NimNode; name: string): NimNode =
   let suffix = newLit(separator & name)
   quote do: `path` & `suffix`
 
-proc append_artifact_sequence_path(path, index: NimNode): NimNode =
+proc append_artifact_sequence_path(
+    path, index: NimNode; lower_bound: int = 0): NimNode =
   let path_copy = copyNimTree(path)
   let index_copy = copyNimTree(index)
+  let position = if lower_bound == 0:
+    quote do: int(`index_copy`)
+  else:
+    let lower = newLit(lower_bound)
+    quote do: int(`index_copy`) - `lower`
   quote do:
-    `path_copy` & "[" & $(int(`index_copy`) + 1) & "]"
+    `path_copy` & "[" & $(`position` + 1) & "]"
 
 proc artifact_field_value(value, selector: NimNode): NimNode =
   if selector.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit,
@@ -820,31 +937,33 @@ proc walk_artifact_tree*[T](
     error("artifact walker callback did not handle leaf", value)
   of ank_object, ank_tuple:
     result = newStmtList()
+    let runtime_value = artifact_runtime_value(node, value)
     for field in node.fields:
       result.add(walk_artifact_tree(
         field.node,
-        artifact_field_value(value, field.selector),
+        artifact_field_value(runtime_value, field.selector),
         append_artifact_field_path(path, field.name),
         state,
         callback))
   of ank_variant:
     result = newStmtList()
+    let runtime_value = artifact_runtime_value(node, value)
     for field in node.fields:
       result.add(walk_artifact_tree(
         field.node,
-        artifact_field_value(value, field.selector),
+        artifact_field_value(runtime_value, field.selector),
         append_artifact_field_path(path, field.name),
         state,
         callback))
     let case_statement = newTree(
       nnkCaseStmt,
-      artifact_field_value(value, node.tag_name))
+      artifact_field_value(runtime_value, node.tag_name))
     for branch in node.branches:
       var branch_body = newStmtList()
       for field in branch.fields:
         branch_body.add(walk_artifact_tree(
           field.node,
-          artifact_field_value(value, field.selector),
+          artifact_field_value(runtime_value, field.selector),
           append_artifact_field_path(path, field.name),
           state,
           callback))
@@ -866,10 +985,11 @@ proc walk_artifact_tree*[T](
       index,
       item,
       newCall(bindSym("pairs"), sequence_value),
-      walk_artifact_tree(
+        walk_artifact_tree(
         node.element,
         item,
-        append_artifact_sequence_path(path, index),
+        append_artifact_sequence_path(path, index,
+          if node.fixed_array: node.fixed_lower_bound else: 0),
         state,
         callback))
   of ank_option:
@@ -905,7 +1025,9 @@ proc materialize_callback(
 ): NimNode =
   case node.kind
   of ank_inline:
-    let value_copy = copyNimTree(value)
+    # Distinct scalar wrappers have no generic `$`; cast to normalized scalar
+    # before formatting, matching transparent composite-wrapper descent.
+    let value_copy = artifact_runtime_value(node, value)
     let path_copy = copyNimTree(path)
     let type_name = newLit(node.type_name)
     let instructions = copyNimTree(state.instructions)
@@ -1008,9 +1130,191 @@ proc model_output_kind(
     "model output type is missing from Artifact registry: " & output_type.repr
   newLit(output_kind_ordinal)
 
+proc artifact_contains_fixed(node: ArtifactNode): bool =
+  if node.isNil:
+    return false
+  if node.fixed_array or artifact_contains_fixed(node.element):
+    return true
+  for field in node.fields:
+    if artifact_contains_fixed(field.node):
+      return true
+  for branch in node.branches:
+    for field in branch.fields:
+      if artifact_contains_fixed(field.node):
+        return true
+  false
+
+proc artifact_wire_type(node: ArtifactNode): NimNode =
+  ## Schematic has no array extractor. Replace fixed arrays by seqs in a
+  ## generated wire type; all other leaves retain their declared type.
+  doAssert not node.isNil
+  if not artifact_contains_fixed(node):
+    return copyNimTree(node.type_expr)
+
+  case node.kind
+  of ank_inline, ank_location, ank_option_none:
+    copyNimTree(node.type_expr)
+  of ank_seq:
+    newTree(nnkBracketExpr, ident("seq"), artifact_wire_type(node.element))
+  of ank_option:
+    newTree(nnkBracketExpr, ident("Option"),
+      artifact_wire_type(node.element))
+  of ank_object:
+    let shape = node.type_expr.getTypeImpl
+    doAssert shape.kind == nnkObjectTy
+    var fields = newNimNode(nnkRecList)
+    var field_index = 0
+    for source_field in shape[2]:
+      doAssert source_field.kind == nnkIdentDefs,
+        "fixed-array wire schema cannot rebuild variant object fields"
+      for name_index in 0 ..< source_field.len - 2:
+        let source_name = artifact_field_name(source_field, name_index)
+        let wire_name = newTree(nnkPostfix, ident("*"),
+          copyNimTree(source_name))
+        fields.add(newTree(nnkIdentDefs, wire_name,
+          artifact_wire_type(node.fields[field_index].node), newEmptyNode()))
+        inc field_index
+    newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), fields)
+  of ank_tuple:
+    let shape = node.type_expr.getTypeImpl
+    doAssert shape.kind in {nnkTupleTy, nnkTupleConstr}
+    var fields = newNimNode(nnkTupleTy)
+    for index, source_field in shape:
+      let field_node = node.fields[index].node
+      if source_field.kind == nnkIdentDefs:
+        for name_index in 0 ..< source_field.len - 2:
+          fields.add(newTree(nnkIdentDefs,
+            copyNimTree(source_field[name_index]),
+            artifact_wire_type(field_node), newEmptyNode()))
+      else:
+        fields.add(artifact_wire_type(field_node))
+    fields
+  of ank_variant:
+    error("fixed arrays nested in variant output need a discriminated wire schema",
+      node.type_expr)
+
+proc artifact_option_element_type(type_expr: NimNode): NimNode =
+  let shape = artifact_unwrapped_type(type_expr).getTypeImpl
+  if shape.kind == nnkBracketExpr and shape.len == 2 and
+      is_named(shape[0], "Option"):
+    return copyNimTree(shape[1])
+  doAssert artifact_is_option_shape(shape)
+  copyNimTree(shape[2][0][0][^2])
+
+proc artifact_sequence_element_type(type_expr: NimNode): NimNode =
+  let shape = artifact_unwrapped_type(type_expr).getTypeImpl
+  doAssert shape.kind == nnkBracketExpr and shape.len in {2, 3}
+  copyNimTree(shape[^1])
+
+proc emit_wire_conversion(
+    node: ArtifactNode;
+    value, target_type: NimNode
+): NimNode =
+  ## Convert the generated wire value back to the declared type. Equal schema
+  ## bounds prove every fixed-array assignment below is in range.
+  if not artifact_contains_fixed(node):
+    return copyNimTree(value)
+
+  case node.kind
+  of ank_seq:
+    let target_element = artifact_sequence_element_type(target_type)
+    let converted = genSym(nskVar, "converted_sequence")
+    let index = genSym(nskForVar, "wire_index")
+    if node.fixed_array:
+      let item = newTree(nnkBracketExpr, copyNimTree(value), copyNimTree(index))
+      let item_value = emit_wire_conversion(node.element, item, target_element)
+      quote do:
+        block:
+          var `converted`: `target_type`
+          for `index` in 0 ..< len(`value`):
+            `converted`[low(`converted`) + `index`] = `item_value`
+          `converted`
+    else:
+      let item = genSym(nskForVar, "wire_item")
+      let item_value = emit_wire_conversion(node.element, item, target_element)
+      let loop = newTree(nnkForStmt, item, value,
+        newCall(bindSym("add"), converted, item_value))
+      quote do:
+        block:
+          var `converted`: `target_type`
+          `loop`
+          `converted`
+  of ank_option:
+    let target_element = artifact_option_element_type(target_type)
+    let option_value = genSym(nskLet, "wire_option")
+    let some_value = emit_wire_conversion(node.element,
+      newCall(bindSym("get"), option_value), target_element)
+    quote do:
+      block:
+        let `option_value` = `value`
+        if isSome(`option_value`):
+          some(`some_value`)
+        else:
+          none(`target_element`)
+  of ank_object:
+    let shape = node.type_expr.getTypeImpl
+    doAssert shape.kind == nnkObjectTy
+    let converted = genSym(nskVar, "converted_object")
+    let normalized_type = copyNimTree(node.type_expr)
+    var body = newStmtList()
+    var field_index = 0
+    for source_field in shape[2]:
+      doAssert source_field.kind == nnkIdentDefs
+      for name_index in 0 ..< source_field.len - 2:
+        let field = node.fields[field_index]
+        let field_value = artifact_field_value(value, field.selector)
+        let target_field_type = copyNimTree(source_field[^2])
+        body.add(newAssignment(
+          artifact_field_value(converted, field.selector),
+          emit_wire_conversion(field.node, field_value, target_field_type)))
+        inc field_index
+    let target = copyNimTree(target_type)
+    quote do:
+      block:
+        var `converted`: `normalized_type`
+        `body`
+        cast[`target`](`converted`)
+  of ank_tuple:
+    let shape = node.type_expr.getTypeImpl
+    doAssert shape.kind in {nnkTupleTy, nnkTupleConstr}
+    let converted = genSym(nskVar, "converted_tuple")
+    let normalized_type = copyNimTree(node.type_expr)
+    var body = newStmtList()
+    for index, source_field in shape:
+      let field = node.fields[index]
+      let field_value = artifact_field_value(value, field.selector)
+      let target_field_type = if source_field.kind == nnkIdentDefs:
+        copyNimTree(source_field[^2])
+      else:
+        copyNimTree(source_field)
+      body.add(newAssignment(
+        artifact_field_value(converted, field.selector),
+        emit_wire_conversion(field.node, field_value, target_field_type)))
+    let target = copyNimTree(target_type)
+    quote do:
+      block:
+        var `converted`: `normalized_type`
+        `body`
+        cast[`target`](`converted`)
+  else:
+    error("unsupported fixed-array conversion node", node.type_expr)
+
 proc model_output_contract(output_type: NimNode): NimNode =
   let output_tree = artifact_tree(output_type)
-  if output_tree.kind == ank_variant:
+  if artifact_contains_fixed(output_tree):
+    let wire_name = genSym(nskType, "ModelOutputWire")
+    let wire_def = newTree(nnkTypeSection,
+      newTree(nnkTypeDef, wire_name, newEmptyNode(),
+        artifact_wire_type(output_tree)))
+    var schema = newCall(newTree(nnkBracketExpr,
+      bindSym("output_schema_of"), wire_name))
+    if output_tree.kind == ank_seq and output_tree.fixed_array:
+      schema = newCall(newTree(nnkDotExpr, schema, ident("min")),
+        newLit(output_tree.fixed_length))
+      schema = newCall(newTree(nnkDotExpr, schema, ident("max")),
+        newLit(output_tree.fixed_length))
+    newTree(nnkBlockStmt, newEmptyNode(), newStmtList(wire_def, schema))
+  elif output_tree.kind == ank_variant:
     newCall(
       newTree(nnkBracketExpr,
         bindSym"output_discriminated_schema", copyNimTree(output_type)),
@@ -1029,8 +1333,12 @@ proc emit_model_materializer(
   let output_contract = genSym(nskLet, "model_output_contract")
   let parsed_output = genSym(nskLet, "model_parsed_output")
   let parsed_value = newDotExpr(parsed_output, ident("value"))
-  let packed_output = registry.emit_artifact_pack(output_type, parsed_value)
   let output_tree = artifact_tree(output_type)
+  let packed_value = if artifact_contains_fixed(output_tree):
+    emit_wire_conversion(output_tree, parsed_value, output_type)
+  else:
+    copyNimTree(parsed_value)
+  let packed_output = registry.emit_artifact_pack(output_type, packed_value)
   let location_errors = genSym(nskVar, "location_errors")
   var verify_state = VerifyLocationsEmitState(
     working_dir: newDotExpr(
