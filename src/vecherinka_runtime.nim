@@ -7,6 +7,7 @@ import std/[json, options, tables, posix, strutils, os,
   paths, tempfiles]
 import codex_json
 import codex_runtime
+import structured_log
 
 type
   ArtifactID* = uint64
@@ -246,6 +247,7 @@ type
     artifacts*: Table[ArtifactID, ArtifactRecord[A]]
     events*: Channel[GlobalEvent]
     events_open*: bool
+    logger*: StructuredLogger
     submitter*: ModelSubmitter[A]
     transport*: LlmTransport[A]
     next_request_id*: int64
@@ -284,6 +286,18 @@ type
     finished*: bool
     failed*: bool
     failure_message*: Option[string]
+
+proc runtime_log*[A](context: RuntimeContext[A]; event, component: string;
+    fields: JsonNode = nil) =
+  ## Logging stays optional and non-fatal; runtime state never depends on it.
+  if context.isNil or context.logger.isNil:
+    return
+  discard context.logger.emit(event, component, fields)
+
+proc flow_kind_text[A](flow: Flow[A]): string =
+  if flow.isNil:
+    return "nil"
+  $flow.kind
 
 when sizeof(pointer) < sizeof(uint64):
   {.fatal: "Vecherinka dynamic tool handles require 64-bit pointers".}
@@ -707,11 +721,13 @@ proc new_runtime_context*[A](
     submitter: ModelSubmitter[A] = nil;
     transport: LlmTransport[A] = nil;
     run_dir: Path = Path("");
-    runtime_dir: Path = Path("")
+    runtime_dir: Path = Path("");
+    logger: StructuredLogger = nil
 ): RuntimeContext[A] =
   new result
   result.artifacts = initTable[ArtifactID, ArtifactRecord[A]]()
   result.events_open = false
+  result.logger = logger
   result.submitter = submitter
   result.transport = transport
   result.next_request_id = 0
@@ -737,6 +753,12 @@ proc reserve_artifact_meta*[A](context: RuntimeContext[A]): ArtifactMeta =
     artifact_dir: context.run_dir /
       Path("artifact-" & $context.next_artifact_id))
   createDir($result.artifact_dir)
+  context.runtime_log(
+    "artifact.reserve",
+    "vecherinka",
+    log_fields(
+      ("artifact_id", %result.id),
+      ("artifact_dir", %($lastPathPart(result.artifact_dir)))))
 
 proc allocate_artifact_meta*[A](context: RuntimeContext[A]): ArtifactMeta =
   ## Compatibility name for callers that only reserve identity and root.
@@ -754,6 +776,12 @@ proc register_artifact*[A](
     raise newException(ValueError, "artifact ID already registered: " & $meta.id)
   context.artifacts[meta.id] = ArtifactRecord[A](data: data, meta: meta)
   result = meta.id
+  context.runtime_log(
+    "artifact.commit",
+    "vecherinka",
+    log_fields(
+      ("artifact_id", %meta.id),
+      ("artifact_dir", %($lastPathPart(meta.artifact_dir)))))
 
 proc lookup_artifact*[A](
     context: RuntimeContext[A];
@@ -916,6 +944,13 @@ proc new_join_state[A](
     kind: kind,
     remaining: slot_count,
     slots: newSeq[Option[ArtifactID]](slot_count))
+  plan.context.runtime_log(
+    "join.open",
+    "vecherinka",
+    log_fields(
+      ("join_id", %result),
+      ("kind", %($kind)),
+      ("slot_count", %slot_count)))
 
 proc accept_join_result[A](
     plan: var WorkPlan[A];
@@ -944,6 +979,13 @@ proc enqueue_ready[A](
   inc plan.next_ready_id
   let ready_id = plan.next_ready_id
   plan.pending_ready[ready_id] = invocation
+  plan.context.runtime_log(
+    "ready.enqueue",
+    "vecherinka",
+    log_fields(
+      ("ready_id", %ready_id),
+      ("flow_kind", %(flow_kind_text(invocation.flow))),
+      ("input_artifact_id", %invocation.input_id)))
   send_global_event(plan.context, GlobalEvent(
     kind: gek_ready,
     ready_id: ready_id))
@@ -1005,6 +1047,12 @@ proc finish_join[A](
 
   let destination = invocation.destination
   let output_id = register_generated_artifact(plan.context, output)
+  plan.context.runtime_log(
+    "join.close",
+    "vecherinka",
+    log_fields(
+      ("join_id", %join_id),
+      ("output_artifact_id", %output_id)))
   plan.joins.del(join_id)
   plan.join_invocations.del(join_id)
   deliver_destination(plan, destination, output_id)
@@ -1025,6 +1073,14 @@ proc accept_join_result[A](
 
   state.slots[slot] = some(artifact_id)
   dec state.remaining
+  plan.context.runtime_log(
+    "join.slot",
+    "vecherinka",
+    log_fields(
+      ("join_id", %join_id),
+      ("slot", %slot),
+      ("artifact_id", %artifact_id),
+      ("remaining", %state.remaining)))
   if state.remaining == 0:
     finish_join(plan, join_id)
     return
@@ -1127,8 +1183,22 @@ proc begin_agent_creation[A](
       $event.working_dir)
     pending.start_request_id = some(start_request_id)
     plan.context.pending_agent_starts[key] = pending
+    plan.context.runtime_log(
+      "agent.thread.submit",
+      "codex",
+      log_fields(
+        ("model_request_id", %(request_id_key(event.model_request_id))),
+        ("agent_id", %event.agent_id),
+        ("request_id", %(request_id_key(start_request_id)))))
   except CatchableError as error:
     plan.context.pending_agent_starts.del(key)
+    plan.context.runtime_log(
+      "agent.thread.fail",
+      "codex",
+      log_fields(
+        ("model_request_id", %(request_id_key(event.model_request_id))),
+        ("agent_id", %event.agent_id),
+        ("error", %error.msg)))
     enqueue_agent_error(plan.context, event.model_request_id, error.msg)
 
 proc advance_agent_starts[A](
@@ -1188,7 +1258,21 @@ proc advance_agent_starts[A](
         pending.spec.profile.effort)
       pending.turn_request_id = some(turn_request_id)
       plan.context.pending_agent_starts[key] = pending
+      plan.context.runtime_log(
+        "agent.turn.submit",
+        "codex",
+        log_fields(
+          ("model_request_id", %(request_id_key(pending.model_request_id))),
+          ("agent_id", %pending.agent_id),
+          ("request_id", %(request_id_key(turn_request_id)))))
     except CatchableError as error:
+      plan.context.runtime_log(
+        "agent.turn.fail",
+        "codex",
+        log_fields(
+          ("model_request_id", %(request_id_key(pending.model_request_id))),
+          ("agent_id", %pending.agent_id),
+          ("error", %error.msg)))
       enqueue_agent_error(plan.context, pending.model_request_id, error.msg)
       completed.add(key)
   for key in completed:
@@ -1223,6 +1307,16 @@ proc suspend_model[A](
   plan_assert(plan, not plan.model_requests.hasKey(key),
     "duplicate model request ID")
   plan.model_requests[key] = invocation
+  plan.context.runtime_log(
+    "model.submit",
+    "vecherinka",
+    log_fields(
+      ("request_id", %(request_id_key(request_id))),
+      ("flow_kind", %(flow_kind_text(flow))),
+      ("input_artifact_id", %input_id),
+      ("output_artifact_id", %output_meta.id),
+      ("submitter", %(if flow.submit.isNil: "default" else: "custom")),
+      ("working_dir", %($lastPathPart(output_meta.artifact_dir)))))
   if not flow.submit.isNil:
     flow.submit(
       plan.context, request_id, input_record.data, output_meta.artifact_dir)
@@ -1299,6 +1393,12 @@ proc handle_invocation*[A](
     invocation: Invocation[A]
 ) =
   let initial_record = lookup_artifact(plan.context, invocation.input_id)
+  plan.context.runtime_log(
+    "invocation.start",
+    "vecherinka",
+    log_fields(
+      ("flow_kind", %(flow_kind_text(invocation.flow))),
+      ("input_artifact_id", %invocation.input_id)))
   var current = invocation.flow
   var destination = invocation.destination
   var value = initial_record.data
@@ -1373,6 +1473,13 @@ proc handle_runtime_event[A](
       "model completion has no materializer")
     plan_assert(plan, event.output_arguments.len > 0,
       "model completion has no encoded output")
+    plan.context.runtime_log(
+      "model.output",
+      "vecherinka",
+      log_fields(
+        ("request_id", %(request_id_key(event.request_id))),
+        ("tool", %event.output_tool_name),
+        ("arguments_bytes", %event.output_arguments.len)))
     let can_ack_tool = event.tool_request_id.isSome and not runtime.isNil and
       runtime.server_requests.hasKey(
         request_id_key(event.tool_request_id.get))
@@ -1397,6 +1504,12 @@ proc handle_runtime_event[A](
     except CatchableError as error:
       ModelMaterialization[A](ok: false, error: error.msg)
     if not decoded.ok:
+      plan.context.runtime_log(
+        "model.reject",
+        "vecherinka",
+        log_fields(
+          ("request_id", %(request_id_key(event.request_id))),
+          ("error", %decoded.error)))
       if can_ack_tool:
         runtime.accept_tool_response(
           event.tool_request_id.get,
@@ -1422,6 +1535,12 @@ proc handle_runtime_event[A](
     if plan.context.pending_agent_starts.hasKey(key):
       plan.context.pending_agent_starts.del(key)
     let output_id = register_artifact(plan.context, artifact, output_meta)
+    plan.context.runtime_log(
+      "model.finish",
+      "vecherinka",
+      log_fields(
+        ("request_id", %(request_id_key(event.request_id))),
+        ("output_artifact_id", %output_id)))
     deliver_destination(plan, invocation.destination, output_id)
   of rev_model_error:
     let key = request_id_key(event.request_id)
@@ -1429,6 +1548,12 @@ proc handle_runtime_event[A](
     plan.model_requests.del(key)
     if plan.context.pending_agent_starts.hasKey(key):
       plan.context.pending_agent_starts.del(key)
+    plan.context.runtime_log(
+      "model.fail",
+      "vecherinka",
+      log_fields(
+        ("request_id", %(request_id_key(event.request_id))),
+        ("error", %event.error_message)))
     plan.failure_message = some(event.error_message)
     plan.failed = true
     plan.finished = true
@@ -1448,6 +1573,10 @@ proc handle_global_event[A](
   of gek_ready:
     plan_assert(plan, plan.pending_ready.hasKey(event.ready_id),
       "unknown ready invocation")
+    plan.context.runtime_log(
+      "ready.consume",
+      "vecherinka",
+      log_fields(("ready_id", %event.ready_id)))
     let invocation = plan.pending_ready[event.ready_id]
     plan.pending_ready.del(event.ready_id)
     handle_invocation(plan, invocation)
@@ -1455,6 +1584,23 @@ proc handle_global_event[A](
     begin_agent_creation(plan, runtime, event)
   of gek_stdout_line, gek_stderr_line, gek_stdout_closed, gek_stderr_closed,
       gek_process_exit, gek_reader_error:
+    let event_name = case event.kind
+    of gek_stdout_line: "protocol.stdout"
+    of gek_stderr_line: "protocol.stderr"
+    of gek_stdout_closed: "reader.stdout.close"
+    of gek_stderr_closed: "reader.stderr.close"
+    of gek_process_exit: "process.exit"
+    of gek_reader_error: "reader.error"
+    else: "transport.event"
+    plan.context.runtime_log(
+      event_name,
+      "codex",
+      if event.kind == gek_stdout_line or event.kind == gek_stderr_line:
+        log_fields(("bytes", %event.message.len))
+      elif event.kind == gek_reader_error:
+        log_fields(("error", %event.message))
+      else:
+        nil)
     messenger.handle_global_event(runtime, event)
     if event.kind == gek_stdout_line:
       advance_agent_starts(plan, runtime)
@@ -1467,6 +1613,7 @@ proc handle_global_event[A](
       plan.fail_runtime("codex app-server startup failed: " & event.message.strip)
     plan.fail_on_process_exit(messenger)
   of gek_shutdown:
+    plan.context.runtime_log("run.shutdown", "vecherinka")
     plan.finished = true
 
 proc run_work_plan*[A](
@@ -1497,18 +1644,27 @@ proc execute_flows*[A](
     input: A;
     submitter: ModelSubmitter[A] = nil;
     transport: LlmTransport[A] = nil;
-    runtime: ptr CodexRuntime = nil
+    runtime: ptr CodexRuntime = nil;
+    logger: StructuredLogger = nil
 ): WorkPlan[A] =
   ## The main thread owns runtime protocol state. A supplied runtime is
   ## borrowed; otherwise this call owns the complete Codex lifecycle.
   let source_root = Path(expandFilename(os.getCurrentDir()))
   let run_dir = create_run_directory(source_root)
   let context = new_runtime_context(
-    submitter, transport, run_dir, source_root)
+    submitter, transport, run_dir, source_root, logger)
+  context.runtime_log(
+    "run.start",
+    "vecherinka",
+    log_fields(
+      ("run_dir", %($lastPathPart(run_dir))),
+      ("runtime_dir", %($lastPathPart(source_root))),
+      ("owns_runtime", %runtime.isNil)))
   var owned_runtime = false
   var active_runtime = runtime
   var readers: CodexReaders
   var readers_started = false
+  var plan_initialized = false
   try:
     if active_runtime.isNil:
       active_runtime = init_codex_runtime($context.run_dir)
@@ -1518,6 +1674,7 @@ proc execute_flows*[A](
     start_codex_readers(readers, context, active_runtime)
     readers_started = true
     result = init_work_plan(top_level_flows, context)
+    plan_initialized = true
     let input_meta = ArtifactMeta(id: 0, artifact_dir: source_root)
     let input_id = register_artifact(context, input, input_meta)
     enqueue_ready(result, new_invocation(
@@ -1526,6 +1683,17 @@ proc execute_flows*[A](
       Destination[A](kind: dk_finished)))
     run_work_plan(result, active_runtime)
   finally:
+    if plan_initialized:
+      context.runtime_log(
+        if result.failed: "run.fail" elif result.finished: "run.finish"
+        else: "run.abort",
+        "vecherinka",
+        log_fields(
+          ("failed", %result.failed),
+          ("finished", %result.finished)))
+    else:
+      context.runtime_log("run.abort", "vecherinka",
+        log_fields(("reason", %"plan initialization failed")))
     if readers_started:
       stop_codex_readers(readers)
     retire_llm_tool_bindings(cast[pointer](context))
