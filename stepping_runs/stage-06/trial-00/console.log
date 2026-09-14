@@ -1,0 +1,1472 @@
+Hint: used config file '/Users/alex/.choosenim/toolchains/nim-2.3.1/config/nim.cfg' [Conf]
+Hint: used config file '/Users/alex/.choosenim/toolchains/nim-2.3.1/config/config.nims' [Conf]
+....................................................................................................................................
+/Users/alex/areas/productive/orchestration/src/structured_log.nim(6, 30) Warning: imported and not used: 'os' [UnusedImport]
+.......
+/Users/alex/areas/productive/orchestration/src/codex_json.nim(634, 6) Hint: 'parse_reasoning_effort' is declared but not used [XDeclaredButNotUsed]
+/Users/alex/areas/productive/orchestration/src/codex_json.nim(686, 6) Hint: 'parse_initialize_params' is declared but not used [XDeclaredButNotUsed]
+/Users/alex/areas/productive/orchestration/src/codex_json.nim(723, 6) Hint: 'parse_thread_start_params' is declared but not used [XDeclaredButNotUsed]
+..........
+/Users/alex/areas/productive/orchestration/src/vecherinka_runtime.nim(10, 8) Hint: duplicate import of 'structured_log'; previous import here: /Users/alex/areas/productive/orchestration/src/vecherinka.nim(5, 8) [DuplicateModuleImport]
+.
+/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(4, 33) Hint: duplicate import of 'options'; previous import here: /Users/alex/areas/productive/orchestration/src/vecherinka_runtime.nim(6, 19) [DuplicateModuleImport]
+/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(4, 42) Hint: duplicate import of 'strutils'; previous import here: /Users/alex/areas/productive/orchestration/src/vecherinka_runtime.nim(6, 43) [DuplicateModuleImport]
+..................................
+
+type
+  VecherinkaArtifactKind_553648532 = enum
+    vak_0, vak_1
+  VecherinkaArtifact_553648533 = object
+    case kind: VecherinkaArtifactKind_553648532
+    of vak_0:
+      value_0: BaselineInput
+    of vak_1:
+      value_1: BaselineOutput
+proc solve(input_553648743: BaselineInput;
+           transport_553648744: LlmTransport[VecherinkaArtifact_553648533] = nil;
+           logger_553648745: StructuredLogger = nil): BaselineOutput =
+  let data_553648746: seq[Flow[VecherinkaArtifact_553648533]] = @[Flow[
+      VecherinkaArtifact_553648533](kind: fk_top, root: "baseline", entry: true, body: Flow[
+      VecherinkaArtifact_553648533](kind: fk_model, submit: proc (
+      model_context_553648694: RuntimeContext[VecherinkaArtifact_553648533];
+      model_request_id_553648695: RequestId; model_input_553648696: VecherinkaArtifact_553648533;
+      model_working_dir_553648697: Path) {.nimcall.} =
+    let model_typed_input_553648698 = block:
+      let artifact_553648700 = model_input_553648696
+      const
+        loc`gensym25 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym25 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553648700.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553648700.kind == vak_0` ")
+      artifact_553648700.value_0
+    try:
+      let model_materialized_input_553648699 = proc (
+          materializer_input_553648701: BaselineInput;
+          materializer_runtime_dir_553648702, materializer_artifact_dir_553648703: Path;
+          materializer_initial_instructions_553648704: string): string {.nimcall.} = result =
+        var materialized_instructions_553648705 = materializer_initial_instructions_553648704
+        var materialized_names_553648706: seq[string] = @[]
+        add(materialized_instructions_553648705,
+            "input.marker: string = " & $materializer_input_553648701.marker & "\n")
+        materialized_instructions_553648705(model_typed_input_553648698,
+          model_context_553648694.runtime_dir, model_working_dir_553648697, "")
+      let model_output_contract_553648731 = schemaOf(T)
+      let model_output_schema_553648732 = toJsonSchema(model_output_contract_553648731)
+      let model_materializer_553648733 = proc (model_output_kind_553648656: int;
+          model_output_553648657: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553648533] {.nimcall, noinit.} = case model_output_kind_553648656
+      of 1:
+        let model_output_contract_553648658 = schemaOf(T)
+        let model_parsed_output_553648659 = tryParse(model_output_contract_553648658,
+            model_output_553648657.arguments)
+        if not model_parsed_output_553648659.ok:
+          return ModelMaterialization[VecherinkaArtifact_553648533](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553648659.issues) &
+              " schema issues)")
+        var location_errors_553648669 = ""
+        if (
+          not (len(location_errors_553648669) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553648533](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553648669)
+        return ModelMaterialization[VecherinkaArtifact_553648533](ok: true, value: VecherinkaArtifact_553648533(
+            kind: vak_1, value_1: model_parsed_output_553648659.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553648533](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553648734 = register_llm_tool_binding(
+          cast[pointer](model_context_553648694), model_request_id_553648695, 1,
+          cast[pointer](model_materializer_553648733))
+      var model_tools_553648735: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553648735, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553648732, model_tool_data_553648734, proc (
+          tool_data`gensym11: pointer; tool_context`gensym11: ToolCallContext) {.
+          nimcall, gcsafe.} = {.cast(gcsafe).}:
+        let binding`gensym11 = lookup_llm_tool_binding(tool_data`gensym11)
+        if isNone(binding`gensym11):
+          return
+        let data`gensym11 = get(binding`gensym11)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553648533]](data`gensym11.context),
+                                 data`gensym11.request_id,
+                                 data`gensym11.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553648533]](data`gensym11.materializer),
+                                 data`gensym11.id, tool_context`gensym11))
+      let llm_spec_553648740 = LlmCallSpec[VecherinkaArtifact_553648533](
+          profile: profile,
+          prompt: "Copy marker exactly into answer. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553648699,
+          runtime_dir: model_context_553648694.runtime_dir,
+          working_dir: model_working_dir_553648697, tools: model_tools_553648735,
+          output_kind: 1, materialize: model_materializer_553648733)
+      submit_llm(model_context_553648694, model_request_id_553648695, llm_spec_553648740)
+    except CatchableError as error`gensym14:
+      let event`gensym14 = RuntimeEvent[VecherinkaArtifact_553648533](
+          kind: rev_model_error, request_id: model_request_id_553648695,
+          error_message: error`gensym14.msg)
+      enqueue_runtime_event(model_context_553648694, event`gensym14)))]
+  let input_artifact_553648747 = VecherinkaArtifact_553648533(kind: vak_0,
+      value_0: input_553648743)
+  let work_plan_553648748 = execute_flows(data_553648746, input_artifact_553648747,
+      nil, transport_553648744, nil, logger_553648745)
+  if isNone(work_plan_553648748.output):
+    if isSome(work_plan_553648748.failure_message):
+      raise
+        (ref ValueError)(msg: get(work_plan_553648748.failure_message),
+                         parent: nil)
+    raise
+      (ref ValueError)(msg: "vecherinka execution completed without output",
+                       parent: nil)
+  return block:
+    let artifact_553648749 = lookup_artifact(work_plan_553648748.context,
+        get(work_plan_553648748.output)).data
+    const
+      loc`gensym238 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym238 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553648749.kind == vak_1):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553648749.kind == vak_1` ")
+    artifact_553648749.value_1
+
+
+type
+  VecherinkaArtifactKind_553687903 = enum
+    vak_0, vak_1
+  VecherinkaArtifact_553687904 = object
+    case kind: VecherinkaArtifactKind_553687903
+    of vak_0:
+      value_0: Stage1Input
+    of vak_1:
+      value_1: Stage1Output
+proc solve_stage_1(input_553687967: Stage1Input;
+                   transport_553687968: LlmTransport[VecherinkaArtifact_553687904] = nil;
+                   logger_553687969: StructuredLogger = nil): Stage1Output =
+  let data_553687970: seq[Flow[VecherinkaArtifact_553687904]] = @[Flow[
+      VecherinkaArtifact_553687904](kind: fk_top, root: "copy_fields",
+                                    entry: true, body: Flow[VecherinkaArtifact_553687904](
+      kind: fk_model, submit: proc (model_context_553687934: RuntimeContext[
+      VecherinkaArtifact_553687904]; model_request_id_553687935: RequestId;
+                                    model_input_553687936: VecherinkaArtifact_553687904;
+                                    model_working_dir_553687937: Path) {.nimcall.} =
+    let model_typed_input_553687938 = block:
+      let artifact_553687940 = model_input_553687936
+      const
+        loc`gensym265 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym265 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553687940.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553687940.kind == vak_0` ")
+      artifact_553687940.value_0
+    try:
+      let model_materialized_input_553687939 = proc (
+          materializer_input_553687941: Stage1Input;
+          materializer_runtime_dir_553687942, materializer_artifact_dir_553687943: Path;
+          materializer_initial_instructions_553687944: string): string {.nimcall.} = result =
+        var materialized_instructions_553687945 = materializer_initial_instructions_553687944
+        var materialized_names_553687946: seq[string] = @[]
+        add(materialized_instructions_553687945,
+            "input.first: string = " & $materializer_input_553687941.first & "\n")
+        add(materialized_instructions_553687945,
+            "input.second: string = " & $materializer_input_553687941.second & "\n")
+        materialized_instructions_553687945(model_typed_input_553687938,
+          model_context_553687934.runtime_dir, model_working_dir_553687937, "")
+      let model_output_contract_553687955 = schemaOf(T)
+      let model_output_schema_553687956 = toJsonSchema(model_output_contract_553687955)
+      let model_materializer_553687957 = proc (model_output_kind_553687913: int;
+          model_output_553687914: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553687904] {.nimcall, noinit.} = case model_output_kind_553687913
+      of 1:
+        let model_output_contract_553687915 = schemaOf(T)
+        let model_parsed_output_553687916 = tryParse(model_output_contract_553687915,
+            model_output_553687914.arguments)
+        if not model_parsed_output_553687916.ok:
+          return ModelMaterialization[VecherinkaArtifact_553687904](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553687916.issues) &
+              " schema issues)")
+        var location_errors_553687925 = ""
+        if (
+          not (len(location_errors_553687925) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553687904](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553687925)
+        return ModelMaterialization[VecherinkaArtifact_553687904](ok: true, value: VecherinkaArtifact_553687904(
+            kind: vak_1, value_1: model_parsed_output_553687916.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553687904](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553687958 = register_llm_tool_binding(
+          cast[pointer](model_context_553687934), model_request_id_553687935, 1,
+          cast[pointer](model_materializer_553687957))
+      var model_tools_553687959: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553687959, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553687956, model_tool_data_553687958, proc (
+          tool_data`gensym251: pointer; tool_context`gensym251: ToolCallContext) {.
+          nimcall, gcsafe.} = {.cast(gcsafe).}:
+        let binding`gensym251 = lookup_llm_tool_binding(tool_data`gensym251)
+        if isNone(binding`gensym251):
+          return
+        let data`gensym251 = get(binding`gensym251)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553687904]](data`gensym251.context),
+                                 data`gensym251.request_id,
+                                 data`gensym251.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553687904]](data`gensym251.materializer),
+                                 data`gensym251.id, tool_context`gensym251))
+      let llm_spec_553687964 = LlmCallSpec[VecherinkaArtifact_553687904](
+          profile: profile, prompt: "Copy first into first_copy and second into second_copy. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553687939,
+          runtime_dir: model_context_553687934.runtime_dir,
+          working_dir: model_working_dir_553687937, tools: model_tools_553687959,
+          output_kind: 1, materialize: model_materializer_553687957)
+      submit_llm(model_context_553687934, model_request_id_553687935, llm_spec_553687964)
+    except CatchableError as error`gensym254:
+      let event`gensym254 = RuntimeEvent[VecherinkaArtifact_553687904](
+          kind: rev_model_error, request_id: model_request_id_553687935,
+          error_message: error`gensym254.msg)
+      enqueue_runtime_event(model_context_553687934, event`gensym254)))]
+  let input_artifact_553687971 = VecherinkaArtifact_553687904(kind: vak_0,
+      value_0: input_553687967)
+  let work_plan_553687972 = execute_flows(data_553687970, input_artifact_553687971,
+      nil, transport_553687968, nil, logger_553687969)
+  if isNone(work_plan_553687972.output):
+    if isSome(work_plan_553687972.failure_message):
+      raise
+        (ref ValueError)(msg: get(work_plan_553687972.failure_message),
+                         parent: nil)
+    raise
+      (ref ValueError)(msg: "vecherinka execution completed without output",
+                       parent: nil)
+  return block:
+    let artifact_553687973 = lookup_artifact(work_plan_553687972.context,
+        get(work_plan_553687972.output)).data
+    const
+      loc`gensym448 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym448 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553687973.kind == vak_1):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553687973.kind == vak_1` ")
+    artifact_553687973.value_1
+
+
+type
+  VecherinkaArtifactKind_553725946 = enum
+    vak_0, vak_1, vak_2
+  VecherinkaArtifact_553725947 = object
+    case kind: VecherinkaArtifactKind_553725946
+    of vak_0:
+      value_0: Stage2Intermediate
+    of vak_1:
+      value_1: Stage2Output
+    of vak_2:
+      value_2: Stage2Input
+proc solve_stage_2(input_553726034: Stage2Input;
+                   transport_553726035: LlmTransport[VecherinkaArtifact_553725947] = nil;
+                   logger_553726036: StructuredLogger = nil): Stage2Output =
+  let data_553726037: seq[Flow[VecherinkaArtifact_553725947]] = @[Flow[
+      VecherinkaArtifact_553725947](kind: fk_top, root: "finalise",
+                                    entry: false, body: Flow[VecherinkaArtifact_553725947](
+      kind: fk_model, submit: proc (model_context_553725965: RuntimeContext[
+      VecherinkaArtifact_553725947]; model_request_id_553725966: RequestId;
+                                    model_input_553725967: VecherinkaArtifact_553725947;
+                                    model_working_dir_553725968: Path) {.nimcall.} =
+    let model_typed_input_553725969 = block:
+      let artifact_553725971 = model_input_553725967
+      const
+        loc`gensym485 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym485 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553725971.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553725971.kind == vak_0` ")
+      artifact_553725971.value_0
+    try:
+      let model_materialized_input_553725970 = proc (
+          materializer_input_553725972: Stage2Intermediate;
+          materializer_runtime_dir_553725973, materializer_artifact_dir_553725974: Path;
+          materializer_initial_instructions_553725975: string): string {.nimcall.} = result =
+        var materialized_instructions_553725976 = materializer_initial_instructions_553725975
+        var materialized_names_553725977: seq[string] = @[]
+        add(materialized_instructions_553725976,
+            "input.payload: string = " & $materializer_input_553725972.payload & "\n")
+        materialized_instructions_553725976(model_typed_input_553725969,
+          model_context_553725965.runtime_dir, model_working_dir_553725968, "")
+      let model_output_contract_553725982 = schemaOf(T)
+      let model_output_schema_553725983 = toJsonSchema(model_output_contract_553725982)
+      let model_materializer_553725984 = proc (model_output_kind_553725952: int;
+          model_output_553725953: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553725947] {.nimcall, noinit.} = case model_output_kind_553725952
+      of 1:
+        let model_output_contract_553725954 = schemaOf(T)
+        let model_parsed_output_553725955 = tryParse(model_output_contract_553725954,
+            model_output_553725953.arguments)
+        if not model_parsed_output_553725955.ok:
+          return ModelMaterialization[VecherinkaArtifact_553725947](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553725955.issues) &
+              " schema issues)")
+        var location_errors_553725960 = ""
+        if (
+          not (len(location_errors_553725960) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553725947](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553725960)
+        return ModelMaterialization[VecherinkaArtifact_553725947](ok: true, value: VecherinkaArtifact_553725947(
+            kind: vak_1, value_1: model_parsed_output_553725955.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553725947](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553725985 = register_llm_tool_binding(
+          cast[pointer](model_context_553725965), model_request_id_553725966, 1,
+          cast[pointer](model_materializer_553725984))
+      var model_tools_553725986: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553725986, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553725983, model_tool_data_553725985, proc (
+          tool_data`gensym464: pointer; tool_context`gensym464: ToolCallContext) {.
+          nimcall, gcsafe.} = {.cast(gcsafe).}:
+        let binding`gensym464 = lookup_llm_tool_binding(tool_data`gensym464)
+        if isNone(binding`gensym464):
+          return
+        let data`gensym464 = get(binding`gensym464)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553725947]](data`gensym464.context),
+                                 data`gensym464.request_id,
+                                 data`gensym464.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553725947]](data`gensym464.materializer),
+                                 data`gensym464.id, tool_context`gensym464))
+      let llm_spec_553725991 = LlmCallSpec[VecherinkaArtifact_553725947](
+          profile: profile,
+          prompt: "Copy payload exactly into answer. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553725970,
+          runtime_dir: model_context_553725965.runtime_dir,
+          working_dir: model_working_dir_553725968, tools: model_tools_553725986,
+          output_kind: 1, materialize: model_materializer_553725984)
+      submit_llm(model_context_553725965, model_request_id_553725966, llm_spec_553725991)
+    except CatchableError as error`gensym467:
+      let event`gensym467 = RuntimeEvent[VecherinkaArtifact_553725947](
+          kind: rev_model_error, request_id: model_request_id_553725966,
+          error_message: error`gensym467.msg)
+      enqueue_runtime_event(model_context_553725965, event`gensym467))), Flow[
+      VecherinkaArtifact_553725947](kind: fk_top, root: "seed_then_run",
+                                    entry: true, body: Flow[VecherinkaArtifact_553725947](
+      kind: fk_so, execute: proc (so_artifact_553726023: VecherinkaArtifact_553725947): Flow[
+      VecherinkaArtifact_553725947] {.nimcall.} = result =
+    let so_input_553726024 = block:
+      let artifact_553726025 = so_artifact_553726023
+      const
+        loc`gensym510 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym510 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553726025.kind == vak_2):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553726025.kind == vak_2` ")
+      artifact_553726025.value_2
+    Flow[VecherinkaArtifact_553725947](kind: fk_raw, value: VecherinkaArtifact_553725947(
+        kind: vak_0, value_0: Stage2Intermediate(payload: so_input_553726024.marker)), continuation: Flow[
+        VecherinkaArtifact_553725947](kind: fk_ref, name: "finalise"))))]
+  let input_artifact_553726038 = VecherinkaArtifact_553725947(kind: vak_2,
+      value_2: input_553726034)
+  let work_plan_553726039 = execute_flows(data_553726037, input_artifact_553726038,
+      nil, transport_553726035, nil, logger_553726036)
+  if isNone(work_plan_553726039.output):
+    if isSome(work_plan_553726039.failure_message):
+      raise
+        (ref ValueError)(msg: get(work_plan_553726039.failure_message),
+                         parent: nil)
+    raise
+      (ref ValueError)(msg: "vecherinka execution completed without output",
+                       parent: nil)
+  return block:
+    let artifact_553726040 = lookup_artifact(work_plan_553726039.context,
+        get(work_plan_553726039.output)).data
+    const
+      loc`gensym670 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym670 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553726040.kind == vak_1):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553726040.kind == vak_1` ")
+    artifact_553726040.value_1
+
+
+type
+  VecherinkaArtifactKind_553764133 = enum
+    vak_0, vak_1, vak_2, vak_3, vak_4
+  VecherinkaArtifact_553764134 = object
+    case kind: VecherinkaArtifactKind_553764133
+    of vak_0:
+      value_0: (Stage3Left, Stage3Right)
+    of vak_1:
+      value_1: Stage3Output
+    of vak_2:
+      value_2: Stage3Input
+    of vak_3:
+      value_3: Stage3Left
+    of vak_4:
+      value_4: Stage3Right
+proc solve_stage_3(input_553764302: Stage3Input;
+                   transport_553764303: LlmTransport[VecherinkaArtifact_553764134] = nil;
+                   logger_553764304: StructuredLogger = nil): Stage3Output =
+  let data_553764305: seq[Flow[VecherinkaArtifact_553764134]] = @[Flow[
+      VecherinkaArtifact_553764134](kind: fk_top, root: "merge_fan",
+                                    entry: false, body: Flow[VecherinkaArtifact_553764134](
+      kind: fk_model, submit: proc (model_context_553764164: RuntimeContext[
+      VecherinkaArtifact_553764134]; model_request_id_553764165: RequestId;
+                                    model_input_553764166: VecherinkaArtifact_553764134;
+                                    model_working_dir_553764167: Path) {.nimcall.} =
+    let model_typed_input_553764168 = block:
+      let artifact_553764170 = model_input_553764166
+      const
+        loc`gensym734 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym734 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553764170.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553764170.kind == vak_0` ")
+      artifact_553764170.value_0
+    try:
+      let model_materialized_input_553764169 = proc (
+          materializer_input_553764171: (Stage3Left, Stage3Right);
+          materializer_runtime_dir_553764172, materializer_artifact_dir_553764173: Path;
+          materializer_initial_instructions_553764174: string): string {.nimcall.} = result =
+        var materialized_instructions_553764175 = materializer_initial_instructions_553764174
+        var materialized_names_553764176: seq[string] = @[]
+        add(materialized_instructions_553764175, "input[0].left_value: string = " &
+            $materializer_input_553764171[0].left_value &
+            "\n")
+        add(materialized_instructions_553764175, "input[1].right_value: string = " &
+            $materializer_input_553764171[1].right_value &
+            "\n")
+        materialized_instructions_553764175(model_typed_input_553764168,
+          model_context_553764164.runtime_dir, model_working_dir_553764167, "")
+      let model_output_contract_553764185 = schemaOf(T)
+      let model_output_schema_553764186 = toJsonSchema(model_output_contract_553764185)
+      let model_materializer_553764187 = proc (model_output_kind_553764143: int;
+          model_output_553764144: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553764134] {.nimcall, noinit.} = case model_output_kind_553764143
+      of 1:
+        let model_output_contract_553764145 = schemaOf(T)
+        let model_parsed_output_553764146 = tryParse(model_output_contract_553764145,
+            model_output_553764144.arguments)
+        if not model_parsed_output_553764146.ok:
+          return ModelMaterialization[VecherinkaArtifact_553764134](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553764146.issues) &
+              " schema issues)")
+        var location_errors_553764155 = ""
+        if (
+          not (len(location_errors_553764155) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553764134](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553764155)
+        return ModelMaterialization[VecherinkaArtifact_553764134](ok: true, value: VecherinkaArtifact_553764134(
+            kind: vak_1, value_1: model_parsed_output_553764146.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553764134](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553764188 = register_llm_tool_binding(
+          cast[pointer](model_context_553764164), model_request_id_553764165, 1,
+          cast[pointer](model_materializer_553764187))
+      var model_tools_553764189: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553764189, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553764186, model_tool_data_553764188, proc (
+          tool_data`gensym687: pointer; tool_context`gensym687: ToolCallContext) {.
+          nimcall, gcsafe.} = {.cast(gcsafe).}:
+        let binding`gensym687 = lookup_llm_tool_binding(tool_data`gensym687)
+        if isNone(binding`gensym687):
+          return
+        let data`gensym687 = get(binding`gensym687)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553764134]](data`gensym687.context),
+                                 data`gensym687.request_id,
+                                 data`gensym687.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553764134]](data`gensym687.materializer),
+                                 data`gensym687.id, tool_context`gensym687))
+      let llm_spec_553764194 = LlmCallSpec[VecherinkaArtifact_553764134](
+          profile: profile, prompt: "Copy left_value exactly into left. Copy right_value exactly into right. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553764169,
+          runtime_dir: model_context_553764164.runtime_dir,
+          working_dir: model_working_dir_553764167, tools: model_tools_553764189,
+          output_kind: 1, materialize: model_materializer_553764187)
+      submit_llm(model_context_553764164, model_request_id_553764165, llm_spec_553764194)
+    except CatchableError as error`gensym690:
+      let event`gensym690 = RuntimeEvent[VecherinkaArtifact_553764134](
+          kind: rev_model_error, request_id: model_request_id_553764165,
+          error_message: error`gensym690.msg)
+      enqueue_runtime_event(model_context_553764164, event`gensym690))), Flow[
+      VecherinkaArtifact_553764134](kind: fk_top, root: "fan_entry",
+                                    entry: true, body: Flow[VecherinkaArtifact_553764134](
+      kind: fk_fanout, branches: @[Flow[VecherinkaArtifact_553764134](
+      kind: fk_model, submit: proc (model_context_553764224: RuntimeContext[
+      VecherinkaArtifact_553764134]; model_request_id_553764225: RequestId;
+                                    model_input_553764226: VecherinkaArtifact_553764134;
+                                    model_working_dir_553764227: Path) {.nimcall.} =
+    let model_typed_input_553764228 = block:
+      let artifact_553764230 = model_input_553764226
+      const
+        loc`gensym759 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym759 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553764230.kind == vak_2):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553764230.kind == vak_2` ")
+      artifact_553764230.value_2
+    try:
+      let model_materialized_input_553764229 = proc (
+          materializer_input_553764231: Stage3Input;
+          materializer_runtime_dir_553764232, materializer_artifact_dir_553764233: Path;
+          materializer_initial_instructions_553764234: string): string {.nimcall.} = result =
+        var materialized_instructions_553764235 = materializer_initial_instructions_553764234
+        var materialized_names_553764236: seq[string] = @[]
+        add(materialized_instructions_553764235,
+            "input.marker: string = " & $materializer_input_553764231.marker & "\n")
+        materialized_instructions_553764235(model_typed_input_553764228,
+          model_context_553764224.runtime_dir, model_working_dir_553764227, "")
+      let model_output_contract_553764241 = schemaOf(T)
+      let model_output_schema_553764242 = toJsonSchema(model_output_contract_553764241)
+      let model_materializer_553764243 = proc (model_output_kind_553764211: int;
+          model_output_553764212: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553764134] {.nimcall, noinit.} = case model_output_kind_553764211
+      of 3:
+        let model_output_contract_553764213 = schemaOf(T)
+        let model_parsed_output_553764214 = tryParse(model_output_contract_553764213,
+            model_output_553764212.arguments)
+        if not model_parsed_output_553764214.ok:
+          return ModelMaterialization[VecherinkaArtifact_553764134](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553764214.issues) &
+              " schema issues)")
+        var location_errors_553764219 = ""
+        if (
+          not (len(location_errors_553764219) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553764134](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553764219)
+        return ModelMaterialization[VecherinkaArtifact_553764134](ok: true, value: VecherinkaArtifact_553764134(
+            kind: vak_3, value_3: model_parsed_output_553764214.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553764134](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553764244 = register_llm_tool_binding(
+          cast[pointer](model_context_553764224), model_request_id_553764225, 3,
+          cast[pointer](model_materializer_553764243))
+      var model_tools_553764245: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553764245, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553764242, model_tool_data_553764244, proc (
+          tool_data`gensym701: pointer; tool_context`gensym701: ToolCallContext) {.
+          nimcall, gcsafe.} = {.cast(gcsafe).}:
+        let binding`gensym701 = lookup_llm_tool_binding(tool_data`gensym701)
+        if isNone(binding`gensym701):
+          return
+        let data`gensym701 = get(binding`gensym701)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553764134]](data`gensym701.context),
+                                 data`gensym701.request_id,
+                                 data`gensym701.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553764134]](data`gensym701.materializer),
+                                 data`gensym701.id, tool_context`gensym701))
+      let llm_spec_553764250 = LlmCallSpec[VecherinkaArtifact_553764134](
+          profile: profile,
+          prompt: "Copy marker exactly into left_value. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553764229,
+          runtime_dir: model_context_553764224.runtime_dir,
+          working_dir: model_working_dir_553764227, tools: model_tools_553764245,
+          output_kind: 3, materialize: model_materializer_553764243)
+      submit_llm(model_context_553764224, model_request_id_553764225, llm_spec_553764250)
+    except CatchableError as error`gensym704:
+      let event`gensym704 = RuntimeEvent[VecherinkaArtifact_553764134](
+          kind: rev_model_error, request_id: model_request_id_553764225,
+          error_message: error`gensym704.msg)
+      enqueue_runtime_event(model_context_553764224, event`gensym704)), Flow[
+      VecherinkaArtifact_553764134](kind: fk_model, submit: proc (
+      model_context_553764270: RuntimeContext[VecherinkaArtifact_553764134];
+      model_request_id_553764271: RequestId; model_input_553764272: VecherinkaArtifact_553764134;
+      model_working_dir_553764273: Path) {.nimcall.} =
+    let model_typed_input_553764274 = block:
+      let artifact_553764276 = model_input_553764272
+      const
+        loc`gensym764 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym764 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553764276.kind == vak_2):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553764276.kind == vak_2` ")
+      artifact_553764276.value_2
+    try:
+      let model_materialized_input_553764275 = proc (
+          materializer_input_553764277: Stage3Input;
+          materializer_runtime_dir_553764278, materializer_artifact_dir_553764279: Path;
+          materializer_initial_instructions_553764280: string): string {.nimcall.} = result =
+        var materialized_instructions_553764281 = materializer_initial_instructions_553764280
+        var materialized_names_553764282: seq[string] = @[]
+        add(materialized_instructions_553764281,
+            "input.marker: string = " & $materializer_input_553764277.marker & "\n")
+        materialized_instructions_553764281(model_typed_input_553764274,
+          model_context_553764270.runtime_dir, model_working_dir_553764273, "")
+      let model_output_contract_553764287 = schemaOf(T)
+      let model_output_schema_553764288 = toJsonSchema(model_output_contract_553764287)
+      let model_materializer_553764289 = proc (model_output_kind_553764257: int;
+          model_output_553764258: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553764134] {.nimcall, noinit.} = case model_output_kind_553764257
+      of 4:
+        let model_output_contract_553764259 = schemaOf(T)
+        let model_parsed_output_553764260 = tryParse(model_output_contract_553764259,
+            model_output_553764258.arguments)
+        if not model_parsed_output_553764260.ok:
+          return ModelMaterialization[VecherinkaArtifact_553764134](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553764260.issues) &
+              " schema issues)")
+        var location_errors_553764265 = ""
+        if (
+          not (len(location_errors_553764265) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553764134](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553764265)
+        return ModelMaterialization[VecherinkaArtifact_553764134](ok: true, value: VecherinkaArtifact_553764134(
+            kind: vak_4, value_4: model_parsed_output_553764260.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553764134](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553764290 = register_llm_tool_binding(
+          cast[pointer](model_context_553764270), model_request_id_553764271, 4,
+          cast[pointer](model_materializer_553764289))
+      var model_tools_553764291: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553764291, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553764288, model_tool_data_553764290, proc (
+          tool_data`gensym714: pointer; tool_context`gensym714: ToolCallContext) {.
+          nimcall, gcsafe.} = {.cast(gcsafe).}:
+        let binding`gensym714 = lookup_llm_tool_binding(tool_data`gensym714)
+        if isNone(binding`gensym714):
+          return
+        let data`gensym714 = get(binding`gensym714)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553764134]](data`gensym714.context),
+                                 data`gensym714.request_id,
+                                 data`gensym714.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553764134]](data`gensym714.materializer),
+                                 data`gensym714.id, tool_context`gensym714))
+      let llm_spec_553764296 = LlmCallSpec[VecherinkaArtifact_553764134](
+          profile: profile,
+          prompt: "Copy marker exactly into right_value. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553764275,
+          runtime_dir: model_context_553764270.runtime_dir,
+          working_dir: model_working_dir_553764273, tools: model_tools_553764291,
+          output_kind: 4, materialize: model_materializer_553764289)
+      submit_llm(model_context_553764270, model_request_id_553764271, llm_spec_553764296)
+    except CatchableError as error`gensym717:
+      let event`gensym717 = RuntimeEvent[VecherinkaArtifact_553764134](
+          kind: rev_model_error, request_id: model_request_id_553764271,
+          error_message: error`gensym717.msg)
+      enqueue_runtime_event(model_context_553764270, event`gensym717))], coalesce: proc (
+      fan_values_553764299: seq[VecherinkaArtifact_553764134]): VecherinkaArtifact_553764134 {.
+      nimcall.} = result = VecherinkaArtifact_553764134(kind: vak_0, value_0: (block:
+    let artifact_553764300 = fan_values_553764299[0]
+    const
+      loc`gensym769 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym769 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553764300.kind == vak_3):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553764300.kind == vak_3` ")
+    artifact_553764300.value_3, block:
+    let artifact_553764301 = fan_values_553764299[1]
+    const
+      loc`gensym771 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym771 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553764301.kind == vak_4):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553764301.kind == vak_4` ")
+    artifact_553764301.value_4)), continuation: Flow[VecherinkaArtifact_553764134](
+      kind: fk_ref, name: "merge_fan")))]
+  let input_artifact_553764306 = VecherinkaArtifact_553764134(kind: vak_2,
+      value_2: input_553764302)
+  let work_plan_553764307 = execute_flows(data_553764305, input_artifact_553764306,
+      nil, transport_553764303, nil, logger_553764304)
+  if isNone(work_plan_553764307.output):
+    if isSome(work_plan_553764307.failure_message):
+      raise
+        (ref ValueError)(msg: get(work_plan_553764307.failure_message),
+                         parent: nil)
+    raise
+      (ref ValueError)(msg: "vecherinka execution completed without output",
+                       parent: nil)
+  return block:
+    let artifact_553764308 = lookup_artifact(work_plan_553764307.context,
+        get(work_plan_553764307.output)).data
+    const
+      loc`gensym931 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym931 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553764308.kind == vak_1):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553764308.kind == vak_1` ")
+    artifact_553764308.value_1
+
+
+type
+  VecherinkaArtifactKind_553803268 = enum
+    vak_0, vak_1, vak_2, vak_3
+  VecherinkaArtifact_553803269 = object
+    case kind: VecherinkaArtifactKind_553803268
+    of vak_0:
+      value_0: Stage3Input
+    of vak_1:
+      value_1: (Stage3Left, Stage3Right)
+    of vak_2:
+      value_2: Stage3Left
+    of vak_3:
+      value_3: Stage3Right
+proc solve_stage_3_fan(input_553803365: Stage3Input;
+                       transport_553803366: LlmTransport[VecherinkaArtifact_553803269] = nil;
+                       logger_553803367: StructuredLogger = nil): (Stage3Left,
+    Stage3Right) =
+  let data_553803368: seq[Flow[VecherinkaArtifact_553803269]] = @[Flow[
+      VecherinkaArtifact_553803269](kind: fk_top, root: "fan_only", entry: true, body: Flow[
+      VecherinkaArtifact_553803269](kind: fk_fanout, branches: @[Flow[
+      VecherinkaArtifact_553803269](kind: fk_model, submit: proc (
+      model_context_553803287: RuntimeContext[VecherinkaArtifact_553803269];
+      model_request_id_553803288: RequestId; model_input_553803289: VecherinkaArtifact_553803269;
+      model_working_dir_553803290: Path) {.nimcall.} =
+    let model_typed_input_553803291 = block:
+      let artifact_553803293 = model_input_553803289
+      const
+        loc`gensym976 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym976 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553803293.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553803293.kind == vak_0` ")
+      artifact_553803293.value_0
+    try:
+      let model_materialized_input_553803292 = proc (
+          materializer_input_553803294: Stage3Input;
+          materializer_runtime_dir_553803295, materializer_artifact_dir_553803296: Path;
+          materializer_initial_instructions_553803297: string): string {.nimcall.} = result =
+        var materialized_instructions_553803298 = materializer_initial_instructions_553803297
+        var materialized_names_553803299: seq[string] = @[]
+        add(materialized_instructions_553803298,
+            "input.marker: string = " & $materializer_input_553803294.marker & "\n")
+        materialized_instructions_553803298(model_typed_input_553803291,
+          model_context_553803287.runtime_dir, model_working_dir_553803290, "")
+      let model_output_contract_553803304 = schemaOf(T)
+      let model_output_schema_553803305 = toJsonSchema(model_output_contract_553803304)
+      let model_materializer_553803306 = proc (model_output_kind_553803274: int;
+          model_output_553803275: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553803269] {.nimcall, noinit.} = case model_output_kind_553803274
+      of 2:
+        let model_output_contract_553803276 = schemaOf(T)
+        let model_parsed_output_553803277 = tryParse(model_output_contract_553803276,
+            model_output_553803275.arguments)
+        if not model_parsed_output_553803277.ok:
+          return ModelMaterialization[VecherinkaArtifact_553803269](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553803277.issues) &
+              " schema issues)")
+        var location_errors_553803282 = ""
+        if (
+          not (len(location_errors_553803282) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553803269](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553803282)
+        return ModelMaterialization[VecherinkaArtifact_553803269](ok: true, value: VecherinkaArtifact_553803269(
+            kind: vak_2, value_2: model_parsed_output_553803277.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553803269](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553803307 = register_llm_tool_binding(
+          cast[pointer](model_context_553803287), model_request_id_553803288, 2,
+          cast[pointer](model_materializer_553803306))
+      var model_tools_553803308: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553803308, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553803305, model_tool_data_553803307, proc (
+          tool_data`gensym944: pointer; tool_context`gensym944: ToolCallContext) {.
+          nimcall, gcsafe.} = {.cast(gcsafe).}:
+        let binding`gensym944 = lookup_llm_tool_binding(tool_data`gensym944)
+        if isNone(binding`gensym944):
+          return
+        let data`gensym944 = get(binding`gensym944)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553803269]](data`gensym944.context),
+                                 data`gensym944.request_id,
+                                 data`gensym944.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553803269]](data`gensym944.materializer),
+                                 data`gensym944.id, tool_context`gensym944))
+      let llm_spec_553803313 = LlmCallSpec[VecherinkaArtifact_553803269](
+          profile: profile,
+          prompt: "Copy marker exactly into left_value. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553803292,
+          runtime_dir: model_context_553803287.runtime_dir,
+          working_dir: model_working_dir_553803290, tools: model_tools_553803308,
+          output_kind: 2, materialize: model_materializer_553803306)
+      submit_llm(model_context_553803287, model_request_id_553803288, llm_spec_553803313)
+    except CatchableError as error`gensym947:
+      let event`gensym947 = RuntimeEvent[VecherinkaArtifact_553803269](
+          kind: rev_model_error, request_id: model_request_id_553803288,
+          error_message: error`gensym947.msg)
+      enqueue_runtime_event(model_context_553803287, event`gensym947)), Flow[
+      VecherinkaArtifact_553803269](kind: fk_model, submit: proc (
+      model_context_553803333: RuntimeContext[VecherinkaArtifact_553803269];
+      model_request_id_553803334: RequestId; model_input_553803335: VecherinkaArtifact_553803269;
+      model_working_dir_553803336: Path) {.nimcall.} =
+    let model_typed_input_553803337 = block:
+      let artifact_553803339 = model_input_553803335
+      const
+        loc`gensym1001 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym1001 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553803339.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553803339.kind == vak_0` ")
+      artifact_553803339.value_0
+    try:
+      let model_materialized_input_553803338 = proc (
+          materializer_input_553803340: Stage3Input;
+          materializer_runtime_dir_553803341, materializer_artifact_dir_553803342: Path;
+          materializer_initial_instructions_553803343: string): string {.nimcall.} = result =
+        var materialized_instructions_553803344 = materializer_initial_instructions_553803343
+        var materialized_names_553803345: seq[string] = @[]
+        add(materialized_instructions_553803344,
+            "input.marker: string = " & $materializer_input_553803340.marker & "\n")
+        materialized_instructions_553803344(model_typed_input_553803337,
+          model_context_553803333.runtime_dir, model_working_dir_553803336, "")
+      let model_output_contract_553803350 = schemaOf(T)
+      let model_output_schema_553803351 = toJsonSchema(model_output_contract_553803350)
+      let model_materializer_553803352 = proc (model_output_kind_553803320: int;
+          model_output_553803321: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553803269] {.nimcall, noinit.} = case model_output_kind_553803320
+      of 3:
+        let model_output_contract_553803322 = schemaOf(T)
+        let model_parsed_output_553803323 = tryParse(model_output_contract_553803322,
+            model_output_553803321.arguments)
+        if not model_parsed_output_553803323.ok:
+          return ModelMaterialization[VecherinkaArtifact_553803269](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553803323.issues) &
+              " schema issues)")
+        var location_errors_553803328 = ""
+        if (
+          not (len(location_errors_553803328) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553803269](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553803328)
+        return ModelMaterialization[VecherinkaArtifact_553803269](ok: true, value: VecherinkaArtifact_553803269(
+            kind: vak_3, value_3: model_parsed_output_553803323.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553803269](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553803353 = register_llm_tool_binding(
+          cast[pointer](model_context_553803333), model_request_id_553803334, 3,
+          cast[pointer](model_materializer_553803352))
+      var model_tools_553803354: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553803354, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553803351, model_tool_data_553803353, proc (
+          tool_data`gensym957: pointer; tool_context`gensym957: ToolCallContext) {.
+          nimcall, gcsafe.} = {.cast(gcsafe).}:
+        let binding`gensym957 = lookup_llm_tool_binding(tool_data`gensym957)
+        if isNone(binding`gensym957):
+          return
+        let data`gensym957 = get(binding`gensym957)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553803269]](data`gensym957.context),
+                                 data`gensym957.request_id,
+                                 data`gensym957.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553803269]](data`gensym957.materializer),
+                                 data`gensym957.id, tool_context`gensym957))
+      let llm_spec_553803359 = LlmCallSpec[VecherinkaArtifact_553803269](
+          profile: profile,
+          prompt: "Copy marker exactly into right_value. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553803338,
+          runtime_dir: model_context_553803333.runtime_dir,
+          working_dir: model_working_dir_553803336, tools: model_tools_553803354,
+          output_kind: 3, materialize: model_materializer_553803352)
+      submit_llm(model_context_553803333, model_request_id_553803334, llm_spec_553803359)
+    except CatchableError as error`gensym960:
+      let event`gensym960 = RuntimeEvent[VecherinkaArtifact_553803269](
+          kind: rev_model_error, request_id: model_request_id_553803334,
+          error_message: error`gensym960.msg)
+      enqueue_runtime_event(model_context_553803333, event`gensym960))], coalesce: proc (
+      fan_values_553803362: seq[VecherinkaArtifact_553803269]): VecherinkaArtifact_553803269 {.
+      nimcall.} = result = VecherinkaArtifact_553803269(kind: vak_1, value_1: (block:
+    let artifact_553803363 = fan_values_553803362[0]
+    const
+      loc`gensym1006 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym1006 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553803363.kind == vak_2):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553803363.kind == vak_2` ")
+    artifact_553803363.value_2, block:
+    let artifact_553803364 = fan_values_553803362[1]
+    const
+      loc`gensym1008 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym1008 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553803364.kind == vak_3):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553803364.kind == vak_3` ")
+    artifact_553803364.value_3))))]
+  let input_artifact_553803369 = VecherinkaArtifact_553803269(kind: vak_0,
+      value_0: input_553803365)
+  let work_plan_553803370 = execute_flows(data_553803368, input_artifact_553803369,
+      nil, transport_553803366, nil, logger_553803367)
+  if isNone(work_plan_553803370.output):
+    if isSome(work_plan_553803370.failure_message):
+      raise
+        (ref ValueError)(msg: get(work_plan_553803370.failure_message),
+                         parent: nil)
+    raise
+      (ref ValueError)(msg: "vecherinka execution completed without output",
+                       parent: nil)
+  return block:
+    let artifact_553803371 = lookup_artifact(work_plan_553803370.context,
+        get(work_plan_553803370.output)).data
+    const
+      loc`gensym1168 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym1168 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553803371.kind == vak_1):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553803371.kind == vak_1` ")
+    artifact_553803371.value_1
+
+
+type
+  VecherinkaArtifactKind_553841538 = enum
+    vak_0, vak_1
+  VecherinkaArtifact_553841539 = object
+    case kind: VecherinkaArtifactKind_553841538
+    of vak_0:
+      value_0: Stage4Input
+    of vak_1:
+      value_1: Stage4Output
+proc solve_stage_4(input_553841593: Stage4Input;
+                   transport_553841594: LlmTransport[VecherinkaArtifact_553841539] = nil;
+                   logger_553841595: StructuredLogger = nil): Stage4Output =
+  let data_553841596: seq[Flow[VecherinkaArtifact_553841539]] = @[Flow[
+      VecherinkaArtifact_553841539](kind: fk_top, root: "annotate",
+                                    entry: false, body: Flow[VecherinkaArtifact_553841539](
+      kind: fk_model, submit: proc (model_context_553841557: RuntimeContext[
+      VecherinkaArtifact_553841539]; model_request_id_553841558: RequestId;
+                                    model_input_553841559: VecherinkaArtifact_553841539;
+                                    model_working_dir_553841560: Path) {.nimcall.} =
+    let model_typed_input_553841561 = block:
+      let artifact_553841563 = model_input_553841559
+      const
+        loc`gensym1208 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym1208 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553841563.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553841563.kind == vak_0` ")
+      artifact_553841563.value_0
+    try:
+      let model_materialized_input_553841562 = proc (
+          materializer_input_553841564: Stage4Input;
+          materializer_runtime_dir_553841565, materializer_artifact_dir_553841566: Path;
+          materializer_initial_instructions_553841567: string): string {.nimcall.} = result =
+        var materialized_instructions_553841568 = materializer_initial_instructions_553841567
+        var materialized_names_553841569: seq[string] = @[]
+        add(materialized_instructions_553841568,
+            "input.mode: string = " & $materializer_input_553841564.mode & "\n")
+        add(materialized_instructions_553841568,
+            "input.marker: string = " & $materializer_input_553841564.marker & "\n")
+        materialized_instructions_553841568(model_typed_input_553841561,
+          model_context_553841557.runtime_dir, model_working_dir_553841560, "")
+      let model_output_contract_553841578 = schemaOf(T)
+      let model_output_schema_553841579 = toJsonSchema(model_output_contract_553841578)
+      let model_materializer_553841580 = proc (model_output_kind_553841544: int;
+          model_output_553841545: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553841539] {.nimcall, noinit.} = case model_output_kind_553841544
+      of 1:
+        let model_output_contract_553841546 = schemaOf(T)
+        let model_parsed_output_553841547 = tryParse(model_output_contract_553841546,
+            model_output_553841545.arguments)
+        if not model_parsed_output_553841547.ok:
+          return ModelMaterialization[VecherinkaArtifact_553841539](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553841547.issues) &
+              " schema issues)")
+        var location_errors_553841552 = ""
+        if (
+          not (len(location_errors_553841552) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553841539](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553841552)
+        return ModelMaterialization[VecherinkaArtifact_553841539](ok: true, value: VecherinkaArtifact_553841539(
+            kind: vak_1, value_1: model_parsed_output_553841547.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553841539](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553841581 = register_llm_tool_binding(
+          cast[pointer](model_context_553841557), model_request_id_553841558, 1,
+          cast[pointer](model_materializer_553841580))
+      var model_tools_553841582: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553841582, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553841579, model_tool_data_553841581, proc (
+          tool_data`gensym1185: pointer;
+          tool_context`gensym1185: ToolCallContext) {.nimcall, gcsafe.} = {.
+          cast(gcsafe).}:
+        let binding`gensym1185 = lookup_llm_tool_binding(tool_data`gensym1185)
+        if isNone(binding`gensym1185):
+          return
+        let data`gensym1185 = get(binding`gensym1185)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553841539]](data`gensym1185.context),
+                                 data`gensym1185.request_id,
+                                 data`gensym1185.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553841539]](data`gensym1185.materializer),
+                                 data`gensym1185.id, tool_context`gensym1185))
+      let llm_spec_553841587 = LlmCallSpec[VecherinkaArtifact_553841539](
+          profile: profile,
+          prompt: "Copy marker exactly into answer. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553841562,
+          runtime_dir: model_context_553841557.runtime_dir,
+          working_dir: model_working_dir_553841560, tools: model_tools_553841582,
+          output_kind: 1, materialize: model_materializer_553841580)
+      submit_llm(model_context_553841557, model_request_id_553841558, llm_spec_553841587)
+    except CatchableError as error`gensym1188:
+      let event`gensym1188 = RuntimeEvent[VecherinkaArtifact_553841539](
+          kind: rev_model_error, request_id: model_request_id_553841558,
+          error_message: error`gensym1188.msg)
+      enqueue_runtime_event(model_context_553841557, event`gensym1188))), Flow[
+      VecherinkaArtifact_553841539](kind: fk_top, root: "route", entry: true, body: Flow[
+      VecherinkaArtifact_553841539](kind: fk_so, execute: proc (
+      so_artifact_553841590: VecherinkaArtifact_553841539): Flow[
+      VecherinkaArtifact_553841539] {.nimcall.} = result =
+    let so_input_553841591 = block:
+      let artifact_553841592 = so_artifact_553841590
+      const
+        loc`gensym1233 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym1233 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553841592.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553841592.kind == vak_0` ")
+      artifact_553841592.value_0
+    if so_input_553841591.mode == "model": Flow[VecherinkaArtifact_553841539](
+        kind: fk_raw, value: VecherinkaArtifact_553841539(kind: vak_0,
+        value_0: so_input_553841591), continuation: Flow[VecherinkaArtifact_553841539](
+        kind: fk_ref, name: "annotate")) else: Flow[VecherinkaArtifact_553841539](
+        kind: fk_raw, value: VecherinkaArtifact_553841539(kind: vak_1,
+        value_1: Stage4Output(answer: "pure:" & so_input_553841591.marker)))))]
+  let input_artifact_553841597 = VecherinkaArtifact_553841539(kind: vak_0,
+      value_0: input_553841593)
+  let work_plan_553841598 = execute_flows(data_553841596, input_artifact_553841597,
+      nil, transport_553841594, nil, logger_553841595)
+  if isNone(work_plan_553841598.output):
+    if isSome(work_plan_553841598.failure_message):
+      raise
+        (ref ValueError)(msg: get(work_plan_553841598.failure_message),
+                         parent: nil)
+    raise
+      (ref ValueError)(msg: "vecherinka execution completed without output",
+                       parent: nil)
+  return block:
+    let artifact_553841599 = lookup_artifact(work_plan_553841598.context,
+        get(work_plan_553841598.output)).data
+    const
+      loc`gensym1393 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym1393 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553841599.kind == vak_1):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553841599.kind == vak_1` ")
+    artifact_553841599.value_1
+
+
+type
+  VecherinkaArtifactKind_553879787 = enum
+    vak_0, vak_1, vak_2
+  VecherinkaArtifact_553879788 = object
+    case kind: VecherinkaArtifactKind_553879787
+    of vak_0:
+      value_0: Stage5Input
+    of vak_1:
+      value_1: string
+    of vak_2:
+      value_2: Stage5Output
+proc solve_stage_5(input_553879841: Stage5Input;
+                   transport_553879842: LlmTransport[VecherinkaArtifact_553879788] = nil;
+                   logger_553879843: StructuredLogger = nil): Stage5Output =
+  let data_553879844: seq[Flow[VecherinkaArtifact_553879788]] = @[Flow[
+      VecherinkaArtifact_553879788](kind: fk_top, root: "project_marker",
+                                    entry: false, body: Flow[VecherinkaArtifact_553879788](
+      kind: fk_it, projector: proc (it_artifact_553879789: VecherinkaArtifact_553879788): VecherinkaArtifact_553879788 {.
+      nimcall.} = result =
+    let it_value_553879790 = block:
+      let artifact_553879791 = it_artifact_553879789
+      const
+        loc`gensym1443 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym1443 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553879791.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553879791.kind == vak_0` ")
+      artifact_553879791.value_0
+    VecherinkaArtifact_553879788(kind: vak_1, value_1: it_value_553879790.marker))), Flow[
+      VecherinkaArtifact_553879788](kind: fk_top, root: "finish_projection",
+                                    entry: false, body: Flow[VecherinkaArtifact_553879788](
+      kind: fk_model, submit: proc (model_context_553879809: RuntimeContext[
+      VecherinkaArtifact_553879788]; model_request_id_553879810: RequestId;
+                                    model_input_553879811: VecherinkaArtifact_553879788;
+                                    model_working_dir_553879812: Path) {.nimcall.} =
+    let model_typed_input_553879813 = block:
+      let artifact_553879815 = model_input_553879811
+      const
+        loc`gensym1445 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym1445 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553879815.kind == vak_1):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553879815.kind == vak_1` ")
+      artifact_553879815.value_1
+    try:
+      let model_materialized_input_553879814 = proc (materializer_input_553879816: string;
+          materializer_runtime_dir_553879817, materializer_artifact_dir_553879818: Path;
+          materializer_initial_instructions_553879819: string): string {.nimcall.} = result =
+        var materialized_instructions_553879820 = materializer_initial_instructions_553879819
+        var materialized_names_553879821: seq[string] = @[]
+        add(materialized_instructions_553879820,
+            "input: string = " & $materializer_input_553879816 & "\n")
+        materialized_instructions_553879820(model_typed_input_553879813,
+          model_context_553879809.runtime_dir, model_working_dir_553879812, "")
+      let model_output_contract_553879826 = schemaOf(T)
+      let model_output_schema_553879827 = toJsonSchema(model_output_contract_553879826)
+      let model_materializer_553879828 = proc (model_output_kind_553879796: int;
+          model_output_553879797: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553879788] {.nimcall, noinit.} = case model_output_kind_553879796
+      of 2:
+        let model_output_contract_553879798 = schemaOf(T)
+        let model_parsed_output_553879799 = tryParse(model_output_contract_553879798,
+            model_output_553879797.arguments)
+        if not model_parsed_output_553879799.ok:
+          return ModelMaterialization[VecherinkaArtifact_553879788](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553879799.issues) &
+              " schema issues)")
+        var location_errors_553879804 = ""
+        if (
+          not (len(location_errors_553879804) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553879788](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553879804)
+        return ModelMaterialization[VecherinkaArtifact_553879788](ok: true, value: VecherinkaArtifact_553879788(
+            kind: vak_2, value_2: model_parsed_output_553879799.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553879788](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553879829 = register_llm_tool_binding(
+          cast[pointer](model_context_553879809), model_request_id_553879810, 2,
+          cast[pointer](model_materializer_553879828))
+      var model_tools_553879830: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553879830, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553879827, model_tool_data_553879829, proc (
+          tool_data`gensym1421: pointer;
+          tool_context`gensym1421: ToolCallContext) {.nimcall, gcsafe.} = {.
+          cast(gcsafe).}:
+        let binding`gensym1421 = lookup_llm_tool_binding(tool_data`gensym1421)
+        if isNone(binding`gensym1421):
+          return
+        let data`gensym1421 = get(binding`gensym1421)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553879788]](data`gensym1421.context),
+                                 data`gensym1421.request_id,
+                                 data`gensym1421.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553879788]](data`gensym1421.materializer),
+                                 data`gensym1421.id, tool_context`gensym1421))
+      let llm_spec_553879835 = LlmCallSpec[VecherinkaArtifact_553879788](
+          profile: profile, prompt: "Copy the input string exactly into answer. Do not create files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553879814,
+          runtime_dir: model_context_553879809.runtime_dir,
+          working_dir: model_working_dir_553879812, tools: model_tools_553879830,
+          output_kind: 2, materialize: model_materializer_553879828)
+      submit_llm(model_context_553879809, model_request_id_553879810, llm_spec_553879835)
+    except CatchableError as error`gensym1424:
+      let event`gensym1424 = RuntimeEvent[VecherinkaArtifact_553879788](
+          kind: rev_model_error, request_id: model_request_id_553879810,
+          error_message: error`gensym1424.msg)
+      enqueue_runtime_event(model_context_553879809, event`gensym1424))), Flow[
+      VecherinkaArtifact_553879788](kind: fk_top, root: "project_entry",
+                                    entry: true, body: Flow[VecherinkaArtifact_553879788](
+      kind: fk_so, execute: proc (so_artifact_553879838: VecherinkaArtifact_553879788): Flow[
+      VecherinkaArtifact_553879788] {.nimcall.} = result =
+    let so_input_553879839 = block:
+      let artifact_553879840 = so_artifact_553879838
+      const
+        loc`gensym1470 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym1470 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553879840.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553879840.kind == vak_0` ")
+      artifact_553879840.value_0
+    Flow[VecherinkaArtifact_553879788](kind: fk_raw, value: VecherinkaArtifact_553879788(
+        kind: vak_0, value_0: so_input_553879839), continuation: Flow[
+        VecherinkaArtifact_553879788](kind: fk_ref, name: "project_marker", continuation: Flow[
+        VecherinkaArtifact_553879788](kind: fk_ref, name: "finish_projection")))))]
+  let input_artifact_553879845 = VecherinkaArtifact_553879788(kind: vak_0,
+      value_0: input_553879841)
+  let work_plan_553879846 = execute_flows(data_553879844, input_artifact_553879845,
+      nil, transport_553879842, nil, logger_553879843)
+  if isNone(work_plan_553879846.output):
+    if isSome(work_plan_553879846.failure_message):
+      raise
+        (ref ValueError)(msg: get(work_plan_553879846.failure_message),
+                         parent: nil)
+    raise
+      (ref ValueError)(msg: "vecherinka execution completed without output",
+                       parent: nil)
+  return block:
+    let artifact_553879847 = lookup_artifact(work_plan_553879846.context,
+        get(work_plan_553879846.output)).data
+    const
+      loc`gensym1630 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym1630 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553879847.kind == vak_2):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553879847.kind == vak_2` ")
+    artifact_553879847.value_2
+
+
+type
+  VecherinkaArtifactKind_553917669 = enum
+    vak_0, vak_1
+  VecherinkaArtifact_553917670 = object
+    case kind: VecherinkaArtifactKind_553917669
+    of vak_0:
+      value_0: Stage6Input
+    of vak_1:
+      value_1: Stage6Output
+proc solve_stage_6(input_553917715: Stage6Input;
+                   transport_553917716: LlmTransport[VecherinkaArtifact_553917670] = nil;
+                   logger_553917717: StructuredLogger = nil): Stage6Output =
+  let data_553917718: seq[Flow[VecherinkaArtifact_553917670]] = @[Flow[
+      VecherinkaArtifact_553917670](kind: fk_top, root: "materialise",
+                                    entry: true, body: Flow[VecherinkaArtifact_553917670](
+      kind: fk_model, submit: proc (model_context_553917689: RuntimeContext[
+      VecherinkaArtifact_553917670]; model_request_id_553917690: RequestId;
+                                    model_input_553917691: VecherinkaArtifact_553917670;
+                                    model_working_dir_553917692: Path) {.nimcall.} =
+    let model_typed_input_553917693 = block:
+      let artifact_553917695 = model_input_553917691
+      const
+        loc`gensym1659 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+          line: 1934, column: 6)
+        ploc`gensym1659 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+      bind instantiationInfo
+      mixin failedAssertImpl
+      {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+               line: 1934, column: 6).}:
+        if not (artifact_553917695.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553917695.kind == vak_0` ")
+      artifact_553917695.value_0
+    try:
+      let model_materialized_input_553917694 = proc (
+          materializer_input_553917696: Stage6Input;
+          materializer_runtime_dir_553917697, materializer_artifact_dir_553917698: Path;
+          materializer_initial_instructions_553917699: string): string {.nimcall.} = result =
+        var materialized_instructions_553917700 = materializer_initial_instructions_553917699
+        var materialized_names_553917701: seq[string] = @[]
+        let materialized_location_name_553917702 = copy_location_payload(
+            materializer_runtime_dir_553917697, materializer_artifact_dir_553917698,
+            cast[string](materializer_input_553917696.source),
+            materialized_names_553917701)
+        add(materialized_instructions_553917700, "input.source: location = " &
+            cast[string](materializer_input_553917696.source) &
+            " (materialized as " &
+            materialized_location_name_553917702 &
+            ")\n")
+        materialized_instructions_553917700(model_typed_input_553917693,
+          model_context_553917689.runtime_dir, model_working_dir_553917692, "")
+      let model_output_contract_553917703 = schemaOf(T)
+      let model_output_schema_553917704 = toJsonSchema(model_output_contract_553917703)
+      let model_materializer_553917705 = proc (model_output_kind_553917675: int;
+          model_output_553917676: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553917670] {.nimcall, noinit.} = case model_output_kind_553917675
+      of 1:
+        let model_output_contract_553917677 = schemaOf(T)
+        let model_parsed_output_553917678 = tryParse(model_output_contract_553917677,
+            model_output_553917676.arguments)
+        if not model_parsed_output_553917678.ok:
+          return ModelMaterialization[VecherinkaArtifact_553917670](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553917678.issues) &
+              " schema issues)")
+        var location_errors_553917683 = ""
+        let location_verification_error_553917684 = verify_location_payload(
+            model_output_553917676.working_dir,
+            cast[string](model_parsed_output_553917678.value.artifact))
+        if (
+          not (len(location_verification_error_553917684) == 0)):
+          add(location_errors_553917683,
+              "output.artifact: " & location_verification_error_553917684 & "\n")
+        if (
+          not (len(location_errors_553917683) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553917670](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553917683)
+        return ModelMaterialization[VecherinkaArtifact_553917670](ok: true, value: VecherinkaArtifact_553917670(
+            kind: vak_1, value_1: model_parsed_output_553917678.value))
+      else:
+        return ModelMaterialization[VecherinkaArtifact_553917670](ok: false,
+            error: "unexpected model output kind")
+      let model_tool_data_553917706 = register_llm_tool_binding(
+          cast[pointer](model_context_553917689), model_request_id_553917690, 1,
+          cast[pointer](model_materializer_553917705))
+      var model_tools_553917707: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553917707, "finish_work", default_agent_prompt_templates.finish_work_description,
+                            model_output_schema_553917704, model_tool_data_553917706, proc (
+          tool_data`gensym1645: pointer;
+          tool_context`gensym1645: ToolCallContext) {.nimcall, gcsafe.} = {.
+          cast(gcsafe).}:
+        let binding`gensym1645 = lookup_llm_tool_binding(tool_data`gensym1645)
+        if isNone(binding`gensym1645):
+          return
+        let data`gensym1645 = get(binding`gensym1645)
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553917670]](data`gensym1645.context),
+                                 data`gensym1645.request_id,
+                                 data`gensym1645.output_kind, cast[ModelMaterializer[
+            VecherinkaArtifact_553917670]](data`gensym1645.materializer),
+                                 data`gensym1645.id, tool_context`gensym1645))
+      let llm_spec_553917712 = LlmCallSpec[VecherinkaArtifact_553917670](
+          profile: profile, prompt: "Read the provided input file named source.txt. Create result.txt in the working directory containing exactly the input file text. Return summary equal to the input file text and artifact equal to result.txt. Do not create any other files.",
+          prompt_templates: default_agent_prompt_templates,
+          materialized_input: model_materialized_input_553917694,
+          runtime_dir: model_context_553917689.runtime_dir,
+          working_dir: model_working_dir_553917692, tools: model_tools_553917707,
+          output_kind: 1, materialize: model_materializer_553917705)
+      submit_llm(model_context_553917689, model_request_id_553917690, llm_spec_553917712)
+    except CatchableError as error`gensym1648:
+      let event`gensym1648 = RuntimeEvent[VecherinkaArtifact_553917670](
+          kind: rev_model_error, request_id: model_request_id_553917690,
+          error_message: error`gensym1648.msg)
+      enqueue_runtime_event(model_context_553917689, event`gensym1648)))]
+  let input_artifact_553917719 = VecherinkaArtifact_553917670(kind: vak_0,
+      value_0: input_553917715)
+  let work_plan_553917720 = execute_flows(data_553917718, input_artifact_553917719,
+      nil, transport_553917716, nil, logger_553917717)
+  if isNone(work_plan_553917720.output):
+    if isSome(work_plan_553917720.failure_message):
+      raise
+        (ref ValueError)(msg: get(work_plan_553917720.failure_message),
+                         parent: nil)
+    raise
+      (ref ValueError)(msg: "vecherinka execution completed without output",
+                       parent: nil)
+  return block:
+    let artifact_553917721 = lookup_artifact(work_plan_553917720.context,
+        get(work_plan_553917720.output)).data
+    const
+      loc`gensym1843 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym1843 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
+    bind instantiationInfo
+    mixin failedAssertImpl
+    {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+             line: 1934, column: 6).}:
+      if not (artifact_553917721.kind == vak_1):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553917721.kind == vak_1` ")
+    artifact_553917721.value_1
+
+/Users/alex/areas/productive/orchestration/src/vecherinka_stepping_stone_tests.nim(196, 28) Error: type mismatch
+Expression: output.artifact == Location("result.txt")
+  [1] output.artifact: Location
+  [2] Location("result.txt"): Location
+
+Expected one of (first mismatch at [position]):
+[1] func `==`(x, y: Path): bool
+[1] proc `==`(a, b: NimIdent): bool
+[1] proc `==`(a, b: NimNode): bool
+[1] proc `==`(a, b: NimSym): bool
+[1] proc `==`(err1, err2: OSErrorCode): bool
+[1] proc `==`(x, y: bool): bool
+[1] proc `==`(x, y: char): bool
+[1] proc `==`(x, y: cstring): bool
+[1] proc `==`(x, y: float): bool
+[1] proc `==`(x, y: float32): bool
+[1] proc `==`(x, y: int): bool
+[1] proc `==`(x, y: int16): bool
+[1] proc `==`(x, y: int32): bool
+[1] proc `==`(x, y: int64): bool
+[1] proc `==`(x, y: int8): bool
+[1] proc `==`(x, y: pointer): bool
+[1] proc `==`(x, y: string): bool
+[1] proc `==`(x, y: uint): bool
+[1] proc `==`(x, y: uint16): bool
+[1] proc `==`(x, y: uint32): bool
+[1] proc `==`(x, y: uint64): bool
+[1] proc `==`(x, y: uint8): bool
+[1] proc `==`(x: string; y: typeof(nil) | typeof(nil)): bool
+[1] proc `==`(x: typeof(nil) | typeof(nil); y: string): bool
+[1] proc `==`[Enum: enum](x, y: Enum): bool
+[1] proc `==`[I, T](x, y: array[I, T]): bool
+[1] proc `==`[T: proc | iterator](x, y: T): bool
+[1] proc `==`[T: tuple | object](x, y: T): bool
+[1] proc `==`[T](x, y: openArray[T]): bool
+[1] proc `==`[T](x, y: ptr T): bool
+[1] proc `==`[T](x, y: ref T): bool
+[1] proc `==`[T](x, y: seq[T]): bool
+[1] proc `==`[T](x, y: set[T]): bool
+
