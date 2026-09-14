@@ -43,7 +43,12 @@ let implementation_request = ImplementationRequest("")
 let codebase = Codebase(Location(""))
 let issues = Issues(@[""])
 let simple = Simple(message: "Include 'duck' in your answer!!")
+let debug_sink: LogSink = proc(line: string) =
+  echo "log: " & line
+let debug_logger = new_structured_logger(
+  debug_sink,
+  run_id = "manual-test")
 
 echo "test: calling generated solve"
-let debug_value = solve(simple)
+let debug_value = solve(simple, logger = debug_logger)
 echo "test: generated solve returned ", debug_value.message

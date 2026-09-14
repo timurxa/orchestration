@@ -6,66 +6,67 @@ type
     case kind: VecherinkaArtifactKind_553648527
     of vak_0:
       value_0: Simple
-proc solve(input_553648705: Simple;
-           transport_553648706: LlmTransport[VecherinkaArtifact_553648528] = nil): Simple =
-  let data_553648707: seq[Flow[VecherinkaArtifact_553648528]] = @[Flow[
+proc solve(input_553648738: Simple;
+           transport_553648739: LlmTransport[VecherinkaArtifact_553648528] = nil;
+           logger_553648740: StructuredLogger = nil): Simple =
+  let data_553648741: seq[Flow[VecherinkaArtifact_553648528]] = @[Flow[
       VecherinkaArtifact_553648528](kind: fk_top, root: "basic", entry: true, body: Flow[
       VecherinkaArtifact_553648528](kind: fk_model, submit: proc (
-      model_context_553648657: RuntimeContext[VecherinkaArtifact_553648528];
-      model_request_id_553648658: RequestId; model_input_553648659: VecherinkaArtifact_553648528;
-      model_working_dir_553648660: Path) {.nimcall.} =
-    let model_typed_input_553648661 = block:
-      let artifact_553648663 = model_input_553648659
+      model_context_553648689: RuntimeContext[VecherinkaArtifact_553648528];
+      model_request_id_553648690: RequestId; model_input_553648691: VecherinkaArtifact_553648528;
+      model_working_dir_553648692: Path) {.nimcall.} =
+    let model_typed_input_553648693 = block:
+      let artifact_553648695 = model_input_553648691
       const
         loc`gensym25 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-          line: 1520, column: 6)
-        ploc`gensym25 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1520, 7)"
+          line: 1862, column: 6)
+        ploc`gensym25 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1862, 7)"
       bind instantiationInfo
       mixin failedAssertImpl
       {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-               line: 1520, column: 6).}:
-        if not (artifact_553648663.kind == vak_0):
-          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1520, 7) `artifact_553648663.kind == vak_0` ")
-      artifact_553648663.value_0
+               line: 1862, column: 6).}:
+        if not (artifact_553648695.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1862, 7) `artifact_553648695.kind == vak_0` ")
+      artifact_553648695.value_0
     try:
-      let model_materialized_input_553648662 = proc (materializer_input_553648664: Simple;
-          materializer_runtime_dir_553648665, materializer_artifact_dir_553648666: Path;
-          materializer_initial_instructions_553648667: string): string {.nimcall.} = result =
-        var materialized_instructions_553648668 = materializer_initial_instructions_553648667
-        var materialized_names_553648669: seq[string] = @[]
-        add(materialized_instructions_553648668,
-            "input.message: string = " & $materializer_input_553648664.message & "\n")
-        materialized_instructions_553648668(model_typed_input_553648661,
-          model_context_553648657.runtime_dir, model_working_dir_553648660, "")
-      let model_output_contract_553648693 = schemaOf(T)
-      let model_output_schema_553648694 = toJsonSchema(model_output_contract_553648693)
-      let model_materializer_553648695 = proc (model_output_kind_553648597: int;
-          model_output_553648598: LlmOutput): ModelMaterialization[
-          VecherinkaArtifact_553648528] {.nimcall, noinit.} = case model_output_kind_553648597
+      let model_materialized_input_553648694 = proc (materializer_input_553648696: Simple;
+          materializer_runtime_dir_553648697, materializer_artifact_dir_553648698: Path;
+          materializer_initial_instructions_553648699: string): string {.nimcall.} = result =
+        var materialized_instructions_553648700 = materializer_initial_instructions_553648699
+        var materialized_names_553648701: seq[string] = @[]
+        add(materialized_instructions_553648700,
+            "input.message: string = " & $materializer_input_553648696.message & "\n")
+        materialized_instructions_553648700(model_typed_input_553648693,
+          model_context_553648689.runtime_dir, model_working_dir_553648692, "")
+      let model_output_contract_553648726 = schemaOf(T)
+      let model_output_schema_553648727 = toJsonSchema(model_output_contract_553648726)
+      let model_materializer_553648728 = proc (model_output_kind_553648651: int;
+          model_output_553648652: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553648528] {.nimcall, noinit.} = case model_output_kind_553648651
       of 0:
-        let model_output_contract_553648599 = schemaOf(T)
-        let model_parsed_output_553648600 = tryParse(model_output_contract_553648599,
-            model_output_553648598.arguments)
-        if not model_parsed_output_553648600.ok:
+        let model_output_contract_553648653 = schemaOf(T)
+        let model_parsed_output_553648654 = tryParse(model_output_contract_553648653,
+            model_output_553648652.arguments)
+        if not model_parsed_output_553648654.ok:
           return ModelMaterialization[VecherinkaArtifact_553648528](ok: false, error: "invalid finish_work result (" &
-              $len(model_parsed_output_553648600.issues) &
+              $len(model_parsed_output_553648654.issues) &
               " schema issues)")
-        var location_errors_553648634 = ""
+        var location_errors_553648664 = ""
         if (
-          not (len(location_errors_553648634) == 0)):
+          not (len(location_errors_553648664) == 0)):
           return ModelMaterialization[VecherinkaArtifact_553648528](ok: false,
-              error: "invalid finish_work locations: " & location_errors_553648634)
+              error: "invalid finish_work locations: " & location_errors_553648664)
         return ModelMaterialization[VecherinkaArtifact_553648528](ok: true, value: VecherinkaArtifact_553648528(
-            kind: vak_0, value_0: model_parsed_output_553648600.value))
+            kind: vak_0, value_0: model_parsed_output_553648654.value))
       else:
         return ModelMaterialization[VecherinkaArtifact_553648528](ok: false,
             error: "unexpected model output kind")
-      let model_tool_data_553648696 = register_llm_tool_binding(
-          cast[pointer](model_context_553648657), model_request_id_553648658, 0,
-          cast[pointer](model_materializer_553648695))
-      var model_tools_553648697: DynamicToolRegistry = @[]
-      register_dynamic_tool(model_tools_553648697, "finish_work", "Submit final structured result. Call exactly once when task is complete.",
-                            model_output_schema_553648694, model_tool_data_553648696, proc (
+      let model_tool_data_553648729 = register_llm_tool_binding(
+          cast[pointer](model_context_553648689), model_request_id_553648690, 0,
+          cast[pointer](model_materializer_553648728))
+      var model_tools_553648730: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553648730, "finish_work", "Submit final structured result. Call exactly once when task is complete.",
+                            model_output_schema_553648727, model_tool_data_553648729, proc (
           tool_data`gensym11: pointer; tool_context`gensym11: ToolCallContext) {.
           nimcall, gcsafe.} = {.cast(gcsafe).}:
         let binding`gensym11 = lookup_llm_tool_binding(tool_data`gensym11)
@@ -77,43 +78,122 @@ proc solve(input_553648705: Simple;
                                  data`gensym11.output_kind, cast[ModelMaterializer[
             VecherinkaArtifact_553648528]](data`gensym11.materializer),
                                  data`gensym11.id, tool_context`gensym11))
-      let llm_spec_553648702 = LlmCallSpec[VecherinkaArtifact_553648528](
+      let llm_spec_553648735 = LlmCallSpec[VecherinkaArtifact_553648528](
           profile: cheap,
           prompt: "Write a welcome message into \'message\' field.",
-          materialized_input: model_materialized_input_553648662,
-          runtime_dir: model_context_553648657.runtime_dir,
-          working_dir: model_working_dir_553648660, tools: model_tools_553648697,
-          output_kind: 0, materialize: model_materializer_553648695)
-      submit_llm(model_context_553648657, model_request_id_553648658, llm_spec_553648702)
+          materialized_input: model_materialized_input_553648694,
+          runtime_dir: model_context_553648689.runtime_dir,
+          working_dir: model_working_dir_553648692, tools: model_tools_553648730,
+          output_kind: 0, materialize: model_materializer_553648728)
+      submit_llm(model_context_553648689, model_request_id_553648690, llm_spec_553648735)
     except CatchableError as error`gensym14:
       let event`gensym14 = RuntimeEvent[VecherinkaArtifact_553648528](
-          kind: rev_model_error, request_id: model_request_id_553648658,
+          kind: rev_model_error, request_id: model_request_id_553648690,
           error_message: error`gensym14.msg)
-      enqueue_runtime_event(model_context_553648657, event`gensym14)))]
-  let input_artifact_553648708 = VecherinkaArtifact_553648528(kind: vak_0,
-      value_0: input_553648705)
-  let work_plan_553648709 = execute_flows(data_553648707, input_artifact_553648708,
-      nil, transport_553648706, nil)
-  if isNone(work_plan_553648709.output):
-    if isSome(work_plan_553648709.failure_message):
+      enqueue_runtime_event(model_context_553648689, event`gensym14)))]
+  let input_artifact_553648742 = VecherinkaArtifact_553648528(kind: vak_0,
+      value_0: input_553648738)
+  let work_plan_553648743 = execute_flows(data_553648741, input_artifact_553648742,
+      nil, transport_553648739, nil, logger_553648740)
+  if isNone(work_plan_553648743.output):
+    if isSome(work_plan_553648743.failure_message):
       raise
-        (ref ValueError)(msg: get(work_plan_553648709.failure_message),
+        (ref ValueError)(msg: get(work_plan_553648743.failure_message),
                          parent: nil)
     raise
       (ref ValueError)(msg: "vecherinka execution completed without output",
                        parent: nil)
   return block:
-    let artifact_553648710 = lookup_artifact(work_plan_553648709.context,
-        get(work_plan_553648709.output)).data
+    let artifact_553648744 = lookup_artifact(work_plan_553648743.context,
+        get(work_plan_553648743.output)).data
     const
-      loc`gensym231 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-        line: 1520, column: 6)
-      ploc`gensym231 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1520, 7)"
+      loc`gensym236 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1862, column: 6)
+      ploc`gensym236 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1862, 7)"
     bind instantiationInfo
     mixin failedAssertImpl
     {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-             line: 1520, column: 6).}:
-      if not (artifact_553648710.kind == vak_0):
-        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1520, 7) `artifact_553648710.kind == vak_0` ")
-    artifact_553648710.value_0
+             line: 1862, column: 6).}:
+      if not (artifact_553648744.kind == vak_0):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1862, 7) `artifact_553648744.kind == vak_0` ")
+    artifact_553648744.value_0
 
+test: calling generated solve
+log: {"schema":"vecherinka.log.v1","seq":1,"timestamp_ns":671821295625416,"run_id":"manual-test","component":"vecherinka","event":"run.start","fields":{"run_dir":"run-C2VY45r5","runtime_dir":"orchestration","owns_runtime":true}}
+log: {"schema":"vecherinka.log.v1","seq":2,"timestamp_ns":671821296612541,"run_id":"manual-test","component":"vecherinka","event":"artifact.commit","fields":{"artifact_id":0,"artifact_dir":"orchestration"}}
+log: {"schema":"vecherinka.log.v1","seq":3,"timestamp_ns":671821299279375,"run_id":"manual-test","component":"vecherinka","event":"ready.enqueue","fields":{"ready_id":1,"flow_kind":"fk_model","input_artifact_id":0}}
+log: {"schema":"vecherinka.log.v1","seq":4,"timestamp_ns":671821299360458,"run_id":"manual-test","component":"vecherinka","event":"ready.consume","fields":{"ready_id":1}}
+log: {"schema":"vecherinka.log.v1","seq":5,"timestamp_ns":671821299423166,"run_id":"manual-test","component":"vecherinka","event":"invocation.start","fields":{"flow_kind":"fk_model","input_artifact_id":0}}
+log: {"schema":"vecherinka.log.v1","seq":6,"timestamp_ns":671821299577458,"run_id":"manual-test","component":"vecherinka","event":"artifact.reserve","fields":{"artifact_id":1,"artifact_dir":"artifact-1"}}
+log: {"schema":"vecherinka.log.v1","seq":7,"timestamp_ns":671821299610916,"run_id":"manual-test","component":"vecherinka","event":"model.submit","fields":{"request_id":"i:0","flow_kind":"fk_model","input_artifact_id":0,"output_artifact_id":1,"submitter":"custom","working_dir":"artifact-1"}}
+log: {"schema":"vecherinka.log.v1","seq":8,"timestamp_ns":671821299795458,"run_id":"manual-test","component":"codex","event":"agent.thread.submit","fields":{"model_request_id":"i:0","agent_id":"vecherinka-agent-i:0","request_id":"i:1"}}
+log: {"schema":"vecherinka.log.v1","seq":9,"timestamp_ns":671821615743458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":237}}
+log: {"schema":"vecherinka.log.v1","seq":10,"timestamp_ns":671821616014416,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":217}}
+log: {"schema":"vecherinka.log.v1","seq":11,"timestamp_ns":671821630953416,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":179}}
+log: {"schema":"vecherinka.log.v1","seq":12,"timestamp_ns":671822204807375,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":1329}}
+log: {"schema":"vecherinka.log.v1","seq":13,"timestamp_ns":671822205087458,"run_id":"manual-test","component":"codex","event":"agent.turn.submit","fields":{"model_request_id":"i:0","agent_id":"vecherinka-agent-i:0","request_id":"i:2"}}
+log: {"schema":"vecherinka.log.v1","seq":14,"timestamp_ns":671822205132458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":808}}
+log: {"schema":"vecherinka.log.v1","seq":15,"timestamp_ns":671822206551375,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":216}}
+log: {"schema":"vecherinka.log.v1","seq":16,"timestamp_ns":671822206655041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":209}}
+log: {"schema":"vecherinka.log.v1","seq":17,"timestamp_ns":671822206747750,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
+log: {"schema":"vecherinka.log.v1","seq":18,"timestamp_ns":671822206829916,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":207}}
+log: {"schema":"vecherinka.log.v1","seq":19,"timestamp_ns":671822206905666,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":209}}
+log: {"schema":"vecherinka.log.v1","seq":20,"timestamp_ns":671822206977458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
+log: {"schema":"vecherinka.log.v1","seq":21,"timestamp_ns":671822207048000,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":207}}
+log: {"schema":"vecherinka.log.v1","seq":22,"timestamp_ns":671822207117625,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":207}}
+log: {"schema":"vecherinka.log.v1","seq":23,"timestamp_ns":671822207188875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":210}}
+log: {"schema":"vecherinka.log.v1","seq":24,"timestamp_ns":671822207268708,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":216}}
+log: {"schema":"vecherinka.log.v1","seq":25,"timestamp_ns":671822207338500,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":217}}
+log: {"schema":"vecherinka.log.v1","seq":26,"timestamp_ns":671822207409208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":208}}
+log: {"schema":"vecherinka.log.v1","seq":27,"timestamp_ns":671822208760916,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":196}}
+log: {"schema":"vecherinka.log.v1","seq":28,"timestamp_ns":671822216729541,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":645}}
+log: {"schema":"vecherinka.log.v1","seq":29,"timestamp_ns":671822244268041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":167}}
+log: {"schema":"vecherinka.log.v1","seq":30,"timestamp_ns":671822244403625,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":297}}
+log: {"schema":"vecherinka.log.v1","seq":31,"timestamp_ns":671822288613250,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":209}}
+log: {"schema":"vecherinka.log.v1","seq":32,"timestamp_ns":671822291418875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
+log: {"schema":"vecherinka.log.v1","seq":33,"timestamp_ns":671822292789708,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":216}}
+log: {"schema":"vecherinka.log.v1","seq":34,"timestamp_ns":671822292893500,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":207}}
+log: {"schema":"vecherinka.log.v1","seq":35,"timestamp_ns":671822359334166,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
+log: {"schema":"vecherinka.log.v1","seq":36,"timestamp_ns":671822417904500,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
+log: {"schema":"vecherinka.log.v1","seq":37,"timestamp_ns":671822420556000,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":203}}
+log: {"schema":"vecherinka.log.v1","seq":38,"timestamp_ns":671822505863416,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":203}}
+log: {"schema":"vecherinka.log.v1","seq":39,"timestamp_ns":671822609894916,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":213}}
+log: {"schema":"vecherinka.log.v1","seq":40,"timestamp_ns":671822700680041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":213}}
+log: {"schema":"vecherinka.log.v1","seq":41,"timestamp_ns":671822838461333,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":204}}
+log: {"schema":"vecherinka.log.v1","seq":42,"timestamp_ns":671822927991416,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":204}}
+log: {"schema":"vecherinka.log.v1","seq":43,"timestamp_ns":671824619624125,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":768}}
+log: {"schema":"vecherinka.log.v1","seq":44,"timestamp_ns":671824619826875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":772}}
+log: {"schema":"vecherinka.log.v1","seq":45,"timestamp_ns":671827560382708,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":681}}
+log: {"schema":"vecherinka.log.v1","seq":46,"timestamp_ns":671827560545166,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":744}}
+log: {"schema":"vecherinka.log.v1","seq":47,"timestamp_ns":671827565711583,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":501}}
+log: {"schema":"vecherinka.log.v1","seq":48,"timestamp_ns":671827565848208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":456}}
+log: {"schema":"vecherinka.log.v1","seq":49,"timestamp_ns":671831200950375,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":619}}
+log: {"schema":"vecherinka.log.v1","seq":50,"timestamp_ns":671831201143666,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":716}}
+log: {"schema":"vecherinka.log.v1","seq":51,"timestamp_ns":671831336017500,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":510}}
+log: {"schema":"vecherinka.log.v1","seq":52,"timestamp_ns":671831336261791,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":456}}
+log: {"schema":"vecherinka.log.v1","seq":53,"timestamp_ns":671835417122333,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":656}}
+log: {"schema":"vecherinka.log.v1","seq":54,"timestamp_ns":671835417298333,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":654}}
+log: {"schema":"vecherinka.log.v1","seq":55,"timestamp_ns":671835421198125,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":510}}
+log: {"schema":"vecherinka.log.v1","seq":56,"timestamp_ns":671835421336875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":456}}
+log: {"schema":"vecherinka.log.v1","seq":57,"timestamp_ns":671839556276458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":874}}
+log: {"schema":"vecherinka.log.v1","seq":58,"timestamp_ns":671839556453208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":18954}}
+log: {"schema":"vecherinka.log.v1","seq":59,"timestamp_ns":671839560786833,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":511}}
+log: {"schema":"vecherinka.log.v1","seq":60,"timestamp_ns":671839560939041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":456}}
+log: {"schema":"vecherinka.log.v1","seq":61,"timestamp_ns":671842769841958,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":459}}
+log: {"schema":"vecherinka.log.v1","seq":62,"timestamp_ns":671842771374625,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":462}}
+log: {"schema":"vecherinka.log.v1","seq":63,"timestamp_ns":671842771578500,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":478}}
+log: {"schema":"vecherinka.log.v1","seq":64,"timestamp_ns":671842836305250,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":510}}
+log: {"schema":"vecherinka.log.v1","seq":65,"timestamp_ns":671842836608791,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":456}}
+log: {"schema":"vecherinka.log.v1","seq":66,"timestamp_ns":671842836796125,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":478}}
+log: {"schema":"vecherinka.log.v1","seq":67,"timestamp_ns":671845204169333,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":671}}
+log: {"schema":"vecherinka.log.v1","seq":68,"timestamp_ns":671845204346958,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":705}}
+log: {"schema":"vecherinka.log.v1","seq":69,"timestamp_ns":671845208251583,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":512}}
+log: {"schema":"vecherinka.log.v1","seq":70,"timestamp_ns":671845208397083,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":456}}
+log: {"schema":"vecherinka.log.v1","seq":71,"timestamp_ns":671845208506458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":478}}
+log: {"schema":"vecherinka.log.v1","seq":72,"timestamp_ns":671847511532791,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":551}}
+log: {"schema":"vecherinka.log.v1","seq":73,"timestamp_ns":671847511679583,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":399}}
+log: {"schema":"vecherinka.log.v1","seq":74,"timestamp_ns":671847511784916,"run_id":"manual-test","component":"vecherinka","event":"model.output","fields":{"request_id":"i:0","tool":"finish_work","arguments_bytes":152}}
+log: {"schema":"vecherinka.log.v1","seq":75,"timestamp_ns":671847511930416,"run_id":"manual-test","component":"vecherinka","event":"artifact.commit","fields":{"artifact_id":1,"artifact_dir":"artifact-1"}}
+log: {"schema":"vecherinka.log.v1","seq":76,"timestamp_ns":671847511953833,"run_id":"manual-test","component":"vecherinka","event":"model.finish","fields":{"request_id":"i:0","output_artifact_id":1}}
+log: {"schema":"vecherinka.log.v1","seq":77,"timestamp_ns":671847511987291,"run_id":"manual-test","component":"vecherinka","event":"run.finish","fields":{"failed":false,"finished":true}}
+test: generated solve returned Wrote the welcome message, including “duck,” to [message](/Users/alex/areas/productive/orchestration/run-C2VY45r5/artifact-1/message).

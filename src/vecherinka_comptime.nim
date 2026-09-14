@@ -2291,6 +2291,7 @@ proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
     seq[Flow[`artifact_name`]]
   let input_name = genSym(nskParam, "input")
   let transport_name = genSym(nskParam, "transport")
+  let logger_name = genSym(nskParam, "logger")
   let data_name = genSym(nskLet, "data")
   let input_artifact_name = genSym(nskLet, "input_artifact")
   let input_artifact = context.artifact_registry.emit_artifact_pack(
@@ -2307,7 +2308,8 @@ proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
     let `data_name`: `data_type` = `flow_sequence`
     let `input_artifact_name` = `input_artifact`
     let `work_plan_name` = `execute_flows`(`data_name`, `input_artifact_name`,
-      transport = `transport_name`)
+      transport = `transport_name`,
+      logger = `logger_name`)
     if `work_plan_name`.output.isNone:
       if `work_plan_name`.failure_message.isSome:
         raise newException(ValueError, `work_plan_name`.failure_message.get)
@@ -2316,7 +2318,8 @@ proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
     return `returned_value`
   let generated_proc = quote do:
     proc `proc_name`(`input_name`: `entry_domain`;
-        `transport_name`: LlmTransport[`artifact_name`] = nil): `entry_codomain` =
+        `transport_name`: LlmTransport[`artifact_name`] = nil;
+        `logger_name`: StructuredLogger = nil): `entry_codomain` =
       `proc_body`
   var generated = newStmtList()
   generated.add(artifact_type)
