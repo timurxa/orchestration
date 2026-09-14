@@ -81,10 +81,23 @@ proc so_syntax*[A, B](
 ): FlowSpec[A, B] =
   FlowSpec[A, B](ir: FlowIR(kind: firk_so))
 
+proc so_syntax*[A, B](
+    fn: proc(input: A; working_dir: Path): FlowSpec[void, B]
+): FlowSpec[A, B] =
+  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
+
 macro so*(domain, codomain, pattern, body: untyped): untyped =
   let parameter = ident(pattern.strVal)
   result = quote do:
     so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`):
+      FlowSpec[void, `codomain`] = `body`)
+
+macro so*(domain, codomain, pattern, working_dir_name, body: untyped): untyped =
+  let parameter = ident(pattern.strVal)
+  let working_dir_parameter = ident(working_dir_name.strVal)
+  result = quote do:
+    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
+        `working_dir_parameter`: Path):
       FlowSpec[void, `codomain`] = `body`)
 
 macro project_it(value: typed; path: static[ItPath]; depth: static[int] = 0): untyped =
@@ -274,6 +287,16 @@ proc flow_spec_type(node: NimNode): NimNode =
     return nil
   if node.kind in nnkCallKinds and node.len > 0 and
       node[0].kind == nnkSym and node[0].symKind in {nskTemplate, nskMacro}:
+    return nil
+  if node.kind in nnkCallKinds and node.len > 0 and
+      node[0].kind == nnkSym and node[0].symKind == nskProc and
+      not eqIdent(node[0], "pure") and
+      not eqIdent(node[0], "fanout") and
+      not eqIdent(node[0], "so_syntax") and
+      not eqIdent(node[0], ">>>") and
+      not eqIdent(node[0], "()"):
+    ## Ordinary callback calls may still be semantically untyped here;
+    ## only known flow constructors need early type inspection.
     return nil
   if node.kind in nnkCallKinds and node.len > 0 and
       eqIdent(node[0], "typeof"):
@@ -579,30 +602,28 @@ proc so_parts(
 
 proc so_lambda_parts(
     lambda: NimNode;
-    parameter, input_type, body: var NimNode
+    parameter, input_type, working_dir_parameter, body: var NimNode
 ): bool =
-  if (Lambda([
-      _,
-      _,
-      _,
-      FormalParams([
-        _,
-        IdentDefs([
-          @matched_parameter is Sym(),
-          @matched_input_type,
-          _
-        ])
-      ]),
-      _,
-      _,
-      Asgn([_, @matched_body]),
-      _
-    ]) ?= lambda):
-    parameter = matched_parameter
-    input_type = matched_input_type
-    body = matched_body
-    return true
-  false
+  if lambda.kind != nnkLambda or lambda.len < 7:
+    return false
+  let formals = lambda[3]
+  if formals.kind != nnkFormalParams or formals.len notin 2 .. 3:
+    return false
+  if formals[1].kind != nnkIdentDefs or formals[1].len != 3 or
+      formals[1][0].kind != nnkSym:
+    return false
+  parameter = formals[1][0]
+  input_type = formals[1][1]
+  working_dir_parameter = newEmptyNode()
+  if formals.len == 3:
+    if formals[2].kind != nnkIdentDefs or formals[2].len != 3 or
+        formals[2][0].kind != nnkSym:
+      return false
+    working_dir_parameter = formals[2][0]
+  if lambda[6].kind != nnkAsgn or lambda[6].len != 2:
+    return false
+  body = lambda[6][1]
+  true
 
 proc emit_artifact_pack(
     registry: ArtifactRegistry;
@@ -2053,8 +2074,9 @@ proc lower_so(
     flow_type, lambda: NimNode;
     context: var FlowWalkContext
 ): NimNode =
-  var parameter, input_type, body: NimNode
-  doAssert so_lambda_parts(lambda, parameter, input_type, body),
+  var parameter, input_type, working_dir_parameter, body: NimNode
+  doAssert so_lambda_parts(lambda, parameter, input_type,
+    working_dir_parameter, body),
     "malformed so callback"
 
   let domain = flow_type[1]
@@ -2063,13 +2085,18 @@ proc lower_so(
 
   let artifact_name = context.artifact_registry.artifact_name
   let artifact_input = genSym(nskParam, "so_artifact")
+  let so_working_dir = genSym(nskParam, "so_working_dir")
   let typed_input = genSym(nskLet, "so_input")
   let unpacked = context.artifact_registry.emit_artifact_unpack(
     domain, artifact_input)
   let transformed_body = map_nim_tree(body, context)
-  let rebound_body = replace_symbol(transformed_body, parameter, typed_input)
+  var rebound_body = replace_symbol(transformed_body, parameter, typed_input)
+  if working_dir_parameter.kind != nnkEmpty:
+    rebound_body = replace_symbol(
+      rebound_body, working_dir_parameter, so_working_dir)
   let expand = quote do:
-    proc (`artifact_input`: `artifact_name`): Flow[`artifact_name`] {.nimcall.} =
+    proc (`artifact_input`: `artifact_name`; `so_working_dir`: Path):
+        Flow[`artifact_name`] {.nimcall.} =
       let `typed_input` = `unpacked`
       `rebound_body`
   quote do:

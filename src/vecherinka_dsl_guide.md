@@ -190,6 +190,20 @@ passes the current value onward, but normal generated so bodies produce a flow.
 
 Source: src/vecherinka_runtime.nim:1513-1524.
 
+Context-aware form exposes current artifact working directory as a `Path`:
+
+~~~nim
+so(Domain, Codomain, input, working_dir) do:
+  let target = working_dir / Path("result.txt")
+  writeFile($target, "created by so")
+  pure(Output(artifact: Location("result.txt")))
+~~~
+
+`working_dir` is the directory belonging to current artifact value. It is
+available only during callback execution. Ordinary `so` syntax remains valid.
+Use a preceding `pure(...)` seed when a fresh generated artifact directory is
+needed before entering `so`; `so` itself does not allocate an output artifact.
+
 ## it projection
 
 Identity:

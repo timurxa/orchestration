@@ -1,4 +1,4 @@
-import std/[json, macros, options, os, paths]
+import std/[json, macros, options, os, paths, tempfiles]
 import vecherinka
 
 proc `$`(value: Location): string {.borrow.}
@@ -80,6 +80,11 @@ type
   Stage10Item = object
     marker: string
     source: Location
+  StaticWriteInput = object
+    marker: string
+  StaticWriteOutput = object
+    path: string
+    contents: string
   Stage10Input = object
     variant: Stage10Variant
     items: seq[Stage10Item]
@@ -218,6 +223,13 @@ expandMacros: vecherinka(solve_stage_10, stepping_agent_prompts):
         pure(input.items) >>> lift(seq[here])[map_item],
       so(Stage10Input, Stage10Variant, input) do:
         input >>> project_variant >>> copy_variant)
+
+expandMacros: vecherinka(solve_stage_11, stepping_agent_prompts):
+  > static_write StaticWriteInput ~> StaticWriteOutput {.entry.}:
+    so(StaticWriteInput, StaticWriteOutput, input, working_dir) do:
+      let target = working_dir / Path("static-write.txt")
+      writeFile($target, input.marker)
+      pure(StaticWriteOutput(path: $target, contents: input.marker))
 
 proc emit_log(line: string) =
   echo line
@@ -431,5 +443,26 @@ elif stage == "stage-10":
     " item1=", output[0][1].marker,
     " variant=", output[1].text
   echo "STAGE_10_ASSERTIONS fan=true so=true pure=true sequence_lift=true it=true tuple=true variant=true location=true no_unrequested_files=manual_review"
+elif stage == "stage-11":
+  let root = Path(createTempDir("vecherinka-stage-11-", ""))
+  let previous_dir = os.getCurrentDir()
+  try:
+    os.setCurrentDir($root)
+    let logger = new_structured_logger(emit_log, run_id = "stepping-stage-11")
+    let input = StaticWriteInput(marker: "stage-11-static-write-9ac4")
+    let output = solve_stage_11(input, logger = logger)
+    doAssert output.contents == input.marker,
+      "stage 11 output contents mismatch"
+    doAssert fileExists(output.path),
+      "stage 11 static output file missing"
+    doAssert readFile(output.path) == input.marker,
+      "stage 11 static output file contents mismatch"
+    echo "DIRECT_RESULT path=", output.path,
+      " contents=", output.contents
+    echo "STAGE_11_ASSERTIONS so_working_dir=true static_write=true exact_file=true"
+  finally:
+    os.setCurrentDir(previous_dir)
+    if dirExists($root):
+      removeDir($root)
 else:
   raise newException(ValueError, "unknown stepping stage: " & stage)

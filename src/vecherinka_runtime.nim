@@ -67,7 +67,9 @@ type
       branches*: seq[Flow[A]]
       coalesce*: proc(values: seq[A]): A {.nimcall.}
     of fk_so:
-      execute*: proc(input: A): Flow[A] {.nimcall.}
+      ## `working_dir` belongs to current value's artifact. It is available
+      ## for synchronous side effects without exposing RuntimeContext.
+      execute*: proc(input: A; working_dir: Path): Flow[A] {.nimcall.}
     of fk_lift:
       inner*: Flow[A]
       destructure*: proc(input: A):
@@ -1582,7 +1584,9 @@ proc handle_invocation*[A](
         destination)
       return
     of fk_so:
-      let child = current.execute(value)
+      let working_dir = lookup_artifact(
+        plan.context, value_id).meta.artifact_dir
+      let child = current.execute(value, working_dir)
       let child_destination = prepend_continuation(current.continuation,
         destination)
       if child.isNil:
