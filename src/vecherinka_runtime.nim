@@ -320,6 +320,26 @@ proc runtime_log*[A](context: RuntimeContext[A]; event, component: string;
     return
   discard context.logger.emit(event, component, fields)
 
+proc model_payload_for_log(arguments: string): JsonNode =
+  ## Preserve exact serialized payload plus structured JSON shape.
+  result = newJObject()
+  result["raw"] = %arguments
+  try:
+    let value = parseJson(arguments)
+    result["value"] = value
+    result["root_type"] = %(
+      case value.kind
+      of JObject: "object"
+      of JArray: "array"
+      of JString: "string"
+      of JInt: "integer"
+      of JFloat: "number"
+      of JBool: "boolean"
+      of JNull: "null")
+  except CatchableError as error:
+    result["root_type"] = %"invalid_json"
+    result["parse_error"] = %error.msg
+
 proc flow_kind_text[A](flow: Flow[A]): string =
   if flow.isNil:
     return "nil"
@@ -1612,13 +1632,15 @@ proc handle_runtime_event[A](
       "model completion has no materializer")
     plan_assert(plan, event.output_arguments.len > 0,
       "model completion has no encoded output")
+    let payload_log = model_payload_for_log(event.output_arguments)
     plan.context.runtime_log(
       "model.output",
       "vecherinka",
       log_fields(
         ("request_id", %(request_id_key(event.request_id))),
         ("tool", %event.output_tool_name),
-        ("arguments_bytes", %event.output_arguments.len)))
+        ("arguments_bytes", %event.output_arguments.len),
+        ("payload", payload_log)))
     let can_ack_tool = event.tool_request_id.isSome and not runtime.isNil and
       runtime.server_requests.hasKey(
         request_id_key(event.tool_request_id.get))
@@ -1663,7 +1685,8 @@ proc handle_runtime_event[A](
         "vecherinka",
         log_fields(
           ("request_id", %(request_id_key(event.request_id))),
-          ("error", %decoded.error)))
+          ("error", %decoded.error),
+          ("payload", payload_log)))
       if can_ack_tool:
         runtime.accept_tool_response(
           event.tool_request_id.get,

@@ -136,26 +136,47 @@ relative path.
 Generated variant extraction needs explicit `std/json` import in test module.
 Fixed import; variant execution passed.
 
-### R-001 — Fan followed by model loses owning request
+### R-001 — Fan followed by model loses owning request — resolved
 
-Runtime error: `codex event failed: completed turn has no owning request:`
+Earlier runtime error: `codex event failed: completed turn has no owning request:`
 followed by request ID `4aab4f5c-bc89-46f3-b818-08564eacf0b4`.
 
-Fan branches and join complete; post-join model submission fails. Fan-only and
-advanced direct-join composition pass. No runtime/source workaround attempted.
+Fresh Stage 3 execution now completes fan, join, post-join model, and exact
+typed output. Keep historical failure as regression evidence.
 
-### R-002 — Fixed-array model-output contract
+### R-002 — Fixed-array model-output contract — resolved
 
-Generated Schematic code fails compile with:
-`type mismatch: Expression: min(schemaOf(T), 3)`.
+Earlier generated Schematic compile failure:
+`type mismatch: Expression: min(schemaOf(T), 3)`. Fixed-array output now uses a
+strict `{args: [...]}` transport envelope, matching the dynamic-tool boundary;
+the generated materializer unwraps `args` before fixed-array conversion.
+Inclusion tests and live Stage 9 pass exact values `[11,22,33]`.
 
-Lower-level artifact/schema inclusion tests pass, but top-level fixed-array
-model-output flow cannot compile. Fixed-array output test remains blocked; no
-runtime/source workaround attempted.
+### H-005 — `checked_prompt` literal requirement
+
+Concatenated strings passed to `checked_prompt` fail with
+`checked_prompt requires a string literal`. Manual template uses one literal;
+no runtime impact.
+
+### P-001 — Location output ambiguity
+
+Default prompt produced repeated advanced-test mistakes: absolute path, input
+path, and file contents submitted as output Location. Added short manual
+template guidance: create required file inside working directory and return
+relative filename; never return absolute path, input path, or file contents.
+Stage 10 rerun had zero Location rejects.
 
 ## Current stop state
 
-Core primitives and one advanced supported composition are verified. Further
-progress toward blocked combinations stops because R-001 and R-002 are
-software blockers, not prompt failures. Successful prompts required no
-`AgentPromptTemplates` changes.
+R-001 and R-002 resolved. Core primitives and advanced supported composition
+pass with manual templates.
+
+## Rerun: 2026-09-14
+
+- Recompiled with finite `gtimeout`.
+- Fresh executions passed stages 0–8, both fan variants, stage 9 variant and
+  named tuple cases, and stage 10.
+- Stage 10 manual-template run passed exact output and artifact review: only
+  `artifact-6/source.txt` and `artifact-7/source.txt` contain files in
+  `run-m0GqLffL`; all other artifact directories are empty.
+- Stage 9 fixed-array execution passed after the `args` envelope fix.

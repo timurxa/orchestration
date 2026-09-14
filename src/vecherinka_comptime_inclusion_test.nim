@@ -197,10 +197,9 @@
 ##
 ## User decisions still required before exact tests can be frozen
 ##
-## - Fixed-array schema encoding: exact-length JSON array presumed. Confirm
-##   whether JSON Schema minItems/maxItems are required, especially for arrays
-##   with nonzero Nim lower bounds. “Treated like seq” implies human paths
-##   remain one-based; confirm if native lower-bound indices should appear.
+## - Fixed-array transport schema uses a strict object envelope with an `args`
+##   field containing the exact-length JSON array. “Treated like seq” implies
+##   human paths remain one-based; native lower-bound indices stay internal.
 ## - Schematic gate: acceptance means schema construction only, or full
 ##   toJsonSchema, valid tryParse, invalid tryParse, toJson, parse-after-toJson
 ##   round-trip. Current contract wording assumes full round-trip.
@@ -273,6 +272,7 @@ type
   NestedFixed = array[2, array[2, int]]
   AliasFixed = Fixed
   AliasSeq = seq[TestLeaf]
+  PlainSeq = seq[int]
   ObjectWithFixed = object
     values: Fixed
   OptionOutput = Option[TestLeaf]
@@ -375,6 +375,7 @@ static:
   doAssert artifact_kind(NestedFixed) == ank_seq
   doAssert artifact_child_kind(NestedFixed) == ank_seq
   doAssert artifact_kind(AliasFixed) == ank_seq
+  doAssert artifact_kind(PlainSeq) == ank_seq
   doAssert artifact_kind(SmallCount) == ank_inline
   doAssert artifact_kind(Natural) == ank_inline
   doAssert artifact_kind(Positive) == ank_inline
@@ -397,6 +398,7 @@ declare_model_materializer(TestLocatedOutput, test_located_output_materializer)
 declare_model_materializer(TestConstrainedOutput, test_constrained_output_materializer)
 declare_model_materializer(TestVariant, test_variant_output_materializer)
 declare_model_materializer(Fixed, test_fixed_output_materializer)
+declare_model_materializer(PlainSeq, test_plain_seq_output_materializer)
 declare_model_materializer(FixedLower, test_fixed_lower_output_materializer)
 declare_model_materializer(FixedLocation, test_fixed_location_output_materializer)
 declare_model_materializer(EmptyFixed, test_empty_fixed_output_materializer)
@@ -757,9 +759,14 @@ suite "artifact_tree generated output verifier":
     let variant_schema = toJsonSchema(output_contract(TestVariant))
     check variant_schema.hasKey("oneOf")
     let fixed_schema = toJsonSchema(output_contract(Fixed))
-    check fixed_schema["type"].getStr == "array"
-    check fixed_schema["minItems"].getInt == 3
-    check fixed_schema["maxItems"].getInt == 3
+    check fixed_schema["type"].getStr == "object"
+    check fixed_schema["additionalProperties"].getBool == false
+    check fixed_schema["properties"]["args"]["type"].getStr == "array"
+    check fixed_schema["properties"]["args"]["minItems"].getInt == 3
+    check fixed_schema["properties"]["args"]["maxItems"].getInt == 3
+    let seq_schema = toJsonSchema(output_contract(PlainSeq))
+    check seq_schema["type"].getStr == "object"
+    check seq_schema["properties"]["args"]["type"].getStr == "array"
 
   test "materializer parses and rejects real structured output":
     let valid = test_output_materializer(0, LlmOutput(
@@ -805,23 +812,29 @@ suite "artifact_tree generated output verifier":
 
   test "fixed output keeps declared cardinality":
     let valid = test_fixed_output_materializer(0, LlmOutput(
-      arguments: parseJson("[1,2,3]"), working_dir: Path(getTempDir())))
+      arguments: parseJson("{\"args\":[1,2,3]}"), working_dir: Path(getTempDir())))
     check valid.ok
     check valid.value == [1, 2, 3]
     let wrong_size = test_fixed_output_materializer(0, LlmOutput(
-      arguments: parseJson("[1,2]"), working_dir: Path(getTempDir())))
+      arguments: parseJson("{\"args\":[1,2]}"), working_dir: Path(getTempDir())))
     check not wrong_size.ok
     let empty = test_empty_fixed_output_materializer(0, LlmOutput(
-      arguments: parseJson("[]"), working_dir: Path(getTempDir())))
+      arguments: parseJson("{\"args\":[]}"), working_dir: Path(getTempDir())))
     check empty.ok
     check empty.value == []
     let nonempty = test_empty_fixed_output_materializer(0, LlmOutput(
-      arguments: parseJson("[1]"), working_dir: Path(getTempDir())))
+      arguments: parseJson("{\"args\":[1]}"), working_dir: Path(getTempDir())))
     check not nonempty.ok
+
+    let sequence = test_plain_seq_output_materializer(0, LlmOutput(
+      arguments: parseJson("{\"args\":[7,8,9]}"),
+      working_dir: Path(getTempDir())))
+    check sequence.ok
+    check sequence.value == @[7, 8, 9]
 
   test "fixed lower bounds and Location elements preserve type and paths":
     let lower = test_fixed_lower_output_materializer(0, LlmOutput(
-      arguments: parseJson("[4,5,6]"), working_dir: Path(getTempDir())))
+      arguments: parseJson("{\"args\":[4,5,6]}"), working_dir: Path(getTempDir())))
     check lower.ok
     check lower.value[-1] == 4
     check lower.value[0] == 5
@@ -832,13 +845,13 @@ suite "artifact_tree generated output verifier":
     writeFile(root / "first.txt", "first")
     writeFile(root / "second.txt", "second")
     let locations = test_fixed_location_output_materializer(0, LlmOutput(
-      arguments: parseJson("[\"first.txt\",\"second.txt\"]"),
+      arguments: parseJson("{\"args\":[\"first.txt\",\"second.txt\"]}"),
       working_dir: Path(root)))
     check locations.ok
     check cast[string](locations.value[0]) == "first.txt"
     check cast[string](locations.value[1]) == "second.txt"
     let missing = test_fixed_location_output_materializer(0, LlmOutput(
-      arguments: parseJson("[\"first.txt\",\"missing.txt\"]"),
+      arguments: parseJson("{\"args\":[\"first.txt\",\"missing.txt\"]}"),
       working_dir: Path(root)))
     check not missing.ok
     check "output[2]" in missing.error

@@ -1209,6 +1209,11 @@ proc artifact_contains_fixed(node: ArtifactNode): bool =
         return true
   false
 
+proc model_output_requires_args_wrapper(node: ArtifactNode): bool =
+  ## Dynamic function tools receive direct sequence arguments under `args`.
+  ## Keep object-root outputs unchanged.
+  not node.isNil and node.kind == ank_seq
+
 proc artifact_wire_type(node: ArtifactNode): NimNode =
   ## Schematic has no array extractor. Replace fixed arrays by seqs in a
   ## generated wire type; all other leaves retain their declared type.
@@ -1366,6 +1371,7 @@ proc emit_wire_conversion(
 
 proc model_output_contract(output_type: NimNode): NimNode =
   let output_tree = artifact_tree(output_type)
+  var inner_schema: NimNode
   if artifact_contains_fixed(output_tree):
     let wire_name = genSym(nskType, "ModelOutputWire")
     let wire_def = newTree(nnkTypeSection,
@@ -1378,15 +1384,26 @@ proc model_output_contract(output_type: NimNode): NimNode =
         newLit(output_tree.fixed_length))
       schema = newCall(bindSym("max"), schema,
         newLit(output_tree.fixed_length))
-    newTree(nnkBlockStmt, newEmptyNode(), newStmtList(wire_def, schema))
+    inner_schema = newTree(nnkBlockStmt, newEmptyNode(),
+      newStmtList(wire_def, schema))
   elif output_tree.kind == ank_variant:
-    newCall(
+    inner_schema = newCall(
       newTree(nnkBracketExpr,
         bindSym"output_discriminated_schema", copyNimTree(output_type)),
       ident(output_tree.tag_name.strVal))
   else:
-    newCall(newTree(nnkBracketExpr,
+    inner_schema = newCall(newTree(nnkBracketExpr,
       bindSym"output_schema_of", copyNimTree(output_type)))
+
+  if model_output_requires_args_wrapper(output_tree):
+    let inner_name = genSym(nskLet, "model_output_inner_contract")
+    let wrapped = quote do:
+      block:
+        let `inner_name` = `inner_schema`
+        schema:
+          args: `inner_name`
+    return newCall(bindSym("strict"), wrapped)
+  inner_schema
 
 proc emit_model_materializer(
     registry: ArtifactRegistry;
@@ -1397,8 +1414,11 @@ proc emit_model_materializer(
   let materializer_output = genSym(nskParam, "model_output")
   let output_contract = genSym(nskLet, "model_output_contract")
   let parsed_output = genSym(nskLet, "model_parsed_output")
-  let parsed_value = newDotExpr(parsed_output, ident("value"))
   let output_tree = artifact_tree(output_type)
+  let parsed_value = if model_output_requires_args_wrapper(output_tree):
+    newDotExpr(newDotExpr(parsed_output, ident("value")), ident("args"))
+  else:
+    newDotExpr(parsed_output, ident("value"))
   let packed_value = if artifact_contains_fixed(output_tree):
     emit_wire_conversion(output_tree, parsed_value, output_type)
   else:

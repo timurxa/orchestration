@@ -86,17 +86,28 @@ type
 
 const profile = "gpt-5.6-luna".medium
 
-expandMacros: vecherinka(solve):
+const stepping_agent_prompts = AgentPromptTemplates(
+  developer_instructions: checked_prompt(
+    "Complete task. Call finish_work exactly once when done."),
+  goal: checked_prompt(
+    "Complete task. Call `finish_work` exactly once after completion. Put final result in finish_work arguments."),
+  turn_prompt: checked_prompt(
+    "$task\n\nComplete task. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
+    "task", "input", "working_dir", "runtime_dir"),
+  finish_work_description: checked_prompt(
+    "Submit final structured result. Call exactly once when task is complete."))
+
+expandMacros: vecherinka(solve, stepping_agent_prompts):
   > baseline BaselineInput ~> BaselineOutput {.entry.}:
     profile[BaselineInput, BaselineOutput](
       "Copy marker exactly into answer. Do not create files.")
 
-expandMacros: vecherinka(solve_stage_1):
+expandMacros: vecherinka(solve_stage_1, stepping_agent_prompts):
   > copy_fields Stage1Input ~> Stage1Output {.entry.}:
     profile[Stage1Input, Stage1Output](
       "Copy first into first_copy and second into second_copy. Do not create files.")
 
-expandMacros: vecherinka(solve_stage_2):
+expandMacros: vecherinka(solve_stage_2, stepping_agent_prompts):
   > finalise Stage2Intermediate ~> Stage2Output:
     profile[Stage2Intermediate, Stage2Output](
       "Copy payload exactly into answer. Do not create files.")
@@ -104,7 +115,7 @@ expandMacros: vecherinka(solve_stage_2):
     so(Stage2Input, Stage2Output, input) do:
       pure(Stage2Intermediate(payload: input.marker)) >>> finalise
 
-expandMacros: vecherinka(solve_stage_3):
+expandMacros: vecherinka(solve_stage_3, stepping_agent_prompts):
   > merge_fan (Stage3Left, Stage3Right) ~> Stage3Output:
     profile[(Stage3Left, Stage3Right), Stage3Output](
       "Copy left_value exactly into left. Copy right_value exactly into right. Do not create files.")
@@ -115,7 +126,7 @@ expandMacros: vecherinka(solve_stage_3):
       profile[Stage3Input, Stage3Right](
         "Copy marker exactly into right_value. Do not create files.")) >>> merge_fan
 
-expandMacros: vecherinka(solve_stage_3_fan):
+expandMacros: vecherinka(solve_stage_3_fan, stepping_agent_prompts):
   > fan_only Stage3Input ~> (Stage3Left, Stage3Right) {.entry.}:
     fan(
       profile[Stage3Input, Stage3Left](
@@ -123,7 +134,7 @@ expandMacros: vecherinka(solve_stage_3_fan):
       profile[Stage3Input, Stage3Right](
         "Copy marker exactly into right_value. Do not create files."))
 
-expandMacros: vecherinka(solve_stage_4):
+expandMacros: vecherinka(solve_stage_4, stepping_agent_prompts):
   > annotate Stage4Input ~> Stage4Output:
     profile[Stage4Input, Stage4Output](
       "Copy marker exactly into answer. Do not create files.")
@@ -134,7 +145,7 @@ expandMacros: vecherinka(solve_stage_4):
       else:
         pure(Stage4Output(answer: "pure:" & input.marker))
 
-expandMacros: vecherinka(solve_stage_5):
+expandMacros: vecherinka(solve_stage_5, stepping_agent_prompts):
   > project_marker Stage5Input ~> string:
     it(Stage5Input)[marker]
   > finish_projection string ~> Stage5Output:
@@ -144,55 +155,55 @@ expandMacros: vecherinka(solve_stage_5):
     so(Stage5Input, Stage5Output, input) do:
       input >>> project_marker >>> finish_projection
 
-expandMacros: vecherinka(solve_stage_6):
+expandMacros: vecherinka(solve_stage_6, stepping_agent_prompts):
   > materialise Stage6Input ~> Stage6Output {.entry.}:
     profile[Stage6Input, Stage6Output](
       "Read the provided input file named source.txt. Create result.txt in the working directory containing exactly the input file text. Return summary equal to the input file text and artifact equal to result.txt. Do not create any other files.")
 
-expandMacros: vecherinka(solve_stage_7):
+expandMacros: vecherinka(solve_stage_7, stepping_agent_prompts):
   > map_item Stage7Item ~> Stage7Result:
     profile[Stage7Item, Stage7Result](
       "Copy marker exactly into result. Do not create files.")
   > lift_entry seq[Stage7Item] ~> seq[Stage7Result] {.entry.}:
     lift(seq[here])[map_item]
 
-expandMacros: vecherinka(solve_stage_8_option):
+expandMacros: vecherinka(solve_stage_8_option, stepping_agent_prompts):
   > map_option Stage8Item ~> Stage8Result:
     profile[Stage8Item, Stage8Result](
       "Copy marker exactly into result. Do not create files.")
   > option_entry Option[Stage8Item] ~> Option[Stage8Result] {.entry.}:
     lift(Option[here])[map_option]
 
-expandMacros: vecherinka(solve_stage_8_tuple):
+expandMacros: vecherinka(solve_stage_8_tuple, stepping_agent_prompts):
   > map_tuple Stage8Item ~> Stage8Result:
     profile[Stage8Item, Stage8Result](
       "Copy marker exactly into result. Do not create files.")
   > tuple_entry (Stage8Context, Stage8Item) ~> (Stage8Context, Stage8Result) {.entry.}:
     lift((Stage8Context, here))[map_tuple]
 
-expandMacros: vecherinka(solve_stage_8_object):
+expandMacros: vecherinka(solve_stage_8_object, stepping_agent_prompts):
   > map_object Stage8Item ~> Stage8Item:
     profile[Stage8Item, Stage8Item](
       "Prefix marker with processed: and put it into marker. Do not create files.")
   > object_entry Stage8Container ~> Stage8Container {.entry.}:
     lift(Stage8Container(item: here))[map_object]
 
-expandMacros: vecherinka(solve_stage_9_variant):
+expandMacros: vecherinka(solve_stage_9_variant, stepping_agent_prompts):
   > copy_variant Stage9Variant ~> Stage9Variant {.entry.}:
     profile[Stage9Variant, Stage9Variant](
       "Preserve common and the active text_branch values exactly. Return the same variant. Do not create files.")
 
-expandMacros: vecherinka(solve_stage_9_fixed):
+expandMacros: vecherinka(solve_stage_9_fixed, stepping_agent_prompts):
   > copy_fixed Stage9Fixed ~> Stage9Fixed {.entry.}:
     profile[Stage9Fixed, Stage9Fixed](
-      "Copy all three array values exactly. Do not create files.")
+      "Copy all three array values exactly. Return a JSON array of exactly three integers, not an object. Do not create files.")
 
-expandMacros: vecherinka(solve_stage_9_tuple):
+expandMacros: vecherinka(solve_stage_9_tuple, stepping_agent_prompts):
   > copy_named_tuple Stage9NamedTuple ~> Stage9NamedTuple {.entry.}:
     profile[Stage9NamedTuple, Stage9NamedTuple](
       "Copy first and second exactly. Do not create files.")
 
-expandMacros: vecherinka(solve_stage_10):
+expandMacros: vecherinka(solve_stage_10, stepping_agent_prompts):
   > map_item Stage10Item ~> Stage10Item:
     profile[Stage10Item, Stage10Item](
       "Read the provided source file. Preserve marker exactly. Return source as source.txt. Do not create any other files.")
@@ -380,6 +391,14 @@ elif stage == "stage-9":
   echo "DIRECT_RESULT tuple_first=", tuple_output.first,
     " tuple_second=", tuple_output.second
   echo "STAGE_9_TUPLE_ASSERTIONS named_fields=true exact_values=true no_unrequested_files=manual_review"
+
+  let fixed_logger = new_structured_logger(emit_log, run_id = "stepping-stage-9-fixed")
+  let fixed_input: Stage9Fixed = [11, 22, 33]
+  let fixed_output = solve_stage_9_fixed(fixed_input, logger = fixed_logger)
+  doAssert fixed_output == fixed_input,
+    "stage 9 fixed array values changed"
+  echo "DIRECT_RESULT fixed_array=", fixed_output[0], ",", fixed_output[1], ",", fixed_output[2]
+  echo "STAGE_9_FIXED_ASSERTIONS exact_values=true no_unrequested_files=manual_review"
 elif stage == "stage-10":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-10")
   let input = Stage10Input(
