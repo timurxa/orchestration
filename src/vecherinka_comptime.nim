@@ -242,22 +242,6 @@ type
     head: NimNode
     tail: NimNode
 
-  TreeRewriter[T] = proc(node: NimNode; state: var T): NimNode
-
-proc map_nim_tree[T](
-    node: NimNode;
-    state: var T;
-    rewrite: TreeRewriter[T]
-): NimNode =
-  ## A non-nil rewrite is terminal: its subtree is already complete.
-  let replacement = rewrite(node, state)
-  if not replacement.isNil:
-    return replacement
-
-  result = copyNimNode(node)
-  for child in node:
-    result.add map_nim_tree(child, state, rewrite)
-
 proc replace_symbol(
     node, original, replacement: NimNode
 ): NimNode =
@@ -1011,15 +995,10 @@ template output_schema_of[T](): untyped =
 template output_discriminated_schema[T](discriminator: untyped): untyped =
   discriminated(T, discriminator)
 
-proc lower_model_call(
-    registry: var ArtifactRegistry;
-    flow_type, profile, prompt: NimNode
+proc model_output_kind(
+    registry: ArtifactRegistry;
+    output_type: NimNode
 ): NimNode =
-  let artifact_name = registry.artifact_name
-  let profile_expr = copyNimTree(profile)
-  let prompt_expr = copyNimTree(prompt)
-  let input_type = copyNimTree(flow_type[1])
-  let output_type = copyNimTree(flow_type[2])
   var output_kind_ordinal = -1
   for index, info in registry.types:
     if sameType(info.type_expr, output_type):
@@ -1027,7 +1006,24 @@ proc lower_model_call(
       break
   doAssert output_kind_ordinal >= 0,
     "model output type is missing from Artifact registry: " & output_type.repr
-  let output_kind_value = newLit(output_kind_ordinal)
+  newLit(output_kind_ordinal)
+
+proc model_output_contract(output_type: NimNode): NimNode =
+  let output_tree = artifact_tree(output_type)
+  if output_tree.kind == ank_variant:
+    newCall(
+      newTree(nnkBracketExpr,
+        bindSym"output_discriminated_schema", copyNimTree(output_type)),
+      ident(output_tree.tag_name.strVal))
+  else:
+    newCall(newTree(nnkBracketExpr,
+      bindSym"output_schema_of", copyNimTree(output_type)))
+
+proc emit_model_materializer(
+    registry: ArtifactRegistry;
+    output_type, output_kind_value: NimNode
+): NimNode =
+  let artifact_name = registry.artifact_name
   let materializer_kind = genSym(nskParam, "model_output_kind")
   let materializer_output = genSym(nskParam, "model_output")
   let output_contract = genSym(nskLet, "model_output_contract")
@@ -1053,14 +1049,7 @@ proc lower_model_call(
       return ModelMaterialization[`artifact_name`](
         ok: false,
         error: "invalid finish_work locations: " & `location_errors`)
-  let output_contract_expr = if output_tree.kind == ank_variant:
-    newCall(
-      newTree(nnkBracketExpr,
-        bindSym"output_discriminated_schema", copyNimTree(output_type)),
-      ident(output_tree.tag_name.strVal))
-  else:
-    newCall(newTree(nnkBracketExpr,
-      bindSym"output_schema_of", copyNimTree(output_type)))
+  let output_contract_expr = model_output_contract(output_type)
   let materializer_body = quote do:
     case `materializer_kind`
     of `output_kind_value`:
@@ -1086,6 +1075,16 @@ proc lower_model_call(
       `materializer_body`
     )
 
+  materializer
+
+proc emit_model_submitter(
+    registry: ArtifactRegistry;
+    input_type, profile, prompt, output_kind_value, output_contract_expr,
+    materializer: NimNode
+): NimNode =
+  let artifact_name = registry.artifact_name
+  let profile_expr = copyNimTree(profile)
+  let prompt_expr = copyNimTree(prompt)
   let submit_context = genSym(nskParam, "model_context")
   let submit_request_id = genSym(nskParam, "model_request_id")
   let submit_input = genSym(nskParam, "model_input")
@@ -1190,11 +1189,30 @@ proc lower_model_call(
         `submit_working_dir`: Path) {.nimcall.} =
       `submit_body`
     )
+  submit
+
+proc emit_model_flow(artifact_name, submit: NimNode): NimNode =
   quote do:
     Flow[`artifact_name`](
       kind: fk_model,
       submit: `submit`
     )
+
+proc lower_model_call(
+    registry: var ArtifactRegistry;
+    flow_type, profile, prompt: NimNode
+): NimNode =
+  let artifact_name = registry.artifact_name
+  let input_type = copyNimTree(flow_type[1])
+  let output_type = copyNimTree(flow_type[2])
+  let output_kind_value = registry.model_output_kind(output_type)
+  let output_contract_expr = model_output_contract(output_type)
+  let materializer = registry.emit_model_materializer(
+    output_type, output_kind_value)
+  let submit = registry.emit_model_submitter(
+    input_type, profile, prompt, output_kind_value, output_contract_expr,
+    materializer)
+  emit_model_flow(artifact_name, submit)
 
 proc lower_it(
     flow_type, ir: NimNode;
@@ -1221,7 +1239,7 @@ proc lower_raw_value(
     registry: ArtifactRegistry
 ): NimNode
 
-proc rewrite_flow_node(node: NimNode; context: var FlowWalkContext): NimNode
+proc map_nim_tree(node: NimNode; context: var FlowWalkContext): NimNode
 
 proc flow_proc_parts(node: NimNode; name, body: var NimNode): bool =
   if (ProcDef([
@@ -1428,8 +1446,7 @@ proc lower_flow_pair(
     pair: FlowPair;
     context: var FlowWalkContext
 ): NimNode =
-  let transformed_body = map_nim_tree(
-    pair.proc_info.body, context, rewrite_flow_node)
+  let transformed_body = map_nim_tree(pair.proc_info.body, context)
   let artifact_name = context.artifact_registry.artifact_name
   let root_name = newLit(pair.ref_info.name)
   let entry = newLit(pair.ref_info.entry)
@@ -1442,7 +1459,7 @@ proc lower_flow_pair(
     )
   top_flow
 
-proc rewrite_flow_node(node: NimNode; context: var FlowWalkContext): NimNode =
+proc map_nim_tree(node: NimNode; context: var FlowWalkContext): NimNode =
   if node.kind == nnkIdentDefs:
     var ref_info: FlowRefInfo
     if flow_ref_info(node, ref_info):
@@ -1462,7 +1479,10 @@ proc rewrite_flow_node(node: NimNode; context: var FlowWalkContext): NimNode =
   let flow_type = flow_spec_type(node)
   if not flow_type.isNil:
     return lower_flow_expr(node, context).head
-  nil
+
+  result = copyNimNode(node)
+  for child in node:
+    result.add map_nim_tree(child, context)
 
 proc make_vecherinka_artifact_type(
     flow_types: seq[NimNode];
@@ -1637,7 +1657,7 @@ proc lower_so(
   let typed_input = genSym(nskLet, "so_input")
   let unpacked = context.artifact_registry.emit_artifact_unpack(
     domain, artifact_input)
-  let transformed_body = map_nim_tree(body, context, rewrite_flow_node)
+  let transformed_body = map_nim_tree(body, context)
   let rebound_body = replace_symbol(transformed_body, parameter, typed_input)
   let expand = quote do:
     proc (`artifact_input`: `artifact_name`): Flow[`artifact_name`] {.nimcall.} =
@@ -1934,12 +1954,9 @@ proc lower_vecherinka_runtime(body, solve: NimNode): NimNode =
     context.flow_types, registry)
   context.artifact_registry = registry
 
-  let proc_name = if solve.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
-    ident(solve.strVal)
-  else:
-    solve
-  doAssert proc_name.kind in {nnkIdent, nnkSym, nnkAccQuoted},
-    "vecherinka proc name must be an identifier"
+  doAssert solve.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit},
+    "vecherinka proc name must be a string"
+  let proc_name = ident(solve.strVal)
 
   var entry_index = -1
   for index, pair in context.flow_pairs:

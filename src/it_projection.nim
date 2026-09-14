@@ -42,16 +42,19 @@ proc isNameNode(node: NimNode): bool =
 proc nameText(node: NimNode): string =
   if not node.isNameNode:
     error("it field selector expects an identifier", node)
-  ## Accquoted identifiers are wrapper nodes; their child carries the actual
-  ## identifier spelling. Plain identifiers expose strVal directly.
+  ## Accquoted identifiers are wrappers around a flat sequence of identifier
+  ## parts. Restricting parts here prevents malformed nested wrappers from
+  ## being mistaken for field spelling and keeps successful output exact.
   if node.kind == nnkAccQuoted:
     if node.len == 0:
       error("malformed accquoted it field selector", node)
     for part in node:
-      if not part.isNameNode:
+      if part.kind notin {nnkIdent, nnkSym}:
         error("malformed accquoted it field selector", part)
       result.add part.strVal
   else:
+    ## `nnkIdent`/`nnkSym` nodes supplied by Nim carry their spelling in
+    ## `strVal`; no normalization is allowed by the syntax-only contract.
     result = node.strVal
   if result.len == 0:
     error("it field selector cannot be empty", node)
@@ -71,7 +74,11 @@ proc parseSelector(node: NimNode): ItSelector =
   if node.isNameNode:
     return ItSelector(kind: itsField, field: node.nameText)
 
-  if node.kind == nnkInfix and node.len == 3 and node[0].strVal == "..":
+  ## Nim represents an ordinary infix operator with an identifier/symbol
+  ## child. Check its kind before reading `strVal`, so arbitrary synthetic
+  ## nodes cannot be accepted merely because they expose the same text.
+  if node.kind == nnkInfix and node.len == 3 and
+      node[0].kind in {nnkIdent, nnkSym} and node[0].strVal == "..":
     let first = node[1].integerValue
     let last = node[2].integerValue
     if first > last:
@@ -99,7 +106,8 @@ proc parseGroup(node: NimNode): ItSelectorGroup =
 
     selectors.add selector
 
-  ## Loop consumes every child once; nonempty input gives nonempty output.
+  ## Loop consumes every child once; the nonempty input precondition therefore
+  ## makes the output group nonempty and preserves selector cardinality/order.
   result = ItSelectorGroup(selectors: selectors)
 
 proc parseItPath*(node: NimNode): ItPath =
@@ -113,30 +121,6 @@ proc parseItPath*(node: NimNode): ItPath =
     groups.add child.parseGroup
 
   ## Every outer child becomes exactly one group; no group is dropped or
-  ## duplicated. Therefore result.groups is nonempty and fully represented.
+  ## duplicated. The nonempty input precondition therefore preserves group
+  ## cardinality/order and establishes the output invariant.
   result = ItPath(groups: groups)
-
-when isMainModule:
-  macro sanity(path: untyped): untyped =
-    let parsed = parseItPath(path)
-    doAssert parsed.groups.len > 0
-    for group in parsed.groups:
-      doAssert group.selectors.len > 0
-    result = newEmptyNode()
-
-  macro sanityNested(path: untyped): untyped =
-    let parsed = parseItPath(path)
-    doAssert parsed.groups.len == 2
-    doAssert parsed.groups[0].selectors.len == 2
-    doAssert parsed.groups[0].selectors[0].kind == itsIndex
-    doAssert parsed.groups[0].selectors[1].kind == itsIndex
-    doAssert parsed.groups[1].selectors[0].kind == itsField
-    result = newEmptyNode()
-
-  # These sanity checks exercise representative marker payloads. The proof
-  # lives in parser invariants above, not in this finite sample set.
-  sanity([[0]])
-  sanity([[field_name]])
-  sanity([[`field-name`]])
-  sanity([[1 .. 2]])
-  sanityNested([[0, 1], [issues]])

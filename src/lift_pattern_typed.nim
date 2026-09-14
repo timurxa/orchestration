@@ -96,6 +96,11 @@ proc is_operator(node: NimNode; spelling: string): bool =
     false
 
 proc is_bracket_operator(node: NimNode): bool =
+  ## Source `[](T, P)` parses as `nnkBracket`; resolved macro ASTs may use
+  ## open/closed symbol choices. Both denote bracket operator here. The
+  ## spelling check keeps arbitrary bracket-shaped nodes out.
+  if node.kind == nnk_bracket:
+    return node.repr == "[]"
   node.kind in {nnk_open_sym_choice, nnk_closed_sym_choice} and
     node.is_operator("[]")
 
@@ -162,9 +167,12 @@ proc has_node(tree: LiftPatternTree; id: LiftPatternId): bool =
   int(id) in 0 ..< tree.nodes.len
 
 proc add_node(tree: var LiftPatternTree; value: LiftPattern): LiftPatternId =
+  ## Append-only allocation makes IDs contiguous. A caller receives the new
+  ## final index; recursive parsers therefore always reference older IDs.
   result = LiftPatternId(tree.nodes.len)
   tree.nodes.add value
   assert tree.has_node(result)
+  assert int(result) == tree.nodes.len - 1
 
 proc new_type(tree: var LiftPatternTree; node: NimNode): LiftPatternId =
   var value: LiftPattern
@@ -305,8 +313,11 @@ proc parse_pattern_node(node: NimNode; tree: var LiftPatternTree): LiftPatternId
 
 proc parse_lift_pattern*(root: NimNode): LiftPatternTree =
   result.root_id = invalid_id
+  ## Every aggregate parses children before appending its own node. Thus the
+  ## returned root is the final node and all stored child IDs precede it.
   result.root_id = parse_pattern_node(root, result)
   assert result.has_node(result.root_id)
+  assert int(result.root_id) == result.nodes.len - 1
 
 proc root_id*(tree: LiftPatternTree): LiftPatternId =
   assert tree.has_node(tree.root_id)

@@ -18,14 +18,14 @@ proc solve(input_553648705: Simple;
       let artifact_553648663 = model_input_553648659
       const
         loc`gensym25 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-          line: 1534, column: 6)
-        ploc`gensym25 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1534, 7)"
+          line: 1520, column: 6)
+        ploc`gensym25 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1520, 7)"
       bind instantiationInfo
       mixin failedAssertImpl
       {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-               line: 1534, column: 6).}:
+               line: 1520, column: 6).}:
         if not (artifact_553648663.kind == vak_0):
-          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1534, 7) `artifact_553648663.kind == vak_0` ")
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1520, 7) `artifact_553648663.kind == vak_0` ")
       artifact_553648663.value_0
     try:
       let model_materialized_input_553648662 = proc (materializer_input_553648664: Simple;
@@ -107,13 +107,13 @@ proc solve(input_553648705: Simple;
         get(work_plan_553648709.output)).data
     const
       loc`gensym231 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-        line: 1534, column: 6)
-      ploc`gensym231 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1534, 7)"
+        line: 1520, column: 6)
+      ploc`gensym231 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1520, 7)"
     bind instantiationInfo
     mixin failedAssertImpl
     {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-             line: 1534, column: 6).}:
+             line: 1520, column: 6).}:
       if not (artifact_553648710.kind == vak_0):
-        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1534, 7) `artifact_553648710.kind == vak_0` ")
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1520, 7) `artifact_553648710.kind == vak_0` ")
     artifact_553648710.value_0
 
