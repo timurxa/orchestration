@@ -15,6 +15,9 @@ type
   ArtifactMeta* = object
     id*: ArtifactID
     artifact_dir*: Path
+    ## Direct artifacts used to produce this artifact. Empty means no tracked
+    ## predecessor, including runtime `raw` and `it` artifacts.
+    predecessor_ids*: seq[ArtifactID]
 
   ArtifactRecord*[A] = object
     data*: A
@@ -812,25 +815,33 @@ proc create_run_directory*(source_root: Path): Path =
       $source_root)
   Path(createTempDir("run-", "", $source_root))
 
-proc reserve_artifact_meta*[A](context: RuntimeContext[A]): ArtifactMeta =
-  if $context.run_dir == "":
+proc reserve_artifact_meta*[A](
+    context: RuntimeContext[A];
+    predecessor_ids: seq[ArtifactID] = @[]
+): ArtifactMeta =
+  if context.isNil or $context.run_dir == "":
     raise newException(ValueError, "runtime context has no run directory")
   inc context.next_artifact_id
   result = ArtifactMeta(
     id: context.next_artifact_id,
     artifact_dir: context.run_dir /
-      Path("artifact-" & $context.next_artifact_id))
+      Path("artifact-" & $context.next_artifact_id),
+    predecessor_ids: predecessor_ids)
   createDir($result.artifact_dir)
   context.runtime_log(
     "artifact.reserve",
     "vecherinka",
     log_fields(
       ("artifact_id", %result.id),
-      ("artifact_dir", %($lastPathPart(result.artifact_dir)))))
+      ("artifact_dir", %($lastPathPart(result.artifact_dir))),
+      ("predecessor_ids", %result.predecessor_ids)))
 
-proc allocate_artifact_meta*[A](context: RuntimeContext[A]): ArtifactMeta =
+proc allocate_artifact_meta*[A](
+    context: RuntimeContext[A];
+    predecessor_ids: seq[ArtifactID] = @[]
+): ArtifactMeta =
   ## Compatibility name for callers that only reserve identity and root.
-  reserve_artifact_meta(context)
+  reserve_artifact_meta(context, predecessor_ids)
 
 proc register_artifact*[A](
     context: RuntimeContext[A];
@@ -849,7 +860,8 @@ proc register_artifact*[A](
     "vecherinka",
     log_fields(
       ("artifact_id", %meta.id),
-      ("artifact_dir", %($lastPathPart(meta.artifact_dir)))))
+      ("artifact_dir", %($lastPathPart(meta.artifact_dir))),
+      ("predecessor_ids", %meta.predecessor_ids)))
 
 proc lookup_artifact*[A](
     context: RuntimeContext[A];
@@ -863,9 +875,10 @@ proc lookup_artifact*[A](
 
 proc register_generated_artifact[A](
     context: RuntimeContext[A];
-    data: A
+    data: A;
+    predecessor_ids: seq[ArtifactID] = @[]
 ): ArtifactID =
-  let meta = reserve_artifact_meta(context)
+  let meta = reserve_artifact_meta(context, predecessor_ids)
   register_artifact(context, data, meta)
 
 proc materialized_name_used(names: seq[string]; name: string): bool =
@@ -1114,7 +1127,14 @@ proc finish_join[A](
     output = invocation.flow.construct(values, original)
 
   let destination = invocation.destination
-  let output_id = register_generated_artifact(plan.context, output)
+  var predecessor_ids: seq[ArtifactID] = @[]
+  if state.kind == jk_lift:
+    predecessor_ids.add(invocation.input_id)
+  for slot in state.slots:
+    if slot.isSome:
+      predecessor_ids.add(slot.get)
+  let output_id = register_generated_artifact(
+    plan.context, output, predecessor_ids)
   plan.context.runtime_log(
     "join.close",
     "vecherinka",
@@ -1454,7 +1474,7 @@ proc suspend_model[A](
 ) =
   let input_record = lookup_artifact(plan.context, input_id)
   let request_id = allocate_request_id(plan.context)
-  let output_meta = reserve_artifact_meta(plan.context)
+  let output_meta = reserve_artifact_meta(plan.context, @[input_id])
   let invocation = Invocation[A](
     flow: flow,
     input_id: input_id,
@@ -1533,7 +1553,8 @@ proc begin_lift[A](
     prepend_continuation(flow.continuation, destination))
 
   for work in works:
-    let input_artifact_id = register_generated_artifact(plan.context, work.input)
+    let input_artifact_id = register_generated_artifact(
+      plan.context, work.input, @[input_id])
     enqueue_ready(plan, new_invocation(
       flow.inner,
       input_artifact_id,
@@ -1709,7 +1730,8 @@ proc handle_runtime_event[A](
     plan_assert(plan,
       event.output_meta.isNone or
         (event.output_meta.get.id == output_meta.id and
-         $event.output_meta.get.artifact_dir == $output_meta.artifact_dir),
+         $event.output_meta.get.artifact_dir == $output_meta.artifact_dir and
+         event.output_meta.get.predecessor_ids == output_meta.predecessor_ids),
       "model completion output metadata mismatch")
     if can_ack_tool:
       runtime.accept_tool_response(
@@ -1879,7 +1901,8 @@ proc execute_flows*[A](
     readers_started = true
     result = init_work_plan(top_level_flows, context)
     plan_initialized = true
-    let input_meta = ArtifactMeta(id: 0, artifact_dir: source_root)
+    let input_meta = ArtifactMeta(
+      id: 0, artifact_dir: source_root, predecessor_ids: @[])
     let input_id = register_artifact(context, input, input_meta)
     enqueue_ready(result, new_invocation(
       result.entry,
