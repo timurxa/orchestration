@@ -1,225 +1,207 @@
 
 type
-  VecherinkaArtifactKind_553648527 = enum
+  VecherinkaArtifactKind_553648556 = enum
     vak_0
-  VecherinkaArtifact_553648528 = object
-    case kind: VecherinkaArtifactKind_553648527
+  VecherinkaArtifact_553648557 = object
+    case kind: VecherinkaArtifactKind_553648556
     of vak_0:
       value_0: Simple
-proc solve(input_553648738: Simple;
-           transport_553648739: LlmTransport[VecherinkaArtifact_553648528] = nil;
-           logger_553648740: StructuredLogger = nil): Simple =
-  let data_553648741: seq[Flow[VecherinkaArtifact_553648528]] = @[Flow[
-      VecherinkaArtifact_553648528](kind: fk_top, root: "basic", entry: true, body: Flow[
-      VecherinkaArtifact_553648528](kind: fk_model, submit: proc (
-      model_context_553648689: RuntimeContext[VecherinkaArtifact_553648528];
-      model_request_id_553648690: RequestId; model_input_553648691: VecherinkaArtifact_553648528;
-      model_working_dir_553648692: Path) {.nimcall.} =
-    let model_typed_input_553648693 = block:
-      let artifact_553648695 = model_input_553648691
+proc solve(input_553648767: Simple;
+           transport_553648768: LlmTransport[VecherinkaArtifact_553648557] = nil;
+           logger_553648769: StructuredLogger = nil): Simple =
+  let data_553648770: seq[Flow[VecherinkaArtifact_553648557]] = @[Flow[
+      VecherinkaArtifact_553648557](kind: fk_top, root: "basic", entry: true, body: Flow[
+      VecherinkaArtifact_553648557](kind: fk_model, submit: proc (
+      model_context_553648718: RuntimeContext[VecherinkaArtifact_553648557];
+      model_request_id_553648719: RequestId; model_input_553648720: VecherinkaArtifact_553648557;
+      model_working_dir_553648721: Path) {.nimcall.} =
+    let model_typed_input_553648722 = block:
+      let artifact_553648724 = model_input_553648720
       const
         loc`gensym25 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-          line: 1862, column: 6)
-        ploc`gensym25 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1862, 7)"
+          line: 1934, column: 6)
+        ploc`gensym25 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
       bind instantiationInfo
       mixin failedAssertImpl
       {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-               line: 1862, column: 6).}:
-        if not (artifact_553648695.kind == vak_0):
-          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1862, 7) `artifact_553648695.kind == vak_0` ")
-      artifact_553648695.value_0
+               line: 1934, column: 6).}:
+        if not (artifact_553648724.kind == vak_0):
+          failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553648724.kind == vak_0` ")
+      artifact_553648724.value_0
     try:
-      let model_materialized_input_553648694 = proc (materializer_input_553648696: Simple;
-          materializer_runtime_dir_553648697, materializer_artifact_dir_553648698: Path;
-          materializer_initial_instructions_553648699: string): string {.nimcall.} = result =
-        var materialized_instructions_553648700 = materializer_initial_instructions_553648699
-        var materialized_names_553648701: seq[string] = @[]
-        add(materialized_instructions_553648700,
-            "input.message: string = " & $materializer_input_553648696.message & "\n")
-        materialized_instructions_553648700(model_typed_input_553648693,
-          model_context_553648689.runtime_dir, model_working_dir_553648692, "")
-      let model_output_contract_553648726 = schemaOf(T)
-      let model_output_schema_553648727 = toJsonSchema(model_output_contract_553648726)
-      let model_materializer_553648728 = proc (model_output_kind_553648651: int;
-          model_output_553648652: LlmOutput): ModelMaterialization[
-          VecherinkaArtifact_553648528] {.nimcall, noinit.} = case model_output_kind_553648651
+      let model_materialized_input_553648723 = proc (materializer_input_553648725: Simple;
+          materializer_runtime_dir_553648726, materializer_artifact_dir_553648727: Path;
+          materializer_initial_instructions_553648728: string): string {.nimcall.} = result =
+        var materialized_instructions_553648729 = materializer_initial_instructions_553648728
+        var materialized_names_553648730: seq[string] = @[]
+        add(materialized_instructions_553648729,
+            "input.message: string = " & $materializer_input_553648725.message & "\n")
+        materialized_instructions_553648729(model_typed_input_553648722,
+          model_context_553648718.runtime_dir, model_working_dir_553648721, "")
+      let model_output_contract_553648755 = schemaOf(T)
+      let model_output_schema_553648756 = toJsonSchema(model_output_contract_553648755)
+      let model_materializer_553648757 = proc (model_output_kind_553648680: int;
+          model_output_553648681: LlmOutput): ModelMaterialization[
+          VecherinkaArtifact_553648557] {.nimcall, noinit.} = case model_output_kind_553648680
       of 0:
-        let model_output_contract_553648653 = schemaOf(T)
-        let model_parsed_output_553648654 = tryParse(model_output_contract_553648653,
-            model_output_553648652.arguments)
-        if not model_parsed_output_553648654.ok:
-          return ModelMaterialization[VecherinkaArtifact_553648528](ok: false, error: "invalid finish_work result (" &
-              $len(model_parsed_output_553648654.issues) &
+        let model_output_contract_553648682 = schemaOf(T)
+        let model_parsed_output_553648683 = tryParse(model_output_contract_553648682,
+            model_output_553648681.arguments)
+        if not model_parsed_output_553648683.ok:
+          return ModelMaterialization[VecherinkaArtifact_553648557](ok: false, error: "invalid finish_work result (" &
+              $len(model_parsed_output_553648683.issues) &
               " schema issues)")
-        var location_errors_553648664 = ""
+        var location_errors_553648693 = ""
         if (
-          not (len(location_errors_553648664) == 0)):
-          return ModelMaterialization[VecherinkaArtifact_553648528](ok: false,
-              error: "invalid finish_work locations: " & location_errors_553648664)
-        return ModelMaterialization[VecherinkaArtifact_553648528](ok: true, value: VecherinkaArtifact_553648528(
-            kind: vak_0, value_0: model_parsed_output_553648654.value))
+          not (len(location_errors_553648693) == 0)):
+          return ModelMaterialization[VecherinkaArtifact_553648557](ok: false,
+              error: "invalid finish_work locations: " & location_errors_553648693)
+        return ModelMaterialization[VecherinkaArtifact_553648557](ok: true, value: VecherinkaArtifact_553648557(
+            kind: vak_0, value_0: model_parsed_output_553648683.value))
       else:
-        return ModelMaterialization[VecherinkaArtifact_553648528](ok: false,
+        return ModelMaterialization[VecherinkaArtifact_553648557](ok: false,
             error: "unexpected model output kind")
-      let model_tool_data_553648729 = register_llm_tool_binding(
-          cast[pointer](model_context_553648689), model_request_id_553648690, 0,
-          cast[pointer](model_materializer_553648728))
-      var model_tools_553648730: DynamicToolRegistry = @[]
-      register_dynamic_tool(model_tools_553648730, "finish_work", "Submit final structured result. Call exactly once when task is complete.",
-                            model_output_schema_553648727, model_tool_data_553648729, proc (
+      let model_tool_data_553648758 = register_llm_tool_binding(
+          cast[pointer](model_context_553648718), model_request_id_553648719, 0,
+          cast[pointer](model_materializer_553648757))
+      var model_tools_553648759: DynamicToolRegistry = @[]
+      register_dynamic_tool(model_tools_553648759, "finish_work",
+                            manual_agent_prompts.finish_work_description,
+                            model_output_schema_553648756, model_tool_data_553648758, proc (
           tool_data`gensym11: pointer; tool_context`gensym11: ToolCallContext) {.
           nimcall, gcsafe.} = {.cast(gcsafe).}:
         let binding`gensym11 = lookup_llm_tool_binding(tool_data`gensym11)
         if isNone(binding`gensym11):
           return
         let data`gensym11 = get(binding`gensym11)
-        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553648528]](data`gensym11.context),
+        enqueue_llm_output_event(cast[RuntimeContext[VecherinkaArtifact_553648557]](data`gensym11.context),
                                  data`gensym11.request_id,
                                  data`gensym11.output_kind, cast[ModelMaterializer[
-            VecherinkaArtifact_553648528]](data`gensym11.materializer),
+            VecherinkaArtifact_553648557]](data`gensym11.materializer),
                                  data`gensym11.id, tool_context`gensym11))
-      let llm_spec_553648735 = LlmCallSpec[VecherinkaArtifact_553648528](
+      let llm_spec_553648764 = LlmCallSpec[VecherinkaArtifact_553648557](
           profile: cheap,
           prompt: "Write a welcome message into \'message\' field.",
-          materialized_input: model_materialized_input_553648694,
-          runtime_dir: model_context_553648689.runtime_dir,
-          working_dir: model_working_dir_553648692, tools: model_tools_553648730,
-          output_kind: 0, materialize: model_materializer_553648728)
-      submit_llm(model_context_553648689, model_request_id_553648690, llm_spec_553648735)
+          prompt_templates: manual_agent_prompts,
+          materialized_input: model_materialized_input_553648723,
+          runtime_dir: model_context_553648718.runtime_dir,
+          working_dir: model_working_dir_553648721, tools: model_tools_553648759,
+          output_kind: 0, materialize: model_materializer_553648757)
+      submit_llm(model_context_553648718, model_request_id_553648719, llm_spec_553648764)
     except CatchableError as error`gensym14:
-      let event`gensym14 = RuntimeEvent[VecherinkaArtifact_553648528](
-          kind: rev_model_error, request_id: model_request_id_553648690,
+      let event`gensym14 = RuntimeEvent[VecherinkaArtifact_553648557](
+          kind: rev_model_error, request_id: model_request_id_553648719,
           error_message: error`gensym14.msg)
-      enqueue_runtime_event(model_context_553648689, event`gensym14)))]
-  let input_artifact_553648742 = VecherinkaArtifact_553648528(kind: vak_0,
-      value_0: input_553648738)
-  let work_plan_553648743 = execute_flows(data_553648741, input_artifact_553648742,
-      nil, transport_553648739, nil, logger_553648740)
-  if isNone(work_plan_553648743.output):
-    if isSome(work_plan_553648743.failure_message):
+      enqueue_runtime_event(model_context_553648718, event`gensym14)))]
+  let input_artifact_553648771 = VecherinkaArtifact_553648557(kind: vak_0,
+      value_0: input_553648767)
+  let work_plan_553648772 = execute_flows(data_553648770, input_artifact_553648771,
+      nil, transport_553648768, nil, logger_553648769)
+  if isNone(work_plan_553648772.output):
+    if isSome(work_plan_553648772.failure_message):
       raise
-        (ref ValueError)(msg: get(work_plan_553648743.failure_message),
+        (ref ValueError)(msg: get(work_plan_553648772.failure_message),
                          parent: nil)
     raise
       (ref ValueError)(msg: "vecherinka execution completed without output",
                        parent: nil)
   return block:
-    let artifact_553648744 = lookup_artifact(work_plan_553648743.context,
-        get(work_plan_553648743.output)).data
+    let artifact_553648773 = lookup_artifact(work_plan_553648772.context,
+        get(work_plan_553648772.output)).data
     const
-      loc`gensym236 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-        line: 1862, column: 6)
-      ploc`gensym236 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1862, 7)"
+      loc`gensym238 = (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
+        line: 1934, column: 6)
+      ploc`gensym238 = "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7)"
     bind instantiationInfo
     mixin failedAssertImpl
     {.line: (filename: "/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim",
-             line: 1862, column: 6).}:
-      if not (artifact_553648744.kind == vak_0):
-        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1862, 7) `artifact_553648744.kind == vak_0` ")
-    artifact_553648744.value_0
+             line: 1934, column: 6).}:
+      if not (artifact_553648773.kind == vak_0):
+        failedAssertImpl("/Users/alex/areas/productive/orchestration/src/vecherinka_comptime.nim(1934, 7) `artifact_553648773.kind == vak_0` ")
+    artifact_553648773.value_0
 
 test: calling generated solve
-log: {"schema":"vecherinka.log.v1","seq":1,"timestamp_ns":672497264288125,"run_id":"manual-test","component":"vecherinka","event":"run.start","fields":{"run_dir":"run-hkGCEyMo","runtime_dir":"orchestration","owns_runtime":true}}
-log: {"schema":"vecherinka.log.v1","seq":2,"timestamp_ns":672497265693416,"run_id":"manual-test","component":"vecherinka","event":"artifact.commit","fields":{"artifact_id":0,"artifact_dir":"orchestration"}}
-log: {"schema":"vecherinka.log.v1","seq":3,"timestamp_ns":672497265755208,"run_id":"manual-test","component":"vecherinka","event":"ready.enqueue","fields":{"ready_id":1,"flow_kind":"fk_model","input_artifact_id":0}}
-log: {"schema":"vecherinka.log.v1","seq":4,"timestamp_ns":672497265814958,"run_id":"manual-test","component":"vecherinka","event":"ready.consume","fields":{"ready_id":1}}
-log: {"schema":"vecherinka.log.v1","seq":5,"timestamp_ns":672497265868666,"run_id":"manual-test","component":"vecherinka","event":"invocation.start","fields":{"flow_kind":"fk_model","input_artifact_id":0}}
-log: {"schema":"vecherinka.log.v1","seq":6,"timestamp_ns":672497266006791,"run_id":"manual-test","component":"vecherinka","event":"artifact.reserve","fields":{"artifact_id":1,"artifact_dir":"artifact-1"}}
-log: {"schema":"vecherinka.log.v1","seq":7,"timestamp_ns":672497266038375,"run_id":"manual-test","component":"vecherinka","event":"model.submit","fields":{"request_id":"i:0","flow_kind":"fk_model","input_artifact_id":0,"output_artifact_id":1,"submitter":"custom","working_dir":"artifact-1"}}
-log: {"schema":"vecherinka.log.v1","seq":8,"timestamp_ns":672497266218500,"run_id":"manual-test","component":"codex","event":"agent.thread.submit","fields":{"model_request_id":"i:0","agent_id":"vecherinka-agent-i:0","request_id":"i:1"}}
-log: {"schema":"vecherinka.log.v1","seq":9,"timestamp_ns":672497663953291,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":232}}
-log: {"schema":"vecherinka.log.v1","seq":10,"timestamp_ns":672497664198416,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":217}}
-log: {"schema":"vecherinka.log.v1","seq":11,"timestamp_ns":672497680661458,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":205}}
-log: {"schema":"vecherinka.log.v1","seq":12,"timestamp_ns":672498014898208,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":208}}
-log: {"schema":"vecherinka.log.v1","seq":13,"timestamp_ns":672498017466083,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":208}}
-log: {"schema":"vecherinka.log.v1","seq":14,"timestamp_ns":672498067739333,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":203}}
-log: {"schema":"vecherinka.log.v1","seq":15,"timestamp_ns":672498067781166,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":203}}
-log: {"schema":"vecherinka.log.v1","seq":16,"timestamp_ns":672498108150083,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":191}}
-log: {"schema":"vecherinka.log.v1","seq":17,"timestamp_ns":672498109460875,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":196}}
-log: {"schema":"vecherinka.log.v1","seq":18,"timestamp_ns":672498123245208,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":191}}
-log: {"schema":"vecherinka.log.v1","seq":19,"timestamp_ns":672498123292833,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":196}}
-log: {"schema":"vecherinka.log.v1","seq":20,"timestamp_ns":672498130913333,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":191}}
-log: {"schema":"vecherinka.log.v1","seq":21,"timestamp_ns":672498130966083,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":196}}
-log: {"schema":"vecherinka.log.v1","seq":22,"timestamp_ns":672498139821833,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":191}}
-log: {"schema":"vecherinka.log.v1","seq":23,"timestamp_ns":672498139863875,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":196}}
-log: {"schema":"vecherinka.log.v1","seq":24,"timestamp_ns":672498146203583,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":191}}
-log: {"schema":"vecherinka.log.v1","seq":25,"timestamp_ns":672498146250666,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":196}}
-log: {"schema":"vecherinka.log.v1","seq":26,"timestamp_ns":672498152566500,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":191}}
-log: {"schema":"vecherinka.log.v1","seq":27,"timestamp_ns":672498152602291,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":196}}
-log: {"schema":"vecherinka.log.v1","seq":28,"timestamp_ns":672498157659291,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":191}}
-log: {"schema":"vecherinka.log.v1","seq":29,"timestamp_ns":672498157714291,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":196}}
-log: {"schema":"vecherinka.log.v1","seq":30,"timestamp_ns":672498204387333,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":1349}}
-log: {"schema":"vecherinka.log.v1","seq":31,"timestamp_ns":672498204640541,"run_id":"manual-test","component":"codex","event":"agent.turn.submit","fields":{"model_request_id":"i:0","agent_id":"vecherinka-agent-i:0","request_id":"i:2"}}
-log: {"schema":"vecherinka.log.v1","seq":32,"timestamp_ns":672498205945250,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":818}}
-log: {"schema":"vecherinka.log.v1","seq":33,"timestamp_ns":672498206227333,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":207}}
-log: {"schema":"vecherinka.log.v1","seq":34,"timestamp_ns":672498206316833,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":209}}
-log: {"schema":"vecherinka.log.v1","seq":35,"timestamp_ns":672498206430208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
-log: {"schema":"vecherinka.log.v1","seq":36,"timestamp_ns":672498206523875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":216}}
-log: {"schema":"vecherinka.log.v1","seq":37,"timestamp_ns":672498206600541,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":207}}
-log: {"schema":"vecherinka.log.v1","seq":38,"timestamp_ns":672498206676583,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
-log: {"schema":"vecherinka.log.v1","seq":39,"timestamp_ns":672498206750041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":209}}
-log: {"schema":"vecherinka.log.v1","seq":40,"timestamp_ns":672498206820916,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":216}}
-log: {"schema":"vecherinka.log.v1","seq":41,"timestamp_ns":672498206895500,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":217}}
-log: {"schema":"vecherinka.log.v1","seq":42,"timestamp_ns":672498208357125,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":208}}
-log: {"schema":"vecherinka.log.v1","seq":43,"timestamp_ns":672498208439333,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":210}}
-log: {"schema":"vecherinka.log.v1","seq":44,"timestamp_ns":672498208511625,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":207}}
-log: {"schema":"vecherinka.log.v1","seq":45,"timestamp_ns":672498209857583,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":196}}
-log: {"schema":"vecherinka.log.v1","seq":46,"timestamp_ns":672498218976958,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":645}}
-log: {"schema":"vecherinka.log.v1","seq":47,"timestamp_ns":672498248241000,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":167}}
-log: {"schema":"vecherinka.log.v1","seq":48,"timestamp_ns":672498248372291,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":297}}
-log: {"schema":"vecherinka.log.v1","seq":49,"timestamp_ns":672498290196333,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":208}}
-log: {"schema":"vecherinka.log.v1","seq":50,"timestamp_ns":672498291517083,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":208}}
-log: {"schema":"vecherinka.log.v1","seq":51,"timestamp_ns":672498349792708,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":203}}
-log: {"schema":"vecherinka.log.v1","seq":52,"timestamp_ns":672498349841583,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":203}}
-log: {"schema":"vecherinka.log.v1","seq":53,"timestamp_ns":672498358227166,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
-log: {"schema":"vecherinka.log.v1","seq":54,"timestamp_ns":672498358351041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":216}}
-log: {"schema":"vecherinka.log.v1","seq":55,"timestamp_ns":672498358426416,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":207}}
-log: {"schema":"vecherinka.log.v1","seq":56,"timestamp_ns":672498358500708,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":209}}
-log: {"schema":"vecherinka.log.v1","seq":57,"timestamp_ns":672498428062666,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":203}}
-log: {"schema":"vecherinka.log.v1","seq":58,"timestamp_ns":672498449934416,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
-log: {"schema":"vecherinka.log.v1","seq":59,"timestamp_ns":672498507043416,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
-log: {"schema":"vecherinka.log.v1","seq":60,"timestamp_ns":672498565145791,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":203}}
-log: {"schema":"vecherinka.log.v1","seq":61,"timestamp_ns":672498629624875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":213}}
-log: {"schema":"vecherinka.log.v1","seq":62,"timestamp_ns":672498707019208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":213}}
-log: {"schema":"vecherinka.log.v1","seq":63,"timestamp_ns":672498978749875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":204}}
-log: {"schema":"vecherinka.log.v1","seq":64,"timestamp_ns":672499036868333,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":204}}
-log: {"schema":"vecherinka.log.v1","seq":65,"timestamp_ns":672500122712041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":768}}
-log: {"schema":"vecherinka.log.v1","seq":66,"timestamp_ns":672500122851041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":772}}
-log: {"schema":"vecherinka.log.v1","seq":67,"timestamp_ns":672502811433291,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":663}}
-log: {"schema":"vecherinka.log.v1","seq":68,"timestamp_ns":672502811603750,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":726}}
-log: {"schema":"vecherinka.log.v1","seq":69,"timestamp_ns":672502816750291,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":501}}
-log: {"schema":"vecherinka.log.v1","seq":70,"timestamp_ns":672502816875625,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":456}}
-log: {"schema":"vecherinka.log.v1","seq":71,"timestamp_ns":672505277738083,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":619}}
-log: {"schema":"vecherinka.log.v1","seq":72,"timestamp_ns":672505277887208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":716}}
-log: {"schema":"vecherinka.log.v1","seq":73,"timestamp_ns":672505281781875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":510}}
-log: {"schema":"vecherinka.log.v1","seq":74,"timestamp_ns":672505281902833,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":456}}
-log: {"schema":"vecherinka.log.v1","seq":75,"timestamp_ns":672506756206708,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":338}}
-log: {"schema":"vecherinka.log.v1","seq":76,"timestamp_ns":672506756540833,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":251}}
-log: {"schema":"vecherinka.log.v1","seq":77,"timestamp_ns":672506757119750,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":254}}
-log: {"schema":"vecherinka.log.v1","seq":78,"timestamp_ns":672506759831125,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":257}}
-log: {"schema":"vecherinka.log.v1","seq":79,"timestamp_ns":672506781242791,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":253}}
-log: {"schema":"vecherinka.log.v1","seq":80,"timestamp_ns":672506796636791,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":256}}
-log: {"schema":"vecherinka.log.v1","seq":81,"timestamp_ns":672506817266875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":254}}
-log: {"schema":"vecherinka.log.v1","seq":82,"timestamp_ns":672506847451458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":252}}
-log: {"schema":"vecherinka.log.v1","seq":83,"timestamp_ns":672506848170250,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":257}}
-log: {"schema":"vecherinka.log.v1","seq":84,"timestamp_ns":672506860913458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":251}}
-log: {"schema":"vecherinka.log.v1","seq":85,"timestamp_ns":672506881463708,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":256}}
-log: {"schema":"vecherinka.log.v1","seq":86,"timestamp_ns":672506897315041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":258}}
-log: {"schema":"vecherinka.log.v1","seq":87,"timestamp_ns":672506917178000,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":253}}
-log: {"schema":"vecherinka.log.v1","seq":88,"timestamp_ns":672506976830833,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":255}}
-log: {"schema":"vecherinka.log.v1","seq":89,"timestamp_ns":672506977097375,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":253}}
-log: {"schema":"vecherinka.log.v1","seq":90,"timestamp_ns":672506977173041,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":261}}
-log: {"schema":"vecherinka.log.v1","seq":91,"timestamp_ns":672506991014208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":256}}
-log: {"schema":"vecherinka.log.v1","seq":92,"timestamp_ns":672507010825916,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":257}}
-log: {"schema":"vecherinka.log.v1","seq":93,"timestamp_ns":672507033494625,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":253}}
-log: {"schema":"vecherinka.log.v1","seq":94,"timestamp_ns":672507050592958,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":254}}
-log: {"schema":"vecherinka.log.v1","seq":95,"timestamp_ns":672507078373416,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":258}}
-log: {"schema":"vecherinka.log.v1","seq":96,"timestamp_ns":672507092703458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":260}}
-log: {"schema":"vecherinka.log.v1","seq":97,"timestamp_ns":672507108404458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":251}}
-log: {"schema":"vecherinka.log.v1","seq":98,"timestamp_ns":672507177199166,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":452}}
-log: {"schema":"vecherinka.log.v1","seq":99,"timestamp_ns":672507184782250,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":510}}
-log: {"schema":"vecherinka.log.v1","seq":100,"timestamp_ns":672507184925916,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":456}}
-log: {"schema":"vecherinka.log.v1","seq":101,"timestamp_ns":672507198938250,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":148}}
-log: {"schema":"vecherinka.log.v1","seq":102,"timestamp_ns":672507199064666,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":552}}
-log: {"schema":"vecherinka.log.v1","seq":103,"timestamp_ns":672507199189333,"run_id":"manual-test","component":"vecherinka","event":"model.fail","fields":{"request_id":"i:0","error":"agent turn completed without finish_work"}}
-log: {"schema":"vecherinka.log.v1","seq":104,"timestamp_ns":672507199215958,"run_id":"manual-test","component":"vecherinka","event":"run.fail","fields":{"failed":true,"finished":true}}
+log: {"schema":"vecherinka.log.v1","seq":1,"timestamp_ns":678405512170541,"run_id":"manual-test","component":"vecherinka","event":"run.start","fields":{"run_dir":"run-8nYPmRKS","runtime_dir":"orchestration","owns_runtime":true}}
+log: {"schema":"vecherinka.log.v1","seq":2,"timestamp_ns":678405513745541,"run_id":"manual-test","component":"vecherinka","event":"artifact.commit","fields":{"artifact_id":0,"artifact_dir":"orchestration"}}
+log: {"schema":"vecherinka.log.v1","seq":3,"timestamp_ns":678405513793458,"run_id":"manual-test","component":"vecherinka","event":"ready.enqueue","fields":{"ready_id":1,"flow_kind":"fk_model","input_artifact_id":0}}
+log: {"schema":"vecherinka.log.v1","seq":4,"timestamp_ns":678405513849791,"run_id":"manual-test","component":"vecherinka","event":"ready.consume","fields":{"ready_id":1}}
+log: {"schema":"vecherinka.log.v1","seq":5,"timestamp_ns":678405513906541,"run_id":"manual-test","component":"vecherinka","event":"invocation.start","fields":{"flow_kind":"fk_model","input_artifact_id":0}}
+log: {"schema":"vecherinka.log.v1","seq":6,"timestamp_ns":678405514041750,"run_id":"manual-test","component":"vecherinka","event":"artifact.reserve","fields":{"artifact_id":1,"artifact_dir":"artifact-1"}}
+log: {"schema":"vecherinka.log.v1","seq":7,"timestamp_ns":678405514071416,"run_id":"manual-test","component":"vecherinka","event":"model.submit","fields":{"request_id":"i:0","flow_kind":"fk_model","input_artifact_id":0,"output_artifact_id":1,"submitter":"custom","working_dir":"artifact-1"}}
+log: {"schema":"vecherinka.log.v1","seq":8,"timestamp_ns":678405514286791,"run_id":"manual-test","component":"codex","event":"agent.thread.submit","fields":{"model_request_id":"i:0","agent_id":"vecherinka-agent-i:0","request_id":"i:1"}}
+log: {"schema":"vecherinka.log.v1","seq":9,"timestamp_ns":678409056957166,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":205}}
+log: {"schema":"vecherinka.log.v1","seq":10,"timestamp_ns":678409057209208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":217}}
+log: {"schema":"vecherinka.log.v1","seq":11,"timestamp_ns":678409234601625,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":139}}
+log: {"schema":"vecherinka.log.v1","seq":12,"timestamp_ns":678409234674833,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":12}}
+log: {"schema":"vecherinka.log.v1","seq":13,"timestamp_ns":678409234709416,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":119}}
+log: {"schema":"vecherinka.log.v1","seq":14,"timestamp_ns":678409234738625,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":36}}
+log: {"schema":"vecherinka.log.v1","seq":15,"timestamp_ns":678409234766833,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":18}}
+log: {"schema":"vecherinka.log.v1","seq":16,"timestamp_ns":678409234793875,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":34}}
+log: {"schema":"vecherinka.log.v1","seq":17,"timestamp_ns":678409234823708,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":3}}
+log: {"schema":"vecherinka.log.v1","seq":18,"timestamp_ns":678409234859166,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":1}}
+log: {"schema":"vecherinka.log.v1","seq":19,"timestamp_ns":678409234888041,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":20,"timestamp_ns":678409236189000,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":21,"timestamp_ns":678409237490666,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":22,"timestamp_ns":678409238788791,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":23,"timestamp_ns":678409241372791,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":24,"timestamp_ns":678409244005916,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":178}}
+log: {"schema":"vecherinka.log.v1","seq":25,"timestamp_ns":678409245334708,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":26,"timestamp_ns":678409245415833,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":27,"timestamp_ns":678409483340833,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":443}}
+log: {"schema":"vecherinka.log.v1","seq":28,"timestamp_ns":678409487088166,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":29,"timestamp_ns":678409503521458,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":443}}
+log: {"schema":"vecherinka.log.v1","seq":30,"timestamp_ns":678409655071708,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":31,"timestamp_ns":678409681341250,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":1266}}
+log: {"schema":"vecherinka.log.v1","seq":32,"timestamp_ns":678409681619666,"run_id":"manual-test","component":"codex","event":"agent.goal.submit","fields":{"model_request_id":"i:0","agent_id":"vecherinka-agent-i:0","request_id":"i:2"}}
+log: {"schema":"vecherinka.log.v1","seq":33,"timestamp_ns":678409681668208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":776}}
+log: {"schema":"vecherinka.log.v1","seq":34,"timestamp_ns":678409683081375,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":206}}
+log: {"schema":"vecherinka.log.v1","seq":35,"timestamp_ns":678409683164500,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":205}}
+log: {"schema":"vecherinka.log.v1","seq":36,"timestamp_ns":678409683238541,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":207}}
+log: {"schema":"vecherinka.log.v1","seq":37,"timestamp_ns":678409683311625,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":216}}
+log: {"schema":"vecherinka.log.v1","seq":38,"timestamp_ns":678409683382458,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":39,"timestamp_ns":678409819183166,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":550}}
+log: {"schema":"vecherinka.log.v1","seq":40,"timestamp_ns":678409820591250,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":954}}
+log: {"schema":"vecherinka.log.v1","seq":41,"timestamp_ns":678409870068333,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":287}}
+log: {"schema":"vecherinka.log.v1","seq":42,"timestamp_ns":678409870225375,"run_id":"manual-test","component":"codex","event":"agent.turn.submit","fields":{"model_request_id":"i:0","agent_id":"vecherinka-agent-i:0","request_id":"i:3"}}
+log: {"schema":"vecherinka.log.v1","seq":43,"timestamp_ns":678409870260875,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":403}}
+log: {"schema":"vecherinka.log.v1","seq":44,"timestamp_ns":678409871625083,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":45,"timestamp_ns":678409878054125,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":196}}
+log: {"schema":"vecherinka.log.v1","seq":46,"timestamp_ns":678409882284458,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":167}}
+log: {"schema":"vecherinka.log.v1","seq":47,"timestamp_ns":678409882409000,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":297}}
+log: {"schema":"vecherinka.log.v1","seq":48,"timestamp_ns":678409886502250,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":649}}
+log: {"schema":"vecherinka.log.v1","seq":49,"timestamp_ns":678409892069375,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":550}}
+log: {"schema":"vecherinka.log.v1","seq":50,"timestamp_ns":678409894667000,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":203}}
+log: {"schema":"vecherinka.log.v1","seq":51,"timestamp_ns":678409939652125,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":202}}
+log: {"schema":"vecherinka.log.v1","seq":52,"timestamp_ns":678410094964125,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":213}}
+log: {"schema":"vecherinka.log.v1","seq":53,"timestamp_ns":678410095097208,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":54,"timestamp_ns":678410297820416,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":55,"timestamp_ns":678410297870000,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":56,"timestamp_ns":678410299150458,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":57,"timestamp_ns":678410690961750,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":221}}
+log: {"schema":"vecherinka.log.v1","seq":58,"timestamp_ns":678410693574375,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":59,"timestamp_ns":678410693615375,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":60,"timestamp_ns":678410694925208,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":61,"timestamp_ns":678411096134875,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":221}}
+log: {"schema":"vecherinka.log.v1","seq":62,"timestamp_ns":678411102639958,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":63,"timestamp_ns":678411182120666,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":550}}
+log: {"schema":"vecherinka.log.v1","seq":64,"timestamp_ns":678411281290875,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":65,"timestamp_ns":678411429108041,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":66,"timestamp_ns":678411595157791,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":67,"timestamp_ns":678411766627500,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":639}}
+log: {"schema":"vecherinka.log.v1","seq":68,"timestamp_ns":678411766853833,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":643}}
+log: {"schema":"vecherinka.log.v1","seq":69,"timestamp_ns":678411774626416,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":70,"timestamp_ns":678411774685166,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":71,"timestamp_ns":678411774721916,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":72,"timestamp_ns":678412095561000,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":221}}
+log: {"schema":"vecherinka.log.v1","seq":73,"timestamp_ns":678412096929083,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":74,"timestamp_ns":678412096967916,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":75,"timestamp_ns":678412098255041,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":76,"timestamp_ns":678412421265458,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":221}}
+log: {"schema":"vecherinka.log.v1","seq":77,"timestamp_ns":678412422635958,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":437}}
+log: {"schema":"vecherinka.log.v1","seq":78,"timestamp_ns":678412422808500,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":79,"timestamp_ns":678412424136791,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":438}}
+log: {"schema":"vecherinka.log.v1","seq":80,"timestamp_ns":678412424290208,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":155}}
+log: {"schema":"vecherinka.log.v1","seq":81,"timestamp_ns":678412424395833,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":372}}
+log: {"schema":"vecherinka.log.v1","seq":82,"timestamp_ns":678412424509375,"run_id":"manual-test","component":"codex","event":"protocol.stdout","fields":{"bytes":487}}
+log: {"schema":"vecherinka.log.v1","seq":83,"timestamp_ns":678412570248166,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}
+log: {"schema":"vecherinka.log.v1","seq":84,"timestamp_ns":678412718678250,"run_id":"manual-test","component":"codex","event":"protocol.stderr","fields":{"bytes":239}}

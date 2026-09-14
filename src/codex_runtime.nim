@@ -23,6 +23,8 @@ type
     id*: AgentId
     thread_id*: Nullable[string]
     turn_id*: Option[string]
+    ## JSON-RPC request key owning the agent's active turn, if any.
+    active_turn_request*: Option[string]
     default_effort*: ReasoningEffort
     state*: AgentState
     last_error*: NullableOption[string]
@@ -40,6 +42,9 @@ type
   RuntimeState* = object
     agents*: Table[AgentId, Agent]
     requests*: Table[string, OutgoingRequest]
+    ## Event turn IDs are not guaranteed to equal the ID in turn/start's
+    ## response. Keep explicit aliases to the owning request.
+    turn_request_keys*: Table[string, string]
     server_requests*: Table[string, ServerRequest]
 
   CodexRuntime* {.requiresInit.} = object
@@ -59,6 +64,7 @@ template server_requests*(runtime: ptr CodexRuntime): untyped = runtime.state.se
 proc new_runtime_state*(): RuntimeState =
   result.agents = initTable[AgentId, Agent]()
   result.requests = initTable[string, OutgoingRequest]()
+  result.turn_request_keys = initTable[string, string]()
   result.server_requests = initTable[string, ServerRequest]()
 
 proc find_agent_for_thread(state: var RuntimeState; thread_id: string): Option[AgentId] =
@@ -82,6 +88,51 @@ proc set_agent_error(agent: var Agent; message: string) =
 
 proc clear_agent_error(agent: var Agent) =
   agent.last_error = NullableOption[string](state: nos_null)
+
+proc bind_turn_request(
+    state: var RuntimeState;
+    request_key, turn_id: string
+) =
+  ## Every observed turn ID becomes an alias for one accepted request. This
+  ## preserves correlation when turn/start and turn/started expose different
+  ## identifiers while rejecting cross-request collisions.
+  if turn_id.len == 0:
+    raise newException(ValueError, "turn event has empty turn ID")
+  if state.turn_request_keys.hasKey(turn_id) and
+      state.turn_request_keys[turn_id] != request_key:
+    raise newException(ValueError, "turn ID already belongs to another request: " & turn_id)
+  state.turn_request_keys[turn_id] = request_key
+  if state.requests.hasKey(request_key):
+    var outgoing = state.requests[request_key]
+    outgoing.turn_id = some(turn_id)
+    state.requests[request_key] = outgoing
+
+proc unbind_turn_request(state: var RuntimeState; request_key: string) =
+  var removed: seq[string] = @[]
+  for turn_id, owner in state.turn_request_keys.pairs:
+    if owner == request_key:
+      removed.add(turn_id)
+  for turn_id in removed:
+    state.turn_request_keys.del(turn_id)
+
+proc request_for_turn(state: var RuntimeState; turn_id: string): Option[string] =
+  if not state.turn_request_keys.hasKey(turn_id):
+    return none(string)
+  let request_key = state.turn_request_keys[turn_id]
+  if not state.requests.hasKey(request_key):
+    return none(string)
+  some(request_key)
+
+proc active_turn_request_for_agent(
+    state: var RuntimeState;
+    agent_id: AgentId
+): Option[string] =
+  if not state.agents.hasKey(agent_id):
+    return none(string)
+  let request_key = state.agents[agent_id].active_turn_request
+  if request_key.isSome and state.requests.hasKey(request_key.get):
+    return request_key
+  none(string)
 
 proc apply_success*(state: var RuntimeState; success: Success) =
   let key = request_id_key(success.id)
@@ -112,6 +163,7 @@ proc apply_success*(state: var RuntimeState; success: Success) =
       if state.agents.hasKey(agent_id):
         var agent = state.agents[agent_id]
         agent.turn_id = some(success.result.turn_id)
+        agent.active_turn_request = some(key)
         agent.state = as_working
         clear_agent_error(agent)
         state.agents[agent_id] = agent
@@ -121,6 +173,8 @@ proc apply_success*(state: var RuntimeState; success: Success) =
     discard
 
   state.requests[key] = outgoing
+  if outgoing.request.kind == mk_turn_start and outgoing.turn_id.isSome:
+    bind_turn_request(state, key, outgoing.turn_id.get)
 
 proc apply_error*(state: var RuntimeState; error: Error) =
   let key = request_id_key(error.id)
@@ -137,12 +191,15 @@ proc apply_error*(state: var RuntimeState; error: Error) =
       set_agent_error(agent, error.message)
       state.agents[agent_id] = agent
   state.requests[key] = outgoing
-
-proc request_for_turn(state: var RuntimeState; turn_id: string): Option[string] =
-  for request_key, outgoing in state.requests.pairs:
-    if outgoing.turn_id.isSome and outgoing.turn_id.get == turn_id:
-      return some(request_key)
-  none(string)
+  if outgoing.request.kind == mk_turn_start:
+    unbind_turn_request(state, key)
+    if outgoing.agent_id.isSome and state.agents.hasKey(outgoing.agent_id.get):
+      var agent = state.agents[outgoing.agent_id.get]
+      if agent.active_turn_request.isSome and
+          agent.active_turn_request.get == key:
+        agent.active_turn_request = none(string)
+        agent.turn_id = none(string)
+      state.agents[outgoing.agent_id.get] = agent
 
 proc server_request_thread_id(request: ServerRequest): Option[string] =
   case request.params.kind:
@@ -235,23 +292,37 @@ proc apply_notification*(state: var RuntimeState; notification: Notification) =
       agent.state = as_idle
   of nk_turn_started:
     if params.turn_id.isSome:
+      let request_key = active_turn_request_for_agent(state, id)
+      if request_key.isSome:
+        bind_turn_request(state, request_key.get, params.turn_id.get)
       agent.turn_id = params.turn_id
     agent.state = as_working
   of nk_turn_completed:
     if params.turn_id.isSome:
-      agent.turn_id = none(string)
       let request_key = request_for_turn(state, params.turn_id.get)
-      if request_key.isSome:
-        var outgoing = state.requests[request_key.get]
-        if params.turn_status.isSome and params.turn_status.get == ts_failed:
-          outgoing.state = rs_failed
-          if params.error_message.isSome:
-            outgoing.error = params.error_message
-        elif params.turn_status.isSome and params.turn_status.get == ts_interrupted:
-          outgoing.state = rs_interrupted
+      if request_key.isNone:
+        raise newException(ValueError,
+          "completed turn has no owning request: " & params.turn_id.get)
+      var outgoing = state.requests[request_key.get]
+      if outgoing.agent_id.isNone or outgoing.agent_id.get != id:
+        raise newException(ValueError,
+          "completed turn belongs to another agent: " & params.turn_id.get)
+      if params.turn_status.isSome and params.turn_status.get == ts_failed:
+        outgoing.state = rs_failed
+        if params.error_message.isSome:
+          outgoing.error = params.error_message
         else:
-          outgoing.state = rs_completed
-        state.requests[request_key.get] = outgoing
+          outgoing.error = some("turn failed")
+      elif params.turn_status.isSome and params.turn_status.get == ts_interrupted:
+        outgoing.state = rs_interrupted
+      else:
+        outgoing.state = rs_completed
+      state.requests[request_key.get] = outgoing
+      unbind_turn_request(state, request_key.get)
+      if agent.active_turn_request.isSome and
+          agent.active_turn_request.get == request_key.get:
+        agent.active_turn_request = none(string)
+        agent.turn_id = none(string)
     if params.turn_status.isSome and params.turn_status.get == ts_failed:
       if params.error_message.isSome:
         set_agent_error(agent, params.error_message.get)
@@ -281,6 +352,9 @@ proc apply_notification*(state: var RuntimeState; notification: Notification) =
   of nk_thread_closed:
     agent.state = as_closed
     agent.turn_id = none(string)
+    if agent.active_turn_request.isSome:
+      unbind_turn_request(state, agent.active_turn_request.get)
+      agent.active_turn_request = none(string)
   of nk_error:
     if params.error_message.isSome:
       set_agent_error(agent, params.error_message.get)
@@ -411,7 +485,18 @@ proc handle_message*(runtime: ptr CodexRuntime; message: Message) =
       ))
       discard remove_server_request(runtime.state, message.server_request.id)
     else:
-      discard
+      if not runtime.process.isNil:
+        send_server_response(runtime, ServerResponse(
+          id: message.server_request.id,
+          result: none(JsonNode),
+          error: some(Error(
+            id: message.server_request.id,
+            code: -32601,
+            message: "unsupported server request: " &
+              message.server_request.method_name
+          ))
+        ))
+      discard remove_server_request(runtime.state, message.server_request.id)
   of mk_server_response:
     let key = request_id_key(message.server_response.id)
     if not runtime.state.server_requests.hasKey(key):
@@ -515,6 +600,7 @@ proc deinit_codex_runtime*(codex: ptr CodexRuntime) =
   codex.pending.setLen(0)
   codex.state.agents.clear()
   codex.state.requests.clear()
+  codex.state.turn_request_keys.clear()
   codex.state.server_requests.clear()
   reset(codex.process)
   reset(codex.pending)
@@ -522,6 +608,7 @@ proc deinit_codex_runtime*(codex: ptr CodexRuntime) =
   reset(codex.initialization_error)
   reset(codex.state.agents)
   reset(codex.state.requests)
+  reset(codex.state.turn_request_keys)
   reset(codex.state.server_requests)
   deallocShared(codex)
 
@@ -594,6 +681,7 @@ proc create_agent*(runtime: ptr CodexRuntime; agent_id: AgentId;
     id: agent_id,
     thread_id: Nullable[string](has_value: false),
     turn_id: none(string),
+    active_turn_request: none(string),
     default_effort: default_effort,
     state: as_starting,
     last_error: NullableOption[string](state: nos_none),
@@ -655,6 +743,8 @@ proc send_agent_message*(runtime: ptr CodexRuntime; agent_id: AgentId;
     raise newException(ValueError, "agent has not started: " & agent_id)
   if agent.state == as_closed:
     raise newException(ValueError, "agent is closed: " & agent_id)
+  if agent.active_turn_request.isSome:
+    raise newException(ValueError, "agent already has an active turn: " & agent_id)
 
   var current = agent
   current.state = as_working
@@ -665,12 +755,15 @@ proc send_agent_message*(runtime: ptr CodexRuntime; agent_id: AgentId;
     text: text,
     effort: NullableOption[ReasoningEffort](state: nos_value, value: effort)
   )
-  queue_request(
+  let request_id = queue_request(
     runtime,
     mk_turn_start,
     Params(kind: mk_turn_start, turn_start: params),
     some(agent_id)
   )
+  current.active_turn_request = some(request_id_key(request_id))
+  runtime.state.agents[agent_id] = current
+  request_id
 
 proc send_agent_message*(runtime: ptr CodexRuntime; agent_id: AgentId;
     text: string): RequestId =

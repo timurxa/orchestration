@@ -884,6 +884,68 @@ suite "artifact_tree generated output verifier":
     check variant.value.text == "v"
 
 suite "runtime failure containment":
+  test "turn events correlate when server IDs differ from turn start response":
+    var state = new_runtime_state()
+    state.agents["agent"] = Agent(
+      id: "agent",
+      thread_id: Nullable[string](has_value: true, value: "thread"),
+      turn_id: none(string),
+      active_turn_request: some("i:7"),
+      default_effort: re_low,
+      state: as_working,
+      last_error: NullableOption[string](state: nos_none),
+      tools: @[])
+    let request = Request(
+      kind: mk_turn_start,
+      id: RequestId(kind: rid_integer, integer_value: 7),
+      params: Params(
+        kind: mk_turn_start,
+        turn_start: TurnStartParams(
+          thread_id: "thread",
+          text: "hello",
+          effort: NullableOption[ReasoningEffort](
+            state: nos_value,
+            value: re_low))))
+    state.requests["i:7"] = OutgoingRequest(
+      id: request.id,
+      agent_id: some("agent"),
+      request: request,
+      state: rs_pending,
+      turn_id: none(string),
+      result: none(JsonNode),
+      error: none(string))
+
+    state.apply_success(Success(
+      id: request.id,
+      result: ResponseResult(
+        kind: mk_turn_start,
+        turn_id: "response-turn",
+        turn_status: ts_in_progress),
+      raw_result: parseJson("{\"turn\":\"response-turn\"}")))
+    check state.requests["i:7"].state == rs_accepted
+    check state.requests["i:7"].turn_id.get == "response-turn"
+
+    state.apply_notification(Notification(
+      kind: nk_turn_started,
+      method_name: "turn/started",
+      params: NotificationParams(
+        thread_id: Nullable[string](has_value: true, value: "thread"),
+        turn_id: some("event-turn"))))
+    check state.requests["i:7"].turn_id.get == "event-turn"
+
+    state.apply_notification(Notification(
+      kind: nk_turn_completed,
+      method_name: "turn/completed",
+      params: NotificationParams(
+        thread_id: Nullable[string](has_value: true, value: "thread"),
+        turn_id: some("event-turn"),
+        turn_status: some(ts_failed),
+        error_message: some("network down"))))
+    check state.requests["i:7"].state == rs_failed
+    check state.requests["i:7"].error.get == "network down"
+    check state.agents["agent"].active_turn_request.isNone
+    check state.turn_request_keys.len == 0
+
   test "unknown dynamic tool fails plan without escaping coordinator":
     var runtime = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))
     runtime.state = new_runtime_state()
