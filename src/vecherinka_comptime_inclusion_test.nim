@@ -712,6 +712,44 @@ suite "artifact_tree generated output verifier":
       "$task|$input|$working_dir|$runtime_dir|$model|$effort", spec) ==
       "do task|\n\ninput:\ninput.text: string = value\n|/work|/runtime|test-model|re_low"
 
+  test "goal and finish_work text come from prompt templates":
+    let templates = AgentPromptTemplates(
+      developer_instructions: "developer text",
+      goal: "goal text for $task",
+      turn_prompt: "turn text for $task",
+      finish_work_description: "tool text")
+    let spec = LlmCallSpec[TestOutput](
+      profile: ProfileSpec(model: "test-model", effort: re_low),
+      prompt: "do task",
+      prompt_templates: templates,
+      materialized_input: "",
+      runtime_dir: Path("/runtime"),
+      working_dir: Path("/work"),
+      tools: @[],
+      output_kind: 0,
+      materialize: nil)
+    check llm_goal_prompt(spec) ==
+      "goal text for do task"
+    check spec.prompt_templates.developer_instructions == "developer text"
+    check spec.prompt_templates.turn_prompt == "turn text for $task"
+    check spec.prompt_templates.finish_work_description == "tool text"
+
+  test "thread goal request uses Codex goal protocol":
+    let message = Message(
+      kind: mk_request,
+      request: Request(
+        kind: mk_thread_goal_set,
+        id: RequestId(kind: rid_integer, integer_value: 7),
+        params: Params(
+          kind: mk_thread_goal_set,
+          thread_goal_set: ThreadGoalSetParams(
+            thread_id: "thread-1",
+            objective: "goal text"))))
+    let encoded = serialize_message(message)
+    check encoded["method"].getStr == "thread/goal/set"
+    check encoded["params"]["threadId"].getStr == "thread-1"
+    check encoded["params"]["objective"].getStr == "goal text"
+
   test "generated contracts emit schemas for verifier and transport":
     let object_schema = toJsonSchema(output_contract(TestOutput))
     check object_schema["type"].getStr == "object"

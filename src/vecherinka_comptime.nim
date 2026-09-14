@@ -1460,6 +1460,8 @@ proc emit_model_submitter(
   let profile_expr = copyNimTree(profile)
   let prompt_expr = copyNimTree(prompt)
   let prompt_templates_expr = copyNimTree(prompt_templates)
+  let finish_work_description_expr = newDotExpr(
+    copyNimTree(prompt_templates), ident("finish_work_description"))
   let submit_context = genSym(nskParam, "model_context")
   let submit_request_id = genSym(nskParam, "model_request_id")
   let submit_input = genSym(nskParam, "model_input")
@@ -1518,7 +1520,7 @@ proc emit_model_submitter(
     var `tools_name`: DynamicToolRegistry = @[]
     `tools_name`.register_dynamic_tool(
       "finish_work",
-      "Submit final structured result. Call exactly once when task is complete.",
+      `finish_work_description_expr`,
       `output_schema_name`,
       `tool_data_name`,
       `callback`)

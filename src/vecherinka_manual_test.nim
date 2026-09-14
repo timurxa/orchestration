@@ -16,19 +16,23 @@ proc `$`(value: Location): string {.borrow.}
 proc `$`(value: Codebase): string {.borrow.}
 proc `$`(value: Issues): string {.borrow.}
 
-const cheap = "gpt-5.6-luna".minimal
+const cheap = "gpt-5.6-luna".medium
 
 const manual_agent_prompts = AgentPromptTemplates(
   developer_instructions: checked_prompt(
-    "Complete task. Call finish_work exactly once when done."),
+    "Manual developer instructions. Finish task through finish_work."),
+  goal: checked_prompt(
+    "Manual goal: complete task; call finish_work exactly once with final result."),
   turn_prompt: checked_prompt(
     """$task
 
-Complete task. Call finish_work exactly once when done.
-You may modify only: $working_dir
-Location values are paths relative to: $runtime_dir
-Every Location must name an existing file or directory inside the working directory.$input""",
-    "task", "input", "working_dir", "runtime_dir"))
+Manual turn instructions.
+Working directory: $working_dir
+Runtime directory: $runtime_dir
+Input: $input""",
+    "task", "input", "working_dir", "runtime_dir"),
+  finish_work_description: checked_prompt(
+    "Manual finish_work description: submit final structured result once."))
 
 type
   Simple = object

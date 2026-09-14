@@ -25,11 +25,13 @@ type
     effort*: ReasoningEffort
 
   AgentPromptTemplates* = object
-    ## Prompt text supplied by the application for thread creation and turns.
+    ## All authored text exposed to the model is supplied by the application.
     ## Named substitutions are checked by `checked_prompt` when used from the
     ## comptime façade.
     developer_instructions*: string
+    goal*: string
     turn_prompt*: string
+    finish_work_description*: string
 
   FlowKind* = enum
     fk_top,
@@ -155,6 +157,7 @@ type
     model_request_id*: RequestId
     agent_id*: AgentId
     start_request_id*: Option[RequestId]
+    goal_request_id*: Option[RequestId]
     turn_request_id*: Option[RequestId]
     spec*: LlmCallSpec[A]
 
@@ -297,11 +300,14 @@ type
 
 const default_agent_prompt_templates* = AgentPromptTemplates(
   developer_instructions: "Complete task. Call finish_work exactly once when done.",
+  goal: "Complete task. Call `finish_work` exactly once after completion." &
+    " Put final result in finish_work arguments.",
   turn_prompt: "$task\n\nComplete task. Call finish_work exactly once when done." &
     "\nYou may modify only: $working_dir" &
     "\nLocation values are paths relative to: $runtime_dir" &
     "\nEvery Location must name an existing file or directory inside the working directory." &
-    "$input")
+    "$input",
+  finish_work_description: "Submit final structured result. Call exactly once when task is complete.")
 
 proc runtime_log*[A](context: RuntimeContext[A]; event, component: string;
     fields: JsonNode = nil) =
@@ -1142,6 +1148,7 @@ proc default_llm_transport[A](
     model_request_id: request_id,
     agent_id: agent_id,
     start_request_id: none(RequestId),
+    goal_request_id: none(RequestId),
     turn_request_id: none(RequestId),
     spec: spec)
   send_global_event(context, GlobalEvent(
@@ -1169,6 +1176,9 @@ proc format_agent_prompt[A](template_text: string; spec: LlmCallSpec[A]): string
 
 proc llm_turn_prompt[A](spec: LlmCallSpec[A]): string =
   format_agent_prompt(spec.prompt_templates.turn_prompt, spec)
+
+proc llm_goal_prompt[A](spec: LlmCallSpec[A]): string =
+  format_agent_prompt(spec.prompt_templates.goal, spec)
 
 proc enqueue_agent_error[A](context: RuntimeContext[A]; request_id: RequestId;
     message: string) =
@@ -1225,6 +1235,37 @@ proc begin_agent_creation[A](
         ("error", %error.msg)))
     enqueue_agent_error(plan.context, event.model_request_id, error.msg)
 
+proc submit_agent_turn[A](
+    plan: var WorkPlan[A];
+    runtime: ptr CodexRuntime;
+    pending: var PendingAgentStart[A]
+): bool =
+  try:
+    let turn_request_id = runtime.send_agent_message(
+      pending.agent_id,
+      llm_turn_prompt(pending.spec),
+      pending.spec.profile.effort)
+    pending.turn_request_id = some(turn_request_id)
+    plan.context.pending_agent_starts[request_id_key(pending.model_request_id)] = pending
+    plan.context.runtime_log(
+      "agent.turn.submit",
+      "codex",
+      log_fields(
+        ("model_request_id", %(request_id_key(pending.model_request_id))),
+        ("agent_id", %pending.agent_id),
+        ("request_id", %(request_id_key(turn_request_id)))))
+    true
+  except CatchableError as error:
+    plan.context.runtime_log(
+      "agent.turn.fail",
+      "codex",
+      log_fields(
+        ("model_request_id", %(request_id_key(pending.model_request_id))),
+        ("agent_id", %pending.agent_id),
+        ("error", %error.msg)))
+    enqueue_agent_error(plan.context, pending.model_request_id, error.msg)
+    false
+
 proc advance_agent_starts[A](
     plan: var WorkPlan[A];
     runtime: ptr CodexRuntime
@@ -1255,6 +1296,26 @@ proc advance_agent_starts[A](
           "agent turn completed without finish_work")
         completed.add(key)
       continue
+    if pending.goal_request_id.isSome:
+      # A turn starts only after Codex acknowledges the goal. The stored
+      # request ID makes this phase idempotent across reader events.
+      let goal_key = request_id_key(pending.goal_request_id.get)
+      if not runtime.requests.hasKey(goal_key):
+        continue
+      let goal_request = runtime.requests[goal_key]
+      if goal_request.state == rs_failed:
+        enqueue_agent_error(
+          plan.context,
+          pending.model_request_id,
+          if goal_request.error.isSome:
+            goal_request.error.get
+          else:
+            "agent goal failed")
+        completed.add(key)
+      elif goal_request.state == rs_completed:
+        if not submit_agent_turn(plan, runtime, pending):
+          completed.add(key)
+      continue
     if pending.start_request_id.isNone:
       continue
     let start_request_id = pending.start_request_id.get
@@ -1276,22 +1337,21 @@ proc advance_agent_starts[A](
         not runtime.agents[pending.agent_id].thread_id.has_value:
       continue
     try:
-      let turn_request_id = runtime.send_agent_message(
+      let goal_request_id = runtime.set_agent_goal(
         pending.agent_id,
-        llm_turn_prompt(pending.spec),
-        pending.spec.profile.effort)
-      pending.turn_request_id = some(turn_request_id)
+        llm_goal_prompt(pending.spec))
+      pending.goal_request_id = some(goal_request_id)
       plan.context.pending_agent_starts[key] = pending
       plan.context.runtime_log(
-        "agent.turn.submit",
+        "agent.goal.submit",
         "codex",
         log_fields(
           ("model_request_id", %(request_id_key(pending.model_request_id))),
           ("agent_id", %pending.agent_id),
-          ("request_id", %(request_id_key(turn_request_id)))))
+          ("request_id", %(request_id_key(goal_request_id)))))
     except CatchableError as error:
       plan.context.runtime_log(
-        "agent.turn.fail",
+        "agent.goal.fail",
         "codex",
         log_fields(
           ("model_request_id", %(request_id_key(pending.model_request_id))),
