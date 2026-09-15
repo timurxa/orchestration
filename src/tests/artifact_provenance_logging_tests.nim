@@ -1,5 +1,5 @@
 import std/[json, paths, tables, tempfiles, unittest]
-import vecherinka
+import ../api/vecherinka
 
 proc committed_lineage(lines: seq[string]): Table[ArtifactID, seq[ArtifactID]] =
   result = initTable[ArtifactID, seq[ArtifactID]]()

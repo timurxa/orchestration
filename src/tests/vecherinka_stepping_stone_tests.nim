@@ -1,5 +1,5 @@
 import std/[json, macros, options, os, paths, tempfiles]
-import vecherinka
+import ../api/vecherinka
 
 proc `$`(value: Location): string {.borrow.}
 

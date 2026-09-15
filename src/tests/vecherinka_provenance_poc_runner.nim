@@ -1,8 +1,8 @@
 {.experimental: "callOperator".}
 
 import std/[options, os, osproc, paths, strutils, tempfiles]
-import vecherinka
-import vecherinka_provenance
+import ../api/vecherinka
+import ../api/vecherinka_provenance
 
 type
   ChildRun = object
@@ -34,7 +34,7 @@ proc fail(message: string) {.noreturn.} =
 
 proc source_paths(): tuple[source_root, child_source: Path] =
   let source_dir = Path(absolutePath(splitFile(currentSourcePath()).dir))
-  result.source_root = Path(splitFile($source_dir).dir)
+  result.source_root = Path(splitFile(splitFile($source_dir).dir).dir)
   result.child_source = source_dir / Path("vecherinka_provenance_poc_test.nim")
 
 proc compile_child(source_root, child_source, child_workspace: Path): Path =
@@ -45,7 +45,7 @@ proc compile_child(source_root, child_source, child_workspace: Path): Path =
   let child_executable = child_workspace / Path("provenance-poc-child")
   let command = quoteShell(nim_executable) &
     " c --panics:on --threads:on --hints:off --warnings:off --path:" &
-    quoteShell($source_root / "src") &
+    quoteShell($source_root / "src" / "api") &
     " -o:" & quoteShell($child_executable) &
     " " & quoteShell($child_source)
   let (output, exit_code) = execCmdEx(command)

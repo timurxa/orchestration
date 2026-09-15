@@ -119,7 +119,7 @@
 ## malformed names/ranges, empty groups, and invalid outer shapes.
 
 import std/macros
-import it_projection
+import ../api/it_projection
 
 proc assert_selector_equal(actual, expected: ItSelector) {.compileTime.} =
   doAssert actual.kind == expected.kind

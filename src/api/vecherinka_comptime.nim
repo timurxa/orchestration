@@ -3,7 +3,7 @@
 
 import std/[macros, assertions, options, strutils]
 import fusion/matching
-import it_projection, lift_pattern_typed
+import ./it_projection, ./lift_pattern_typed
 import schematic
 
 type

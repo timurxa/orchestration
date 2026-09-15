@@ -13,7 +13,7 @@ passing tests are authoritative. Each feature is labelled:
 ```nim
 {.experimental: "callOperator".}
 import std/[macros, paths]
-import vecherinka
+import vecherinka  # compile with --path:src/api
 
 type
   Input = object
@@ -47,8 +47,8 @@ Rules:
 - Model syntax is `profile[A, B]("prompt")`; endpoints match exactly.
 - Generated solve is effectively `solve(input, transport = nil, logger = nil)`.
 
-Evidence: `src/vecherinka.nim`, `src/vecherinka_comptime.nim`,
-`src/vecherinka_manual_test.nim`.
+Evidence: `src/api/vecherinka.nim`, `src/api/vecherinka_comptime.nim`,
+`src/examples/vecherinka_manual_test.nim`.
 
 ## 2. Composition
 
@@ -282,8 +282,8 @@ Run source, not a possibly stale binary:
 cd /Users/alex/areas/productive/orchestration
 CODEX_HOME="/Users/alex/areas/productive/orchestration/.codex-task-state" \
 CODEX_SQLITE_HOME="/Users/alex/areas/productive/orchestration/.codex-task-state" \
-nim c -r --panics:on --threads:on --path:src \
-  src/vecherinka_provenance_poc_runner.nim
+nim c -r --panics:on --threads:on --path:src/api \
+  src/tests/vecherinka_provenance_poc_runner.nim
 ```
 
 The runner creates a temporary child workspace, compiles and runs
@@ -322,9 +322,9 @@ sqlite3 -header -column RUN_DIR/vecherinka_provenance.sqlite3 \
    SELECT * FROM edge ORDER BY child_path,position;'
 ```
 
-Use `src/vecherinka_provenance_tests.nim` for linear, duplicate-edge,
+Use `src/tests/vecherinka_provenance_tests.nim` for linear, duplicate-edge,
 root, leaf, delta-polling, and external-input examples. Use
-`src/artifact_provenance_logging_tests.nim` for `artifact.commit` JSONL
+`src/tests/artifact_provenance_logging_tests.nim` for `artifact.commit` JSONL
 reconstruction. Commit order reflects registration order, not necessarily
 artifact ID or visual completion order.
 
@@ -335,14 +335,14 @@ not.
 
 ## 9. Evidence and source map
 
-- DSL lowering and type rules: `src/vecherinka_comptime.nim`.
-- Runtime scheduling, artifacts, model calls: `src/vecherinka_runtime.nim`.
-- Projection grammar: `src/it_projection.nim` and its tests.
-- Lift grammar: `src/lift_pattern_typed.nim` and its tests.
-- Provenance store/reader: `src/vecherinka_provenance.nim`.
+- DSL lowering and type rules: `src/api/vecherinka_comptime.nim`.
+- Runtime scheduling, artifacts, model calls: `src/api/vecherinka_runtime.nim`.
+- Projection grammar: `src/api/it_projection.nim` and its tests.
+- Lift grammar: `src/api/lift_pattern_typed.nim` and its tests.
+- Provenance store/reader: `src/api/vecherinka_provenance.nim`.
 - SQLite design and planned coverage: `vecherinka_provenance_sqlite_plan.md`.
-- Current POC: `src/vecherinka_provenance_poc_runner.nim` and
-  `src/vecherinka_provenance_poc_test.nim`.
+- Current POC: `src/tests/vecherinka_provenance_poc_runner.nim` and
+  `src/tests/vecherinka_provenance_poc_test.nim`.
 
 The active suite proves the basic model flow, artifact materialization,
 structured output boundaries, projection/lift parsers, and provenance reader

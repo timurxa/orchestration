@@ -1,5 +1,5 @@
 import std/[options, os, paths, tempfiles, unittest]
-import vecherinka
+import ../api/vecherinka
 
 suite "SQLite provenance store":
   test "stores direct predecessors and derives children":

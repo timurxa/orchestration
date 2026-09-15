@@ -197,7 +197,7 @@
 ## derivation, AST-copy isolation, and every rejection listed above.
 
 import std/macros
-import lift_pattern_typed
+import ../api/lift_pattern_typed
 
 type here = object
 

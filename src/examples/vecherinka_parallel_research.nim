@@ -1,7 +1,7 @@
 ## Typed parallel research pipeline:
 ## request -> distinct research topics -> parallel findings -> synthesis.
 
-import vecherinka
+import ../api/vecherinka
 
 type
   InformationRequest = object

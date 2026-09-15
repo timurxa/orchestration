@@ -1,7 +1,7 @@
 {.experimental: "callOperator".}
 
 import std/macros
-import vecherinka
+import ../api/vecherinka
 
 type
   POCInput = object

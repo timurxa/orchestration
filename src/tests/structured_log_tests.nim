@@ -1,5 +1,5 @@
 import std/[json, os, strutils, unittest]
-import structured_log
+import ../api/structured_log
 
 suite "structured logger":
   test "assigns a run ID when omitted":

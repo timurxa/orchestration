@@ -5,10 +5,10 @@
 
 import std/[json, options, tables, posix, strutils, os,
   paths, tempfiles]
-import codex_json
-import codex_runtime
-import structured_log
-import vecherinka_provenance
+import ./codex_json
+import ./codex_runtime
+import ./structured_log
+import ./vecherinka_provenance
 
 type
   ArtifactID* = uint64

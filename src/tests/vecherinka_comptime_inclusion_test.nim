@@ -228,7 +228,7 @@
 
 import std/[os, osproc, strutils, unittest, json, options, paths]
 
-include vecherinka
+include "../api/vecherinka"
 
 type
   TestKind = enum
@@ -603,7 +603,7 @@ proc compile_reject(source, expected: string): bool =
     source
   writeFile(probe, full_source)
   let command = "nim c --hints:off --warnings:off --path:" &
-    quoteShell(os.getCurrentDir() / "src") & " -o:" & quoteShell(binary) &
+    quoteShell(os.getCurrentDir() / "src" / "api") & " -o:" & quoteShell(binary) &
     " " & quoteShell(probe)
   let (output, code) = execCmdEx(command)
   if fileExists(probe): removeFile(probe)
