@@ -39,6 +39,18 @@ The cost must be finite and non-negative. One model-node invocation incurs one
 charge. Protocol turns, tool messages, and transport retries incur no
 additional Vecherinka charge.
 
+Current cost table (`none`, `low`, `medium`, `high`, `xhigh`, `max`):
+
+```text
+             none  low    medium  high   xhigh  max
+luna         0.41  0.33   0.61    1.18   1.22   2.32
+terra        4.77  4.12   5.91    9.66   10.27  36.24
+sol          9.25  10.93  15.12   18.92  31.15  58.46
+astra        --    5.58   7.17    17.33  31.59  54.87
+```
+
+`astra/none` is invalid. `minimal` is compatibility alias for `none`.
+
 Before dispatching a model request, the runtime charges its fixed cost. If the
 cost is greater than global remaining budget, the entire plan fails and the
 request is not dispatched.
@@ -184,6 +196,7 @@ immediately before its callback executes:
 ```nim
 type BudgetContext = object
   pool_name*: string
+  pool_weight*: float64
   pool_capacity*: Budget
   pool_spent*: Budget
   pool_remaining*: Budget  # R[i], may be negative
@@ -213,6 +226,13 @@ The existing `so` overloads remain available with only `input`, or with
 The flow returned by the callback inherits the current pool unless its
 body contains an explicit `pool(name)` switch.
 
+The ledger belongs to one `WorkPlan` and is created by `init_work_plan` before
+ready work starts. `execute_flows` passes `initial_budget` and pool weights into
+that ledger. Model admission calls `profile_cost`, checks global remaining
+budget, then updates pool spent, global remaining, and recalculated capacities
+before dispatch. Admission failure marks plan terminal; transport is never
+called for rejected request.
+
 ## 6. Runtime invariants
 
 The runtime must preserve these invariants:
@@ -227,6 +247,12 @@ The runtime must preserve these invariants:
 
 After failure, the plan is terminal. Already-running transport work may report
 completion, but those completions are ignored and no new work is admitted.
+
+Ready invocations carry owner-thread state in `pending_ready`; event channel
+transports only ready IDs. `next_ready_id` assigns increasing IDs at enqueue.
+The coordinator consumes IDs and performs admission, so budget mutation is
+serialized even when transport work runs concurrently. Invocation pool stacks
+are copied when stored and when restored, preventing branch or recursion aliasing.
 
 Budget accounting belongs to one `solve` invocation. Recursive activations do
 not receive fresh budgets. A zero-cost recursive loop remains a normal
