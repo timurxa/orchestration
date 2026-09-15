@@ -311,14 +311,10 @@ type
     failure_message*: Option[string]
 
 const default_agent_prompt_templates* = AgentPromptTemplates(
-  developer_instructions: "Complete task. Call finish_work exactly once when done.",
+  developer_instructions: "Complete task. Call finish_work exactly once when done. Never narrate. The file vecherinka_model_input_materialization.txt in the working directory contains raw artifact data passed to you.",
   goal: "Complete task. Call `finish_work` exactly once after completion." &
-    " Put final result in finish_work arguments.",
-  turn_prompt: "$task\n\nComplete task. Call finish_work exactly once when done." &
-    "\nYou may modify only: $working_dir" &
-    "\nLocation values are paths relative to: $runtime_dir" &
-    "\nEvery Location must name an existing file or directory inside the working directory." &
-    "$input",
+    " Put final result in finish_work arguments. Never narrate.",
+  turn_prompt: "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nThe file vecherinka_model_input_materialization.txt in $working_dir contains raw artifact data passed to you. Read it for exact input values.\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
   finish_work_description: "Submit final structured result. Call exactly once when task is complete.")
 
 proc runtime_log*[A](context: RuntimeContext[A]; event, component: string;
@@ -327,6 +323,29 @@ proc runtime_log*[A](context: RuntimeContext[A]; event, component: string;
   if context.isNil or context.logger.isNil:
     return
   discard context.logger.emit(event, component, fields)
+
+const model_input_materialization_filename* =
+  "vecherinka_model_input_materialization.txt"
+
+proc write_artifact_text_file*(artifact_dir: Path; base_name, contents: string): Path =
+  ## Model artifact directories are unique, but callers may already have used
+  ## the preferred name. Pick a suffixed sibling so this helper never replaces
+  ## existing user data.
+  if not dirExists($artifact_dir):
+    raise newException(IOError,
+      "artifact directory does not exist: " & $artifact_dir)
+  let name_parts = splitFile(base_name)
+  var suffix = 0
+  while true:
+    let candidate_name = if suffix == 0:
+      base_name
+    else:
+      name_parts.name & "-" & $suffix & name_parts.ext
+    let candidate = artifact_dir / Path(candidate_name)
+    if not fileExists($candidate) and not dirExists($candidate):
+      writeFile($candidate, contents)
+      return candidate
+    inc suffix
 
 proc model_payload_for_log(arguments: string): JsonNode =
   ## Preserve exact serialized payload plus structured JSON shape.
@@ -842,7 +861,7 @@ proc reserve_artifact_meta*[A](
     "vecherinka",
     log_fields(
       ("artifact_id", %result.id),
-      ("artifact_dir", %($lastPathPart(result.artifact_dir))),
+      ("artifact_dir", %($result.artifact_dir)),
       ("predecessor_ids", %result.predecessor_ids),
       ("operation", %result.operation),
       ("flow_kind", %result.flow_kind),
@@ -878,7 +897,7 @@ proc register_artifact*[A](
     "vecherinka",
     log_fields(
       ("artifact_id", %meta.id),
-      ("artifact_dir", %($lastPathPart(meta.artifact_dir))),
+      ("artifact_dir", %($meta.artifact_dir)),
       ("predecessor_ids", %meta.predecessor_ids),
       ("operation", %meta.operation),
       ("flow_kind", %meta.flow_kind),
@@ -1527,7 +1546,7 @@ proc suspend_model[A](
       ("input_artifact_id", %input_id),
       ("output_artifact_id", %output_meta.id),
       ("submitter", %(if flow.submit.isNil: "default" else: "custom")),
-      ("working_dir", %($lastPathPart(output_meta.artifact_dir)))))
+      ("working_dir", %($output_meta.artifact_dir))))
   if not flow.submit.isNil:
     flow.submit(
       plan.context, request_id, input_record.data, output_meta.artifact_dir)

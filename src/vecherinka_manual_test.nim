@@ -20,11 +20,11 @@ const cheap = "gpt-5.6-luna".medium
 
 const manual_agent_prompts = AgentPromptTemplates(
   developer_instructions: checked_prompt(
-    "Complete task. Call finish_work exactly once when done. Never narrate."),
+    "Complete task. Call finish_work exactly once when done. Never narrate. The file vecherinka_model_input_materialization.txt in the working directory contains raw artifact data passed to you."),
   goal: checked_prompt(
     "Complete task. Call `finish_work` exactly once after completion. Put final result in finish_work arguments. Never narrate."),
   turn_prompt: checked_prompt(
-    "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
+    "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nThe file vecherinka_model_input_materialization.txt in $working_dir contains raw artifact data passed to you. Read it for exact input values.\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
     "task", "input", "working_dir", "runtime_dir"),
   finish_work_description: checked_prompt(
     "Submit final structured result. Call exactly once when task is complete."))
@@ -34,12 +34,14 @@ type
     number: int
 
 vecherinka(solve, manual_agent_prompts):
-  > decrement Simple ~> Simple:
-    cheap[Simple, Simple]("Output a new result with the input number decremented by 1 via the finish work tool call. Do not finish your turn before using the finish work tool.")
-  > top_level Simple ~> Simple {.entry.}:
+  > decrement_until_zero Simple ~> Simple:
     so(Simple, Simple, input) do:
       if input.number <= 0: pure(input)
-      else: input >>> decrement >>> top_level
+      else: input >>> decrement >>> decrement_until_zero
+  > decrement Simple ~> Simple:
+    cheap[Simple, Simple]("Output a new result with the input number decremented by 1 via the finish work tool call. Do not finish your turn before using the finish work tool.")
+  > top_level Simple ~> (Simple, Simple) {.entry.}:
+    fan(decrement_until_zero, decrement_until_zero)
   # > fix (Codebase, Issues) ~> Codebase:
   #   cheap[(Codebase, Issues), Codebase]("Read the issues and fix them in the codebase.")
   #
@@ -66,6 +68,7 @@ let debug_logger = new_structured_logger(
 try:
   echo "test: calling generated solve"
   let debug_value = solve(simple, logger = debug_logger)
-  echo "test: generated solve returned ", debug_value.number
+  echo "test: generated solve returned ", debug_value[0].number,
+    " and ", debug_value[1].number
 finally:
   log_file.close()

@@ -14,6 +14,16 @@ proc committed_lineage(lines: seq[string]): Table[ArtifactID, seq[ArtifactID]] =
       result[artifact_id].add(ArtifactID(predecessor.getInt))
 
 suite "artifact provenance logging":
+  test "artifact text output uses a unique non-destructive filename":
+    let root = Path(createTempDir("artifact-text-output-", ""))
+    let first = write_artifact_text_file(
+      root, model_input_materialization_filename, "first")
+    let second = write_artifact_text_file(
+      root, model_input_materialization_filename, "second")
+    check first != second
+    check readFile($first) == "first"
+    check readFile($second) == "second"
+
   test "commit events reconstruct direct edges":
     let root = Path(createTempDir("artifact-provenance-log-", ""))
     var lines: seq[string] = @[]

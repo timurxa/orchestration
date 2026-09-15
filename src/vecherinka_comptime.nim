@@ -1530,6 +1530,18 @@ proc emit_model_submitter(
     newLit("")
   else:
     materialized_input
+  let persist_materialized_input = if input_type.is_void_type:
+    quote do:
+      discard write_artifact_text_file(
+        `submit_working_dir`,
+        model_input_materialization_filename,
+        "")
+  else:
+    quote do:
+      discard write_artifact_text_file(
+        `submit_working_dir`,
+        model_input_materialization_filename,
+        `materialized_input`)
   let output_contract_name = genSym(nskLet, "model_output_contract")
   let output_schema_name = genSym(nskLet, "model_output_schema")
   let materializer_name = genSym(nskLet, "model_materializer")
@@ -1591,6 +1603,7 @@ proc emit_model_submitter(
   let submit_body = if input_type.is_void_type:
     quote do:
       discard `submit_input`
+      `persist_materialized_input`
       `protocol_setup`
       let `llm_spec_name` = `llm_spec_value`
       `submit_llm_symbol`(`submit_context`, `submit_request_id`,
@@ -1600,6 +1613,7 @@ proc emit_model_submitter(
       let `typed_input` = `submit_unpacked`
       try:
         let `materialized_input` = `materialized_input_call`
+        `persist_materialized_input`
         `protocol_setup`
         let `llm_spec_name` = `llm_spec_value`
         `submit_llm_symbol`(`submit_context`, `submit_request_id`,
