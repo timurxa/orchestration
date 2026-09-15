@@ -1,7 +1,7 @@
 ## Typed source syntax, compile-time IR, and lowering.
 ## Included by `vecherinka.nim`; import the façade for public use.
 
-import std/[macros, assertions, options, strutils]
+import std/[macros, assertions, options, strutils, math]
 import fusion/matching
 import ./it_projection, ./lift_pattern_typed
 import schematic
@@ -26,6 +26,8 @@ type
     else: discard
   FlowSpec*[A, B] = object
     ir*: FlowIR
+  PoolMarker* = object
+    name*: string
   PartialModelCallSyntax*[A, B] = object
   here* = object
   PartialLiftSyntax*[Pattern: static string] = object
@@ -43,10 +45,34 @@ proc `>>>`*[A, B, C](lf: FlowSpec[A, B]; rt: FlowSpec[B, C]): FlowSpec[A, C] =
   FlowSpec[A, C](ir: FlowIR(kind: firk_empty))
 proc `>>>`*[A, B](lf: A; rt: FlowSpec[A, B]): FlowSpec[void, B] =
   FlowSpec[void, B](ir: FlowIR(kind: firk_empty))
+proc `>>>`*[A, B](lf: FlowSpec[A, B]; rt: PoolMarker): FlowSpec[A, B] =
+  FlowSpec[A, B](ir: FlowIR(kind: firk_empty))
+proc `>>>`*[A, B](lf: PoolMarker; rt: FlowSpec[A, B]): FlowSpec[A, B] =
+  FlowSpec[A, B](ir: FlowIR(kind: firk_empty))
 proc fanout*[A, B; C: tuple](c: C): FlowSpec[A, B] =
   FlowSpec[A, B](ir: FlowIR(kind: firk_empty))
 proc pure*[A](v: A): FlowSpec[void, A] =
   FlowSpec[void, A](ir: FlowIR(kind: firk_empty))
+
+proc pool_scope_syntax*[A, B](name: string;
+    body: FlowSpec[A, B]): FlowSpec[A, B] =
+  discard name
+  discard body
+  FlowSpec[A, B](ir: FlowIR(kind: firk_empty))
+
+macro pool*(name: untyped): untyped =
+  doAssert name.kind in {nnkIdent, nnkSym, nnkAccQuoted},
+    "pool name must be an identifier"
+  let pool_name = newLit(name.strVal)
+  quote do:
+    PoolMarker(name: `pool_name`)
+
+macro pool*(name, body: untyped): untyped =
+  doAssert name.kind in {nnkIdent, nnkSym, nnkAccQuoted},
+    "pool name must be an identifier"
+  let pool_name = newLit(name.strVal)
+  newCall(bindSym("pool_scope_syntax"), pool_name, body)
+
 macro fan*(args: varargs[typed]): untyped =
   doAssert args.len >= 1, "args.len must be >= 1"
   args[0].getTypeInst.assertMatch(
@@ -86,6 +112,17 @@ proc so_syntax*[A, B](
 ): FlowSpec[A, B] =
   FlowSpec[A, B](ir: FlowIR(kind: firk_so))
 
+proc so_syntax*[A, B](
+    fn: proc(input: A; budget: BudgetContext): FlowSpec[void, B]
+): FlowSpec[A, B] =
+  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
+
+proc so_syntax*[A, B](
+    fn: proc(input: A; working_dir: Path;
+      budget: BudgetContext): FlowSpec[void, B]
+): FlowSpec[A, B] =
+  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
+
 macro so*(domain, codomain, pattern, body: untyped): untyped =
   let parameter = ident(pattern.strVal)
   result = quote do:
@@ -98,6 +135,25 @@ macro so*(domain, codomain, pattern, working_dir_name, body: untyped): untyped =
   result = quote do:
     so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
         `working_dir_parameter`: Path):
+      FlowSpec[void, `codomain`] = `body`)
+
+macro so_budget*(domain, codomain, pattern, budget_name, body: untyped): untyped =
+  let parameter = ident(pattern.strVal)
+  let budget_parameter = ident(budget_name.strVal)
+  result = quote do:
+    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
+        `budget_parameter`: BudgetContext):
+      FlowSpec[void, `codomain`] = `body`)
+
+macro so_budget*(domain, codomain, pattern, working_dir_name,
+    budget_name, body: untyped): untyped =
+  let parameter = ident(pattern.strVal)
+  let working_dir_parameter = ident(working_dir_name.strVal)
+  let budget_parameter = ident(budget_name.strVal)
+  result = quote do:
+    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
+        `working_dir_parameter`: Path;
+        `budget_parameter`: BudgetContext):
       FlowSpec[void, `codomain`] = `body`)
 
 macro project_it(value: typed; path: static[ItPath]; depth: static[int] = 0): untyped =
@@ -234,7 +290,7 @@ type
     flow_procs: seq[FlowProcInfo]
     flow_pairs: seq[FlowPair]
     artifact_registry: ArtifactRegistry
-    prompt_templates: NimNode
+    pool_names: seq[string]
 
   FlowRefInfo = object
     id: int
@@ -293,6 +349,7 @@ proc flow_spec_type(node: NimNode): NimNode =
       not eqIdent(node[0], "pure") and
       not eqIdent(node[0], "fanout") and
       not eqIdent(node[0], "so_syntax") and
+      not eqIdent(node[0], "pool_scope_syntax") and
       not eqIdent(node[0], ">>>") and
       not eqIdent(node[0], "()"):
     ## Ordinary callback calls may still be semantically untyped here;
@@ -342,6 +399,32 @@ proc field_value(node: NimNode; name: string): NimNode =
 
 proc is_named(node: NimNode; name: string): bool =
   node.kind in {nnkIdent, nnkSym, nnkAccQuoted} and node.repr == name
+
+proc normalize_pool_name(name: string): string =
+  doAssert name.len > 0 and name[0] in {'a'..'z', 'A'..'Z'},
+    "invalid budget pool name: " & name
+  for index, value in name:
+    if value == '_':
+      continue
+    if (index > 0 and value notin {
+          'a'..'z', 'A'..'Z', '0'..'9', '_'}):
+      doAssert false, "invalid budget pool name: " & name
+    result.add value.toLowerAscii
+  doAssert result.len > 0, "budget pool name cannot be empty"
+  doAssert result != "pool", "budget pool name 'pool' is reserved"
+
+proc pool_marker_parts(node: NimNode; name: var string): bool =
+  try:
+    let type_inst = node.getTypeInst
+    if not type_inst.is_named("PoolMarker"):
+      return false
+    let name_node = node.field_value("name")
+    if name_node.isNil or name_node.kind notin {nnkStrLit, nnkRStrLit}:
+      return false
+    name = name_node.strVal
+    true
+  except CatchableError:
+    false
 
 proc is_flow_ir_kind(node: NimNode; expected: FlowIRKind): bool =
   if node.kind notin {nnkObjConstr, nnkCall}:
@@ -602,12 +685,13 @@ proc so_parts(
 
 proc so_lambda_parts(
     lambda: NimNode;
-    parameter, input_type, working_dir_parameter, body: var NimNode
+    parameter, input_type, working_dir_parameter, budget_parameter,
+    body: var NimNode
 ): bool =
   if lambda.kind != nnkLambda or lambda.len < 7:
     return false
   let formals = lambda[3]
-  if formals.kind != nnkFormalParams or formals.len notin 2 .. 3:
+  if formals.kind != nnkFormalParams or formals.len notin 2 .. 4:
     return false
   if formals[1].kind != nnkIdentDefs or formals[1].len != 3 or
       formals[1][0].kind != nnkSym:
@@ -615,11 +699,24 @@ proc so_lambda_parts(
   parameter = formals[1][0]
   input_type = formals[1][1]
   working_dir_parameter = newEmptyNode()
-  if formals.len == 3:
+  budget_parameter = newEmptyNode()
+  if formals.len >= 3:
     if formals[2].kind != nnkIdentDefs or formals[2].len != 3 or
-        formals[2][0].kind != nnkSym:
+      formals[2][0].kind != nnkSym:
       return false
-    working_dir_parameter = formals[2][0]
+    if formals[2][1].is_named("Path"):
+      working_dir_parameter = formals[2][0]
+    elif formals[2][1].is_named("BudgetContext"):
+      budget_parameter = formals[2][0]
+    else:
+      return false
+  if formals.len == 4:
+    if working_dir_parameter.kind == nnkEmpty or
+        formals[3].kind != nnkIdentDefs or formals[3].len != 3 or
+        formals[3][0].kind != nnkSym or
+        not formals[3][1].is_named("BudgetContext"):
+      return false
+    budget_parameter = formals[3][0]
   if lambda[6].kind != nnkAsgn or lambda[6].len != 2:
     return false
   body = lambda[6][1]
@@ -1493,17 +1590,17 @@ proc emit_model_materializer(
 
 proc emit_model_submitter(
     registry: ArtifactRegistry;
-    input_type, profile, prompt, prompt_templates,
+    input_type, profile, prompt,
     output_kind_value, output_contract_expr,
     materializer: NimNode
 ): NimNode =
   let artifact_name = registry.artifact_name
   let profile_expr = copyNimTree(profile)
   let prompt_expr = copyNimTree(prompt)
-  let prompt_templates_expr = copyNimTree(prompt_templates)
-  let finish_work_description_expr = newDotExpr(
-    copyNimTree(prompt_templates), ident("finish_work_description"))
   let submit_context = genSym(nskParam, "model_context")
+  let finish_work_description_expr = newDotExpr(
+    newDotExpr(copyNimTree(submit_context), ident("prompt_templates")),
+    ident("finish_work_description"))
   let submit_request_id = genSym(nskParam, "model_request_id")
   let submit_input = genSym(nskParam, "model_input")
   let submit_working_dir = genSym(nskParam, "model_working_dir")
@@ -1591,7 +1688,7 @@ proc emit_model_submitter(
     LlmCallSpec[`artifact_name`](
       profile: `profile_expr`,
       prompt: `prompt_expr`,
-      prompt_templates: `prompt_templates_expr`,
+      prompt_templates: `submit_context`.prompt_templates,
       materialized_input: `materialized_input_value`,
       runtime_dir: `submit_context`.runtime_dir,
       working_dir: `submit_working_dir`,
@@ -1633,16 +1730,17 @@ proc emit_model_submitter(
     )
   submit
 
-proc emit_model_flow(artifact_name, submit: NimNode): NimNode =
+proc emit_model_flow(artifact_name, profile, submit: NimNode): NimNode =
   quote do:
     Flow[`artifact_name`](
       kind: fk_model,
+      profile: `profile`,
       submit: `submit`
     )
 
 proc lower_model_call(
     registry: var ArtifactRegistry;
-    flow_type, profile, prompt, prompt_templates: NimNode
+    flow_type, profile, prompt: NimNode
 ): NimNode =
   let artifact_name = registry.artifact_name
   let input_type = copyNimTree(flow_type[1])
@@ -1652,10 +1750,10 @@ proc lower_model_call(
   let materializer = registry.emit_model_materializer(
     output_type, output_kind_value)
   let submit = registry.emit_model_submitter(
-    input_type, profile, prompt, prompt_templates,
+    input_type, profile, prompt,
     output_kind_value, output_contract_expr,
     materializer)
-  emit_model_flow(artifact_name, submit)
+  emit_model_flow(artifact_name, profile, submit)
 
 proc lower_it(
     flow_type, ir: NimNode;
@@ -1815,6 +1913,42 @@ proc append_continuation(flow, continuation: NimNode) =
     "flow already has a continuation"
   flow.add newTree(nnkExprColonExpr, ident("continuation"), continuation)
 
+proc pool_id(context: FlowWalkContext; name: string): int =
+  let normalized = normalize_pool_name(name)
+  for index, known in context.pool_names:
+    if normalize_pool_name(known) == normalized:
+      return index
+  doAssert false, "unknown budget pool: " & name
+
+proc lower_pool_node(
+    pool_name: string;
+    context: FlowWalkContext
+): NimNode =
+  let artifact_name = context.artifact_registry.artifact_name
+  let selected_pool = newLit(context.pool_id(pool_name))
+  quote do:
+    Flow[`artifact_name`](
+      kind: fk_pool,
+      pool_id: `selected_pool`
+    )
+
+proc lower_pool_scope(
+    pool_name, body: NimNode;
+    context: var FlowWalkContext
+): LoweredFlow
+
+proc is_pool_scope(node: NimNode; name, body: var NimNode): bool =
+  if node.kind notin nnkCallKinds or node.len != 3:
+    return false
+  if node[0].kind notin {nnkIdent, nnkSym} or
+      not eqIdent(node[0], "pool_scope_syntax"):
+    return false
+  if node[1].kind notin {nnkStrLit, nnkRStrLit}:
+    return false
+  name = node[1]
+  body = node[2]
+  true
+
 proc lower_flow_expr(
     node: NimNode;
     context: var FlowWalkContext
@@ -1825,6 +1959,10 @@ proc lower_flow_expr(
     return lower_flow_expr(node[0], context)
 
   var pure_value: NimNode
+  var scope_name, scope_body: NimNode
+  if is_pool_scope(node, scope_name, scope_body):
+    return lower_pool_scope(scope_name, scope_body, context)
+
   if pure_parts(node, flow_type, pure_value):
     let value_type = type_inst_or_nil(pure_value)
     doAssert not value_type.isNil, "pure value has no type"
@@ -1835,6 +1973,17 @@ proc lower_flow_expr(
 
   var left, right: NimNode
   if flow_composition_parts(node, left, right):
+    var pool_name: string
+    if pool_marker_parts(left, pool_name):
+      let right_flow = lower_flow_expr(right, context)
+      let pool_flow = lower_pool_node(pool_name, context)
+      pool_flow.append_continuation(right_flow.head)
+      return LoweredFlow(head: pool_flow, tail: right_flow.tail)
+    if pool_marker_parts(right, pool_name):
+      let left_flow = lower_flow_expr(left, context)
+      let pool_flow = lower_pool_node(pool_name, context)
+      left_flow.tail.append_continuation(pool_flow)
+      return LoweredFlow(head: left_flow.head, tail: pool_flow)
     if flow_spec_type(left).isNil:
       ## Typed `A >>> FlowSpec[A, B]` already checked endpoint compatibility;
       ## retain its value as a local Artifact seed, then use normal chaining.
@@ -1882,9 +2031,32 @@ proc lower_flow_expr(
     doAssert model_call_parts(node, flow_type, profile, prompt),
       "unsupported FlowSpec expression; expected model call, pure, lift, or >>>"
     result.head = lower_model_call(
-      context.artifact_registry, flow_type, profile, prompt,
-      context.prompt_templates)
+      context.artifact_registry, flow_type, profile, prompt)
   result.tail = result.head
+
+proc lower_pool_scope(
+    pool_name, body: NimNode;
+    context: var FlowWalkContext
+): LoweredFlow =
+  let scope_body = if body.kind == nnkStmtList and body.len == 1:
+    body[0]
+  else:
+    body
+  doAssert scope_body.kind != nnkStmtList,
+    "pool scope must contain exactly one flow expression"
+  let inner = lower_flow_expr(scope_body, context)
+  let artifact_name = context.artifact_registry.artifact_name
+  let selected_pool = newLit(context.pool_id(pool_name.strVal))
+  let enter = quote do:
+    Flow[`artifact_name`](
+      kind: fk_pool_enter,
+      pool_id: `selected_pool`
+    )
+  let restore = quote do:
+    Flow[`artifact_name`](kind: fk_pool_restore)
+  enter.append_continuation(inner.head)
+  inner.tail.append_continuation(restore)
+  LoweredFlow(head: enter, tail: restore)
 
 proc lower_flow_pair(
     pair: FlowPair;
@@ -2088,9 +2260,10 @@ proc lower_so(
     flow_type, lambda: NimNode;
     context: var FlowWalkContext
 ): NimNode =
-  var parameter, input_type, working_dir_parameter, body: NimNode
+  var parameter, input_type, working_dir_parameter, budget_parameter,
+      body: NimNode
   doAssert so_lambda_parts(lambda, parameter, input_type,
-    working_dir_parameter, body),
+    working_dir_parameter, budget_parameter, body),
     "malformed so callback"
 
   let domain = flow_type[1]
@@ -2108,8 +2281,12 @@ proc lower_so(
   if working_dir_parameter.kind != nnkEmpty:
     rebound_body = replace_symbol(
       rebound_body, working_dir_parameter, so_working_dir)
+  let so_budget = genSym(nskParam, "so_budget")
+  if budget_parameter.kind != nnkEmpty:
+    rebound_body = replace_symbol(rebound_body, budget_parameter, so_budget)
   let expand = quote do:
-    proc (`artifact_input`: `artifact_name`; `so_working_dir`: Path):
+    proc (`artifact_input`: `artifact_name`; `so_working_dir`: Path;
+        `so_budget`: BudgetContext):
         Flow[`artifact_name`] {.nimcall.} =
       let `typed_input` = `unpacked`
       `rebound_body`
@@ -2392,11 +2569,111 @@ proc lower_lift(
       construct: `construct`
     )
 
+const pool_name_keywords = [
+  "addr", "and", "asm", "atomic", "bind", "block", "break", "case",
+  "cast", "concept", "const", "continue", "converter", "defer", "discard",
+  "distinct", "div", "do", "elif", "else", "enum", "except", "export",
+  "finally", "for", "from", "func", "generic", "if", "import", "in",
+  "include", "interface", "is", "isnot", "iterator", "let", "macro",
+  "method", "mixin", "mod", "nil", "not", "notin", "object", "of", "or",
+  "out", "proc", "ptr", "raise", "ref", "return", "shl", "static",
+  "template", "thread", "try", "tuple", "type", "using", "var", "when",
+  "while", "with", "without", "xor", "yield"]
+
+proc parse_pool_weight_value(node: NimNode): float64 =
+  case node.kind
+  of nnkFloatLit, nnkFloat32Lit, nnkFloat64Lit, nnkFloat128Lit:
+    return node.floatVal
+  of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
+    return float64(node.intVal)
+  else:
+    doAssert false, "pool weight must be a compile-time float"
+
+proc normalized_pool_name(name: string): string =
+  doAssert name.len > 0, "pool name cannot be empty"
+  for index, value in name:
+    if index == 0:
+      doAssert value in {'a'..'z', 'A'..'Z'},
+        "pool name must be an ASCII identifier: " & name
+    else:
+      doAssert value in {'a'..'z', 'A'..'Z', '0'..'9', '_'},
+        "pool name must be an ASCII identifier: " & name
+    if value != '_':
+      result.add value.toLowerAscii
+  doAssert result != "pool", "pool name 'pool' is reserved"
+  for keyword in pool_name_keywords:
+    doAssert result != keyword, "pool name is a Nim keyword: " & name
+
+proc resolved_pool_weights(node: NimNode): NimNode =
+  if node.kind == nnkSym:
+    let implementation = node.getImpl
+    if implementation.kind == nnkConstDef:
+      return implementation[^1]
+  node
+
+proc looks_like_pool_weights(node: NimNode): bool =
+  resolved_pool_weights(node).kind == nnkBracket
+
+proc parse_pool_weights(node: NimNode): seq[PoolWeight] =
+  let value = resolved_pool_weights(node)
+  doAssert value.kind == nnkBracket,
+    "pool weights must be a compile-time array"
+  for entry in value:
+    doAssert entry.kind in {nnkTupleConstr, nnkPar},
+      "pool weights must use named tuples"
+    var name_node, weight_node: NimNode
+    for field in entry:
+      doAssert field.kind == nnkExprColonExpr and field.len == 2,
+        "pool weights must use named fields"
+      case field[0].strVal
+      of "name": name_node = field[1]
+      of "weight": weight_node = field[1]
+      else: doAssert false, "pool weight fields are name and weight"
+    doAssert not name_node.isNil and not weight_node.isNil,
+      "pool weight requires name and weight"
+    doAssert name_node.kind in {nnkStrLit, nnkRStrLit},
+      "pool name must be a compile-time string"
+    result.add((name: normalized_pool_name(name_node.strVal),
+      weight: parse_pool_weight_value(weight_node)))
+  doAssert result.len > 0, "at least one budget pool is required"
+  var total_weight = 0.0
+  for index, pool in result:
+    doAssert pool.weight >= 0.0 and
+        classify(pool.weight) notin {fcNan, fcInf, fcNegInf},
+      "pool weights must be finite and non-negative"
+    total_weight += pool.weight
+    for prior in 0 ..< index:
+      doAssert result[prior].name != pool.name,
+        "duplicate budget pool: " & pool.name
+  doAssert total_weight > 0.0 and
+      classify(total_weight) notin {fcNan, fcInf, fcNegInf},
+    "total pool weight must be finite and positive"
+  var has_default = false
+  for pool in result:
+    if pool.name == "default":
+      has_default = true
+  doAssert has_default, "budget pools must include default"
+
+proc pool_names_literal(pools: seq[PoolWeight]): NimNode =
+  result = newTree(nnkBracket)
+  for pool in pools:
+    result.add newLit(pool.name)
+
+proc pool_weights_literal(pools: seq[PoolWeight]): NimNode =
+  var values = newTree(nnkBracket)
+  for pool in pools:
+    values.add newTree(nnkTupleConstr,
+      newTree(nnkExprColonExpr, ident("name"), newLit(pool.name)),
+      newTree(nnkExprColonExpr, ident("weight"), newLit(pool.weight)))
+  result = newTree(nnkPrefix, ident("@"), values)
+
 proc lower_vecherinka_runtime(
-    body, solve, prompt_templates: NimNode
+    body, solve, prompt_templates, pool_names, pool_weights: NimNode
 ): NimNode =
   var context = FlowWalkContext()
-  context.prompt_templates = copyNimTree(prompt_templates)
+  context.pool_names = @[]
+  for pool_name in pool_names:
+    context.pool_names.add pool_name.strVal
   walk_flow_specs(body, context)
 
   collect_flow_declarations(body, context)
@@ -2435,6 +2712,8 @@ proc lower_vecherinka_runtime(
   let data_type = quote do:
     seq[Flow[`artifact_name`]]
   let input_name = genSym(nskParam, "input")
+  let initial_budget_name = genSym(nskParam, "initial_budget")
+  let prompt_templates_name = genSym(nskParam, "prompt_templates")
   let transport_name = genSym(nskParam, "transport")
   let logger_name = genSym(nskParam, "logger")
   let data_name = genSym(nskLet, "data")
@@ -2453,6 +2732,9 @@ proc lower_vecherinka_runtime(
     let `data_name`: `data_type` = `flow_sequence`
     let `input_artifact_name` = `input_artifact`
     let `work_plan_name` = `execute_flows`(`data_name`, `input_artifact_name`,
+      initial_budget = `initial_budget_name`,
+      prompt_templates = `prompt_templates_name`,
+      pool_weights = `pool_weights`,
       transport = `transport_name`,
       logger = `logger_name`)
     if `work_plan_name`.output.isNone:
@@ -2463,6 +2745,8 @@ proc lower_vecherinka_runtime(
     return `returned_value`
   let generated_proc = quote do:
     proc `proc_name`(`input_name`: `entry_domain`;
+        `initial_budget_name`: Budget;
+        `prompt_templates_name`: AgentPromptTemplates = `prompt_templates`;
         `transport_name`: LlmTransport[`artifact_name`] = nil;
         `logger_name`: StructuredLogger = nil): `entry_codomain` =
       `proc_body`
@@ -2473,16 +2757,26 @@ proc lower_vecherinka_runtime(
 
 macro vecherinka_runtime*(solve: untyped; body: typed): untyped =
   lower_vecherinka_runtime(body, solve,
-    bindSym("default_agent_prompt_templates"))
+    bindSym("default_agent_prompt_templates"),
+    newTree(nnkBracket, newLit("default")),
+    newTree(nnkBracket,
+      newTree(nnkTupleConstr,
+        newTree(nnkExprColonExpr, ident("name"), newLit("default")),
+        newTree(nnkExprColonExpr, ident("weight"), newLit(1.0)))))
 
-macro vecherinka_runtime*(solve, prompt_templates: untyped;
+macro vecherinka_runtime*(solve, prompt_templates, pool_names, pool_weights: untyped;
     body: typed): untyped =
-  lower_vecherinka_runtime(body, solve, prompt_templates)
+  lower_vecherinka_runtime(body, solve, prompt_templates, pool_names,
+    pool_weights)
 
 proc make_vecherinka(
-    body, solve, prompt_templates: NimNode
+    body, solve, prompt_templates, pool_weights: NimNode
 ): NimNode =
   var refs, procs = newStmtList()
+  let pools = if pool_weights.isNil:
+    @[(name: "default", weight: 1.0)]
+  else:
+    parse_pool_weights(pool_weights)
 
   doAssert solve.isNil or solve.kind in {nnkIdent, nnkSym, nnkAccQuoted},
     "vecherinka proc name must be an identifier"
@@ -2516,14 +2810,23 @@ proc make_vecherinka(
     refs.add node
 
   let solve_name = newLit(solve.strVal)
+  let pool_names = pool_names_literal(pools)
+  let pool_weights_value = pool_weights_literal(pools)
   result = quote do:
-    vecherinka_runtime(`solve_name`, `prompt_templates`):
+    vecherinka_runtime(`solve_name`, `prompt_templates`, `pool_names`,
+      `pool_weights_value`):
       `refs`
 
 macro vecherinka*(solve, body: untyped): untyped =
   make_vecherinka(body, solve,
-    bindSym("default_agent_prompt_templates"))
+    bindSym("default_agent_prompt_templates"), nil)
 
-macro vecherinka*(solve, prompt_templates: untyped;
+macro vecherinka*(solve: untyped; pools: typed;
     body: untyped): untyped =
-  make_vecherinka(body, solve, prompt_templates)
+  let named_pools = pools.kind == nnkExprEqExpr and pools.len == 2 and
+      pools[0].is_named("pools")
+  let pool_value = if named_pools: pools[1] else: pools
+  if named_pools or looks_like_pool_weights(pool_value):
+    return make_vecherinka(body, solve,
+      bindSym("default_agent_prompt_templates"), pool_value)
+  make_vecherinka(body, solve, pools, nil)

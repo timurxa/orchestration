@@ -3,7 +3,7 @@
 ## Included by `vecherinka.nim`. Keep compile-time AST and macro machinery out
 ## of this fragment.
 
-import std/[json, options, tables, posix, strutils, os,
+import std/[json, options, tables, posix, strutils, os, math,
   paths, tempfiles]
 import ./codex_json
 import ./codex_runtime
@@ -12,6 +12,34 @@ import ./vecherinka_provenance
 
 type
   ArtifactID* = uint64
+  Budget* = float64
+
+  ModelProfile* = enum
+    luna,
+    terra,
+    sol,
+    astra
+
+  PoolWeight* = tuple
+    name: string
+    weight: float64
+
+  BudgetContext* = object
+    pool_name*: string
+    pool_weight*: float64
+    pool_capacity*: Budget
+    pool_spent*: Budget
+    pool_remaining*: Budget
+    global_remaining*: Budget
+
+  BudgetLedger* = ref object
+    initial_budget*: Budget
+    global_remaining*: Budget
+    pools*: seq[PoolWeight]
+    total_weight*: float64
+    nominal_capacities*: seq[Budget]
+    capacities*: seq[Budget]
+    spent*: seq[Budget]
 
   ArtifactMeta* = object
     id*: ArtifactID
@@ -28,7 +56,7 @@ type
     meta*: ArtifactMeta
 
   ProfileSpec* = object
-    model*: string
+    model*: ModelProfile
     effort*: ReasoningEffort
 
   AgentPromptTemplates* = object
@@ -48,16 +76,21 @@ type
     fk_it,
     fk_fanout,
     fk_so,
-    fk_lift
+    fk_lift,
+    fk_pool,
+    fk_pool_enter,
+    fk_pool_restore
 
   Flow*[A] = ref object
     continuation*: Flow[A]
+    pool_id*: int
     case kind*: FlowKind
     of fk_top:
       root*: string
       entry*: bool
       body*: Flow[A]
     of fk_model:
+      profile*: ProfileSpec
       submit*: proc(
         context: RuntimeContext[A];
         request_id: RequestId;
@@ -76,12 +109,19 @@ type
     of fk_so:
       ## `working_dir` belongs to current value's artifact. It is available
       ## for synchronous side effects without exposing RuntimeContext.
-      execute*: proc(input: A; working_dir: Path): Flow[A] {.nimcall.}
+      execute*: proc(input: A; working_dir: Path;
+        budget: BudgetContext): Flow[A] {.nimcall.}
     of fk_lift:
       inner*: Flow[A]
       destructure*: proc(input: A):
         seq[tuple[result_index: int, input: A]] {.nimcall.}
       construct*: proc(results: seq[A]; input: A): A {.nimcall.}
+    of fk_pool:
+      discard
+    of fk_pool_enter:
+      discard
+    of fk_pool_restore:
+      discard
 
   JoinID* = uint64
 
@@ -96,6 +136,9 @@ type
 
   Destination*[A] = ref object
     ## Dynamic destination used only when an invocation yields.
+    ## `return_pool` restores the caller's pool after a flow reference returns.
+    return_pool*: Option[int]
+    return_pool_stack*: Option[seq[int]]
     case kind*: DestinationKind
     of dk_continue:
       flow*: Flow[A]
@@ -112,6 +155,8 @@ type
     flow*: Flow[A]
     input_id*: ArtifactID
     destination*: Destination[A]
+    pool_id*: int
+    pool_stack*: seq[int]
     ## Some only for an in-flight model invocation.
     output_meta*: Option[ArtifactMeta]
 
@@ -283,6 +328,7 @@ type
     codex_runtime*: ptr CodexRuntime
     pending_agent_starts*: Table[string, PendingAgentStart[A]]
     model_turn_requests*: Table[string, string]
+    prompt_templates*: AgentPromptTemplates
 
   ModelSubmitter*[A] = proc(
     context: RuntimeContext[A];
@@ -299,6 +345,7 @@ type
 
   WorkPlan*[A] = object
     context*: RuntimeContext[A]
+    budget*: BudgetLedger
     roots*: Table[string, Flow[A]]
     entry*: Flow[A]
     pending_ready*: Table[uint64, Invocation[A]]
@@ -318,6 +365,139 @@ const default_agent_prompt_templates* = AgentPromptTemplates(
     " Put final result in finish_work arguments. Never narrate.",
   turn_prompt: "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nThe file vecherinka_model_input_materialization.txt in $working_dir contains raw artifact data passed to you. Read it for exact input values.\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
   finish_work_description: "Submit final structured result. Call exactly once when task is complete.")
+
+proc valid_budget_value(value: Budget): bool {.inline.} =
+  ## Nim's `high(float64)` is infinity, so classify explicitly.
+  value >= 0.0 and classify(value) notin {fcNan, fcInf, fcNegInf}
+
+proc canonical_pool_name(name: string): string =
+  if name.len == 0 or name[0] notin {'a'..'z', 'A'..'Z'}:
+    raise newException(ValueError, "invalid budget pool name: " & name)
+  for index, value in name:
+    if index > 0 and value notin {
+        'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+      raise newException(ValueError, "invalid budget pool name: " & name)
+    if value != '_':
+      result.add value.toLowerAscii
+  if result == "pool":
+    raise newException(ValueError, "budget pool name 'pool' is reserved")
+
+const budget_pool_keywords = [
+  "addr", "and", "asm", "atomic", "bind", "block", "break", "case",
+  "cast", "const", "continue", "converter", "defer", "discard", "div",
+  "do", "elif", "else", "enum", "except", "export", "finally", "for",
+  "from", "func", "generic", "if", "import", "in", "include", "interface",
+  "is", "isnot", "iterator", "let", "macro", "method", "mixin", "mod",
+  "nil", "not", "notin", "object", "of", "or", "out", "proc", "ptr",
+  "raise", "ref", "return", "shl", "static", "template", "thread", "try",
+  "tuple", "type", "using", "var", "when", "while", "with", "without",
+  "xor", "yield"]
+
+proc validate_pool_keyword(name: string) =
+  for keyword in budget_pool_keywords:
+    if name == keyword:
+      raise newException(ValueError, "budget pool name is a Nim keyword: " & name)
+
+proc model_name*(model: ModelProfile): string =
+  case model
+  of luna: "gpt-5.6-luna"
+  of terra: "gpt-5.6-terra"
+  of sol: "gpt-5.6-sol"
+  of astra: "gpt-6-astra"
+
+proc profile_cost*(model: ModelProfile; effort: ReasoningEffort): Budget =
+  ## Conservative complex-task point estimates, normalized to the
+  ## Sol-medium reference cell. Astra/none is unsupported, not free.
+  const costs: array[ModelProfile, array[ReasoningEffort, Budget]] = [
+    [0.41, 0.33, 0.61, 1.18, 1.22, 2.32],
+    [4.77, 4.12, 5.91, 9.66, 10.27, 36.24],
+    [9.25, 10.93, 15.12, 18.92, 31.15, 58.46],
+    [0.0, 5.58, 7.17, 17.33, 31.59, 54.87]]
+  if model == astra and effort == re_none:
+    raise newException(ValueError, "Astra does not support none effort")
+  costs[model][effort]
+
+proc new_budget_ledger*(initial_budget: Budget;
+    pool_weights: seq[PoolWeight]): BudgetLedger =
+  if not valid_budget_value(initial_budget):
+    raise newException(ValueError, "initial budget must be finite and non-negative")
+  if pool_weights.len == 0:
+    raise newException(ValueError, "at least one budget pool is required")
+
+  new result
+  result.initial_budget = initial_budget
+  result.global_remaining = initial_budget
+  result.pools = newSeq[PoolWeight](pool_weights.len)
+  result.capacities = newSeq[Budget](pool_weights.len)
+  result.spent = newSeq[Budget](pool_weights.len)
+  var total_weight = 0.0
+  var has_default = false
+  for index, pool in pool_weights:
+    if pool.name.len == 0 or not valid_budget_value(pool.weight):
+      raise newException(ValueError, "pool names and weights must be valid")
+    let name = canonical_pool_name(pool.name)
+    validate_pool_keyword(name)
+    for prior in 0 ..< index:
+      if result.pools[prior].name == name:
+        raise newException(ValueError, "duplicate budget pool: " & name)
+    result.pools[index] = (name: name, weight: pool.weight)
+    has_default = has_default or name == "default"
+    total_weight += pool.weight
+  if not has_default:
+    raise newException(ValueError, "budget pools must include default")
+  if not valid_budget_value(total_weight) or total_weight <= 0.0:
+    raise newException(ValueError, "total pool weight must be finite and positive")
+  result.total_weight = total_weight
+  result.nominal_capacities = newSeq[Budget](pool_weights.len)
+  for index, pool in pool_weights:
+    result.nominal_capacities[index] = initial_budget * pool.weight / total_weight
+    if not valid_budget_value(result.nominal_capacities[index]):
+      raise newException(ValueError, "pool capacity is not finite")
+  result.capacities = newSeq[Budget](pool_weights.len)
+  for index, capacity in result.nominal_capacities:
+    result.capacities[index] = capacity
+
+proc recalculate_pool_capacities(ledger: BudgetLedger) =
+  var overrun = 0.0
+  for index, spent in ledger.spent:
+    overrun += max(0.0, spent - ledger.nominal_capacities[index])
+  let effective_total = ledger.initial_budget - overrun
+  for index, pool in ledger.pools:
+    ledger.capacities[index] = effective_total * pool.weight /
+      ledger.total_weight
+
+proc pool_index*(ledger: BudgetLedger; name: string): int =
+  let canonical = canonical_pool_name(name)
+  for index, pool in ledger.pools:
+    if pool.name == canonical:
+      return index
+  -1
+
+proc budget_context*(ledger: BudgetLedger; pool_id: int): BudgetContext =
+  if ledger.isNil or pool_id < 0 or pool_id >= ledger.pools.len:
+    raise newException(ValueError, "invalid budget pool")
+  result.pool_name = ledger.pools[pool_id].name
+  result.pool_weight = ledger.pools[pool_id].weight
+  result.pool_capacity = ledger.capacities[pool_id]
+  result.pool_spent = ledger.spent[pool_id]
+  result.pool_remaining = result.pool_capacity - result.pool_spent
+  result.global_remaining = ledger.global_remaining
+
+proc admit_model*(ledger: BudgetLedger; pool_id: int; cost: Budget;
+    description: string = "model request") =
+  if ledger.isNil or pool_id < 0 or pool_id >= ledger.pools.len:
+    raise newException(ValueError, "invalid budget pool")
+  if not valid_budget_value(cost):
+    raise newException(ValueError, "model cost must be finite and non-negative")
+  if cost > ledger.global_remaining:
+    let context = ledger.budget_context(pool_id)
+    raise newException(ValueError,
+      "budget exceeded for " & description & " in pool " & context.pool_name &
+      ": requested " & $cost & ", global remaining " &
+      $ledger.global_remaining & ", pool capacity " & $context.pool_capacity)
+  ledger.spent[pool_id] += cost
+  ledger.global_remaining -= cost
+  ledger.recalculate_pool_capacities()
 
 proc runtime_log*[A](context: RuntimeContext[A]; event, component: string;
     fields: JsonNode = nil) =
@@ -787,20 +967,20 @@ proc handle_global_event*(
   of gek_shutdown:
     discard
 
-proc none*(model: string): ProfileSpec =
+proc none*(model: ModelProfile): ProfileSpec =
   ProfileSpec(model: model, effort: re_none)
-proc minimal*(model: string): ProfileSpec =
+proc minimal*(model: ModelProfile): ProfileSpec =
   ## Compatibility alias. Codex renamed this effort to `none`.
   none(model)
-proc low*(model: string): ProfileSpec =
+proc low*(model: ModelProfile): ProfileSpec =
   ProfileSpec(model: model, effort: re_low)
-proc medium*(model: string): ProfileSpec =
+proc medium*(model: ModelProfile): ProfileSpec =
   ProfileSpec(model: model, effort: re_medium)
-proc high*(model: string): ProfileSpec =
+proc high*(model: ModelProfile): ProfileSpec =
   ProfileSpec(model: model, effort: re_high)
-proc xhigh*(model: string): ProfileSpec =
+proc xhigh*(model: ModelProfile): ProfileSpec =
   ProfileSpec(model: model, effort: re_xhigh)
-proc max*(model: string): ProfileSpec =
+proc max*(model: ModelProfile): ProfileSpec =
   ProfileSpec(model: model, effort: re_max)
 
 proc prepend_continuation*[A](
@@ -816,7 +996,8 @@ proc new_runtime_context*[A](
     transport: LlmTransport[A] = nil;
     run_dir: Path = Path("");
     runtime_dir: Path = Path("");
-    logger: StructuredLogger = nil
+    logger: StructuredLogger = nil;
+    prompt_templates: AgentPromptTemplates = default_agent_prompt_templates
 ): RuntimeContext[A] =
   new result
   result.artifacts = initTable[ArtifactID, ArtifactRecord[A]]()
@@ -832,6 +1013,7 @@ proc new_runtime_context*[A](
   result.codex_runtime = nil
   result.pending_agent_starts = initTable[string, PendingAgentStart[A]]()
   result.model_turn_requests = initTable[string, string]()
+  result.prompt_templates = prompt_templates
 
 proc create_run_directory*(source_root: Path): Path =
   ## Keep run state in a unique child of the program working directory.
@@ -1016,9 +1198,12 @@ proc allocate_request_id[A](context: RuntimeContext[A]): RequestId =
 
 proc init_work_plan*[A](
     top_level_flows: seq[Flow[A]];
-    context: RuntimeContext[A]
+    context: RuntimeContext[A];
+    initial_budget: Budget = 0.0;
+    pool_weights: seq[PoolWeight] = @[(name: "default", weight: 1.0)]
 ): WorkPlan[A] =
   result.context = context
+  result.budget = new_budget_ledger(initial_budget, pool_weights)
   result.roots = initTable[string, Flow[A]]()
   result.joins = initTable[JoinID, JoinState]()
   result.join_invocations = initTable[JoinID, Invocation[A]]()
@@ -1097,15 +1282,24 @@ proc accept_join_result[A](
     artifact_id: ArtifactID
 )
 
+proc copy_pool_stack(stack: seq[int]): seq[int] =
+  result = newSeq[int](stack.len)
+  for index, pool_id in stack:
+    result[index] = pool_id
+
 proc new_invocation[A](
     flow: Flow[A];
     input_id: ArtifactID;
-    destination: Destination[A]
+    destination: Destination[A];
+    pool_id: int = 0;
+    pool_stack: seq[int] = @[]
 ): Invocation[A] =
   Invocation[A](
     flow: flow,
     input_id: input_id,
     destination: destination,
+    pool_id: pool_id,
+    pool_stack: copy_pool_stack(pool_stack),
     output_meta: none(ArtifactMeta))
 
 proc enqueue_ready[A](
@@ -1131,16 +1325,28 @@ proc enqueue_ready[A](
 proc deliver_destination[A](
     plan: var WorkPlan[A];
     destination: Destination[A];
-    artifact_id: ArtifactID
+    artifact_id: ArtifactID;
+    pool_id: int;
+    pool_stack: seq[int]
 ) =
   plan_assert(plan, not destination.isNil, "nil invocation destination")
 
   case destination.kind
   of dk_continue:
+    let next_pool = if destination.return_pool.isSome:
+      destination.return_pool.get
+    else:
+      pool_id
+    let next_stack = if destination.return_pool_stack.isSome:
+      destination.return_pool_stack.get
+    else:
+      pool_stack
     enqueue_ready(plan, new_invocation(
       destination.flow,
       artifact_id,
-      destination.next
+      destination.next,
+      next_pool,
+      next_stack
     ))
   of dk_join:
     accept_join_result(plan, destination.join_id, destination.slot, artifact_id)
@@ -1204,7 +1410,8 @@ proc finish_join[A](
       ("output_artifact_id", %output_id)))
   plan.joins.del(join_id)
   plan.join_invocations.del(join_id)
-  deliver_destination(plan, destination, output_id)
+  deliver_destination(
+    plan, destination, output_id, invocation.pool_id, invocation.pool_stack)
 
 proc accept_join_result[A](
     plan: var WorkPlan[A];
@@ -1282,7 +1489,7 @@ proc default_llm_transport[A](
     kind: gek_create_agent,
     model_request_id: request_id,
     agent_id: agent_id,
-    model: spec.profile.model,
+    model: model_name(spec.profile.model),
     effort: spec.profile.effort,
     working_dir: spec.working_dir,
     tools: spec.tools))
@@ -1298,7 +1505,7 @@ proc format_agent_prompt[A](template_text: string; spec: LlmCallSpec[A]): string
     "input", input,
     "working_dir", $spec.working_dir,
     "runtime_dir", $spec.runtime_dir,
-    "model", spec.profile.model,
+    "model", model_name(spec.profile.model),
     "effort", $spec.profile.effort)
 
 proc llm_turn_prompt[A](spec: LlmCallSpec[A]): string =
@@ -1531,9 +1738,26 @@ proc suspend_model[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
     input_id: ArtifactID;
-    destination: Destination[A]
+    destination: Destination[A];
+    pool_id: int;
+    pool_stack: seq[int]
 ) =
   let input_record = lookup_artifact(plan.context, input_id)
+  let cost = profile_cost(flow.profile.model, flow.profile.effort)
+  plan.budget.admit_model(
+    pool_id,
+    cost,
+    "" & model_name(flow.profile.model) & "/" & $flow.profile.effort)
+  let budget = plan.budget.budget_context(pool_id)
+  plan.context.runtime_log(
+    "budget.admit",
+    "vecherinka",
+    log_fields(
+      ("pool", %budget.pool_name),
+      ("cost", %cost),
+      ("pool_capacity", %budget.pool_capacity),
+      ("pool_remaining", %budget.pool_remaining),
+      ("global_remaining", %budget.global_remaining)))
   let request_id = allocate_request_id(plan.context)
   let output_meta = reserve_artifact_meta(
     plan.context,
@@ -1545,6 +1769,8 @@ proc suspend_model[A](
     flow: flow,
     input_id: input_id,
     destination: prepend_continuation(flow.continuation, destination),
+    pool_id: pool_id,
+    pool_stack: copy_pool_stack(pool_stack),
     output_meta: some(output_meta))
   let key = request_id_key(request_id)
   plan_assert(plan, not plan.model_requests.hasKey(key),
@@ -1575,19 +1801,25 @@ proc begin_fanout[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
     input_id: ArtifactID;
-    destination: Destination[A]
+    destination: Destination[A];
+    pool_id: int;
+    pool_stack: seq[int]
 ) =
   let join_id = new_join_state(plan, jk_fanout, flow.branches.len)
   plan.join_invocations[join_id] = new_invocation(
     flow,
     input_id,
-    prepend_continuation(flow.continuation, destination))
+    prepend_continuation(flow.continuation, destination),
+    pool_id,
+    pool_stack)
 
   for index, branch in flow.branches:
     enqueue_ready(plan, new_invocation(
       branch,
       input_id,
-      Destination[A](kind: dk_join, join_id: join_id, slot: index)))
+      Destination[A](kind: dk_join, join_id: join_id, slot: index),
+      pool_id,
+      pool_stack))
 
   if flow.branches.len == 0:
     finish_join(plan, join_id)
@@ -1596,7 +1828,9 @@ proc begin_lift[A](
     plan: var WorkPlan[A];
     flow: Flow[A];
     input_id: ArtifactID;
-    destination: Destination[A]
+    destination: Destination[A];
+    pool_id: int;
+    pool_stack: seq[int]
 ) =
   let original = lookup_artifact(plan.context, input_id).data
   let works = flow.destructure(original)
@@ -1616,7 +1850,9 @@ proc begin_lift[A](
   plan.join_invocations[join_id] = new_invocation(
     flow,
     input_id,
-    prepend_continuation(flow.continuation, destination))
+    prepend_continuation(flow.continuation, destination),
+    pool_id,
+    pool_stack)
 
   for work in works:
     let input_artifact_id = register_generated_artifact(
@@ -1631,7 +1867,9 @@ proc begin_lift[A](
       Destination[A](
         kind: dk_join,
         join_id: join_id,
-        slot: work.result_index)))
+        slot: work.result_index),
+      pool_id,
+      pool_stack))
 
   if works.len == 0:
     finish_join(plan, join_id)
@@ -1651,6 +1889,8 @@ proc handle_invocation*[A](
   var destination = invocation.destination
   var value = initial_record.data
   var value_id = invocation.input_id
+  var active_pool = invocation.pool_id
+  var active_stack = invocation.pool_stack
 
   while not current.isNil:
     case current.kind
@@ -1660,7 +1900,22 @@ proc handle_invocation*[A](
       destination = prepend_continuation(
         current.continuation,
         destination)
+      destination.return_pool = some(active_pool)
+      destination.return_pool_stack = some(copy_pool_stack(active_stack))
       current = resolve_root(plan.roots, current.name)
+    of fk_pool:
+      active_pool = current.pool_id
+      current = current.continuation
+    of fk_pool_enter:
+      active_stack.add(active_pool)
+      active_pool = current.pool_id
+      current = current.continuation
+    of fk_pool_restore:
+      plan_assert(plan, active_stack.len > 0,
+        "pool scope restoration without matching entry")
+      active_pool = active_stack[^1]
+      active_stack.setLen(active_stack.len - 1)
+      current = current.continuation
     of fk_raw:
       value = current.value
       value_id = register_generated_artifact(
@@ -1680,36 +1935,42 @@ proc handle_invocation*[A](
         flow_kind = "fk_it")
       current = current.continuation
     of fk_model:
-      suspend_model(
-        plan, current, value_id,
-        destination)
+      try:
+        suspend_model(
+          plan, current, value_id, destination, active_pool, active_stack)
+      except CatchableError as error:
+        fail_runtime(plan, error.msg)
       return
     of fk_so:
       let working_dir = lookup_artifact(
         plan.context, value_id).meta.artifact_dir
-      let child = current.execute(value, working_dir)
+      let child = current.execute(
+        value, working_dir, plan.budget.budget_context(active_pool))
       let child_destination = prepend_continuation(current.continuation,
         destination)
       if child.isNil:
-        deliver_destination(plan, child_destination, value_id)
+        deliver_destination(
+          plan, child_destination, value_id, active_pool, active_stack)
       else:
         enqueue_ready(plan, new_invocation(
           child,
           value_id,
-          child_destination))
+          child_destination,
+          active_pool,
+          active_stack))
       return
     of fk_fanout:
       begin_fanout(
         plan, current, value_id,
-        destination)
+        destination, active_pool, active_stack)
       return
     of fk_lift:
       begin_lift(
         plan, current, value_id,
-        destination)
+        destination, active_pool, active_stack)
       return
 
-  deliver_destination(plan, destination, value_id)
+  deliver_destination(plan, destination, value_id, active_pool, active_stack)
 
 proc handle_runtime_event[A](
     plan: var WorkPlan[A];
@@ -1831,7 +2092,9 @@ proc handle_runtime_event[A](
       log_fields(
         ("request_id", %(request_id_key(event.request_id))),
         ("output_artifact_id", %output_id)))
-    deliver_destination(plan, invocation.destination, output_id)
+    deliver_destination(
+      plan, invocation.destination, output_id, invocation.pool_id,
+      invocation.pool_stack)
   of rev_model_error:
     let key = request_id_key(event.request_id)
     if not plan.model_requests.hasKey(key):
@@ -1948,6 +2211,9 @@ proc run_work_plan*[A](
 proc execute_flows*[A](
     top_level_flows: seq[Flow[A]];
     input: A;
+    initial_budget: Budget = 0.0;
+    prompt_templates: AgentPromptTemplates = default_agent_prompt_templates;
+    pool_weights: seq[PoolWeight] = @[(name: "default", weight: 1.0)];
     submitter: ModelSubmitter[A] = nil;
     transport: LlmTransport[A] = nil;
     runtime: ptr CodexRuntime = nil;
@@ -1958,7 +2224,7 @@ proc execute_flows*[A](
   let source_root = Path(expandFilename(os.getCurrentDir()))
   let run_dir = create_run_directory(source_root)
   let context = new_runtime_context(
-    submitter, transport, run_dir, source_root, logger)
+    submitter, transport, run_dir, source_root, logger, prompt_templates)
   context.provenance_store = open_provenance_store(
     run_dir / Path("vecherinka_provenance.sqlite3"), run_dir)
   context.runtime_log(
@@ -1981,7 +2247,8 @@ proc execute_flows*[A](
     open_global_events(context)
     start_codex_readers(readers, context, active_runtime)
     readers_started = true
-    result = init_work_plan(top_level_flows, context)
+    result = init_work_plan(
+      top_level_flows, context, initial_budget, pool_weights)
     plan_initialized = true
     let input_meta = ArtifactMeta(
       id: 0,

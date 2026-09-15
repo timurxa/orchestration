@@ -10,14 +10,14 @@ type
   POCOutput = object
     response: string
 
-const model_profile = "gpt-5.6-luna".medium
+const profile = luna.medium
 
-expandMacros: vecherinka(solve):
-  > answer POCInput ~> POCOutput {.entry.}:
-    model_profile[POCInput, POCOutput](
-      "Return a short response. Set response to exactly `provenance-poc-ok`.")
+expandMacros: vecherinka(solve, default_agent_prompt_templates):
+  > respond POCInput ~> POCOutput {.entry.}:
+    profile[POCInput, POCOutput]("Return a short response. Set response to exactly `provenance-poc-ok`.")
 
-let output = solve(POCInput(request: "provenance logging proof of concept"))
+let output = solve(POCInput(request: "provenance logging proof of concept"),
+  100.0, default_agent_prompt_templates)
 if output.response != "provenance-poc-ok":
   quit("unexpected child response: " & output.response, QuitFailure)
 echo "child-response: ", output.response

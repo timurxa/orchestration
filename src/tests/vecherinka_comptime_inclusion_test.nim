@@ -657,7 +657,7 @@ type Bad = ref object
     check compile_reject("""
 import std/macros
 include vecherinka
-const cheap = "test".minimal
+const cheap = luna.minimal
 expandMacros: vecherinka(bad):
   > start int ~> void {.entry.}:
     cheap[int, void]("return nothing")
@@ -701,7 +701,7 @@ static:
 suite "artifact_tree generated output verifier":
   test "named prompt substitutions render runtime values":
     let spec = LlmCallSpec[TestOutput](
-      profile: ProfileSpec(model: "test-model", effort: re_low),
+      profile: ProfileSpec(model: luna, effort: re_low),
       prompt: "do task",
       prompt_templates: default_agent_prompt_templates,
       materialized_input: "input.text: string = value\n",
@@ -712,7 +712,7 @@ suite "artifact_tree generated output verifier":
       materialize: nil)
     check format_agent_prompt(
       "$task|$input|$working_dir|$runtime_dir|$model|$effort", spec) ==
-      "do task|\n\ninput:\ninput.text: string = value\n|/work|/runtime|test-model|re_low"
+      "do task|\n\ninput:\ninput.text: string = value\n|/work|/runtime|gpt-5.6-luna|re_low"
 
   test "goal and finish_work text come from prompt templates":
     let templates = AgentPromptTemplates(
@@ -721,7 +721,7 @@ suite "artifact_tree generated output verifier":
       turn_prompt: "turn text for $task",
       finish_work_description: "tool text")
     let spec = LlmCallSpec[TestOutput](
-      profile: ProfileSpec(model: "test-model", effort: re_low),
+      profile: ProfileSpec(model: luna, effort: re_low),
       prompt: "do task",
       prompt_templates: templates,
       materialized_input: "",

@@ -29,9 +29,9 @@ type
     sources: seq[string]
     caveats: seq[string]
 
-const research_profile = "gpt-5.6-luna".medium
+const research_profile = luna.medium
 
-vecherinka(solve_parallel_research):
+vecherinka(solve_parallel_research, default_agent_prompt_templates):
   > make_plan InformationRequest ~> ResearchPlan:
     research_profile[InformationRequest, ResearchPlan](
       "Copy the original request into the request field. Turn it into exactly four distinct, non-overlapping research topics. " &
@@ -66,7 +66,8 @@ let request = InformationRequest(
 let log_file = new_log_file_sink("parallel-research.jsonl")
 let logger = new_structured_logger(log_file.sink, run_id = "parallel-research")
 try:
-  let report = solve_parallel_research(request, logger = logger)
+  let report = solve_parallel_research(request, 100.0,
+    default_agent_prompt_templates, logger = logger)
   echo "RECOMMENDATION: ", report.recommendation
   for rationale in report.rationale:
     echo "RATIONALE: ", rationale

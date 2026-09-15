@@ -16,7 +16,7 @@ proc `$`(value: Location): string {.borrow.}
 proc `$`(value: Codebase): string {.borrow.}
 proc `$`(value: Issues): string {.borrow.}
 
-const cheap = "gpt-5.6-luna".medium
+const cheap = luna.medium
 
 const manual_agent_prompts = AgentPromptTemplates(
   developer_instructions: checked_prompt(
@@ -67,7 +67,8 @@ let debug_logger = new_structured_logger(
 
 try:
   echo "test: calling generated solve"
-  let debug_value = solve(simple, logger = debug_logger)
+  let debug_value = solve(simple, 100.0, manual_agent_prompts,
+    logger = debug_logger)
   echo "test: generated solve returned ", debug_value[0].number,
     " and ", debug_value[1].number
 finally:

@@ -89,7 +89,7 @@ type
     variant: Stage10Variant
     items: seq[Stage10Item]
 
-const profile = "gpt-5.6-luna".medium
+const profile = luna.medium
 
 const stepping_agent_prompts = AgentPromptTemplates(
   developer_instructions: checked_prompt(
@@ -238,7 +238,7 @@ let stage = if paramCount() == 0: "stage-0" else: paramStr(1)
 if stage == "stage-0":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-0")
   let input = BaselineInput(marker: "stage-0-marker-7f3c")
-  let output = solve(input, logger = logger)
+  let output = solve(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output.answer == input.marker,
     "baseline answer mismatch: expected exact marker"
   echo "DIRECT_RESULT answer=", output.answer
@@ -246,7 +246,7 @@ if stage == "stage-0":
 elif stage == "stage-1":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-1")
   let input = Stage1Input(first: "first-marker-51a9", second: "second-marker-b802")
-  let output = solve_stage_1(input, logger = logger)
+  let output = solve_stage_1(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output.first_copy == input.first,
     "stage 1 first field mismatch"
   doAssert output.second_copy == input.second,
@@ -257,7 +257,7 @@ elif stage == "stage-1":
 elif stage == "stage-2":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-2")
   let input = Stage2Input(marker: "stage-2-marker-a14e")
-  let output = solve_stage_2(input, logger = logger)
+  let output = solve_stage_2(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output.answer == input.marker,
     "stage 2 answer mismatch"
   echo "DIRECT_RESULT answer=", output.answer
@@ -265,7 +265,7 @@ elif stage == "stage-2":
 elif stage == "stage-3":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-3")
   let input = Stage3Input(marker: "stage-3-marker-9c2d")
-  let output = solve_stage_3(input, logger = logger)
+  let output = solve_stage_3(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output.left == input.marker,
     "stage 3 left mismatch"
   doAssert output.right == input.marker,
@@ -275,7 +275,7 @@ elif stage == "stage-3":
 elif stage == "stage-3-fan":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-3-fan")
   let input = Stage3Input(marker: "stage-3-fan-marker-6e41")
-  let output = solve_stage_3_fan(input, logger = logger)
+  let output = solve_stage_3_fan(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output[0].left_value == input.marker,
     "stage 3 fan left mismatch"
   doAssert output[1].right_value == input.marker,
@@ -286,7 +286,7 @@ elif stage == "stage-3-fan":
 elif stage == "stage-4":
   let model_logger = new_structured_logger(emit_log, run_id = "stepping-stage-4-model")
   let model_input = Stage4Input(mode: "model", marker: "stage-4-model-marker-2b7a")
-  let model_output = solve_stage_4(model_input, logger = model_logger)
+  let model_output = solve_stage_4(model_input, 100.0, stepping_agent_prompts, logger = model_logger)
   doAssert model_output.answer == model_input.marker,
     "stage 4 model route mismatch"
   echo "DIRECT_RESULT model_answer=", model_output.answer
@@ -294,7 +294,7 @@ elif stage == "stage-4":
 
   let pure_logger = new_structured_logger(emit_log, run_id = "stepping-stage-4-pure")
   let pure_input = Stage4Input(mode: "pure", marker: "stage-4-pure-marker-18d6")
-  let pure_output = solve_stage_4(pure_input, logger = pure_logger)
+  let pure_output = solve_stage_4(pure_input, 100.0, stepping_agent_prompts, logger = pure_logger)
   doAssert pure_output.answer == "pure:" & pure_input.marker,
     "stage 4 pure route mismatch"
   echo "DIRECT_RESULT pure_answer=", pure_output.answer
@@ -302,7 +302,7 @@ elif stage == "stage-4":
 elif stage == "stage-5":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-5")
   let input = Stage5Input(marker: "stage-5-selected-4d91", ignored: "must-not-reach-model")
-  let output = solve_stage_5(input, logger = logger)
+  let output = solve_stage_5(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output.answer == input.marker,
     "stage 5 projection mismatch"
   echo "DIRECT_RESULT answer=", output.answer
@@ -311,7 +311,7 @@ elif stage == "stage-6":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-6")
   let input = Stage6Input(
     source: Location("stepping_runs/stage-06/trial-00/source.txt"))
-  let output = solve_stage_6(input, logger = logger)
+  let output = solve_stage_6(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output.summary == "stage-6-input-payload-83ce\n",
     "stage 6 summary mismatch"
   doAssert $output.artifact == "result.txt",
@@ -324,7 +324,7 @@ elif stage == "stage-7":
   let input = @[
     Stage7Item(marker: "stage-7-item-0-4b28"),
     Stage7Item(marker: "stage-7-item-1-cd73")]
-  let output = solve_stage_7(input, logger = logger)
+  let output = solve_stage_7(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output.len == input.len,
     "stage 7 sequence length mismatch"
   for index in 0 ..< input.len:
@@ -336,7 +336,7 @@ elif stage == "stage-7":
 elif stage == "stage-8":
   let present_logger = new_structured_logger(emit_log, run_id = "stepping-stage-8-option-present")
   let present_input = some(Stage8Item(marker: "stage-8-option-present-a12f"))
-  let present_output = solve_stage_8_option(present_input, logger = present_logger)
+  let present_output = solve_stage_8_option(present_input, 100.0, stepping_agent_prompts, logger = present_logger)
   doAssert present_output.isSome,
     "stage 8 present option disappeared"
   doAssert present_output.get.result == present_input.get.marker,
@@ -346,7 +346,7 @@ elif stage == "stage-8":
 
   let absent_logger = new_structured_logger(emit_log, run_id = "stepping-stage-8-option-absent")
   let absent_input = none(Stage8Item)
-  let absent_output = solve_stage_8_option(absent_input, logger = absent_logger)
+  let absent_output = solve_stage_8_option(absent_input, 100.0, stepping_agent_prompts, logger = absent_logger)
   doAssert absent_output.isNone,
     "stage 8 absent option became present"
   echo "DIRECT_RESULT option_absent=none"
@@ -355,7 +355,7 @@ elif stage == "stage-8":
   let tuple_logger = new_structured_logger(emit_log, run_id = "stepping-stage-8-tuple")
   let tuple_input = (Stage8Context(label: "context-8"),
                      Stage8Item(marker: "stage-8-tuple-7c4b"))
-  let tuple_output = solve_stage_8_tuple(tuple_input, logger = tuple_logger)
+  let tuple_output = solve_stage_8_tuple(tuple_input, 100.0, stepping_agent_prompts, logger = tuple_logger)
   doAssert tuple_output[0].label == tuple_input[0].label,
     "stage 8 tuple context changed"
   doAssert tuple_output[1].result == tuple_input[1].marker,
@@ -368,7 +368,7 @@ elif stage == "stage-8":
   let object_input = Stage8Container(
     label: "object-context-8",
     item: Stage8Item(marker: "stage-8-object-5e20"))
-  let object_output = solve_stage_8_object(object_input, logger = object_logger)
+  let object_output = solve_stage_8_object(object_input, 100.0, stepping_agent_prompts, logger = object_logger)
   doAssert object_output.label == object_input.label,
     "stage 8 object label changed"
   doAssert object_output.item.marker == "processed:" & object_input.item.marker,
@@ -382,7 +382,7 @@ elif stage == "stage-9":
     common: "variant-common-9",
     kind: text_branch,
     text: "variant-text-9")
-  let variant_output = solve_stage_9_variant(variant_input, logger = variant_logger)
+  let variant_output = solve_stage_9_variant(variant_input, 100.0, stepping_agent_prompts, logger = variant_logger)
   doAssert variant_output.common == variant_input.common,
     "stage 9 variant common field changed"
   doAssert variant_output.kind == text_branch,
@@ -395,7 +395,7 @@ elif stage == "stage-9":
 
   let tuple_logger = new_structured_logger(emit_log, run_id = "stepping-stage-9-tuple")
   let tuple_input: Stage9NamedTuple = (first: 31, second: "named-tuple-9")
-  let tuple_output = solve_stage_9_tuple(tuple_input, logger = tuple_logger)
+  let tuple_output = solve_stage_9_tuple(tuple_input, 100.0, stepping_agent_prompts, logger = tuple_logger)
   doAssert tuple_output.first == tuple_input.first,
     "stage 9 named tuple first changed"
   doAssert tuple_output.second == tuple_input.second,
@@ -406,7 +406,7 @@ elif stage == "stage-9":
 
   let fixed_logger = new_structured_logger(emit_log, run_id = "stepping-stage-9-fixed")
   let fixed_input: Stage9Fixed = [11, 22, 33]
-  let fixed_output = solve_stage_9_fixed(fixed_input, logger = fixed_logger)
+  let fixed_output = solve_stage_9_fixed(fixed_input, 100.0, stepping_agent_prompts, logger = fixed_logger)
   doAssert fixed_output == fixed_input,
     "stage 9 fixed array values changed"
   echo "DIRECT_RESULT fixed_array=", fixed_output[0], ",", fixed_output[1], ",", fixed_output[2]
@@ -425,7 +425,7 @@ elif stage == "stage-10":
       Stage10Item(
         marker: "stage-10-item-1-71cf",
         source: Location("stepping_runs/stage-10/trial-00/source.txt"))])
-  let output = solve_stage_10(input, logger = logger)
+  let output = solve_stage_10(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output[0].len == input.items.len,
     "stage 10 lifted sequence length mismatch"
   for index in 0 ..< input.items.len:
@@ -450,7 +450,7 @@ elif stage == "stage-11":
     os.setCurrentDir($root)
     let logger = new_structured_logger(emit_log, run_id = "stepping-stage-11")
     let input = StaticWriteInput(marker: "stage-11-static-write-9ac4")
-    let output = solve_stage_11(input, logger = logger)
+    let output = solve_stage_11(input, 100.0, stepping_agent_prompts, logger = logger)
     doAssert output.contents == input.marker,
       "stage 11 output contents mismatch"
     doAssert fileExists(output.path),
