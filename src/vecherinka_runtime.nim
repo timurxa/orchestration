@@ -8,6 +8,7 @@ import std/[json, options, tables, posix, strutils, os,
 import codex_json
 import codex_runtime
 import structured_log
+import vecherinka_provenance
 
 type
   ArtifactID* = uint64
@@ -277,6 +278,7 @@ type
     ## working directory, not an individual artifact directory.
     runtime_dir*: Path
     run_dir*: Path
+    provenance_store*: ProvenanceStore
     next_artifact_id*: ArtifactID
     codex_runtime*: ptr CodexRuntime
     pending_agent_starts*: Table[string, PendingAgentStart[A]]
@@ -825,6 +827,7 @@ proc new_runtime_context*[A](
   result.next_request_id = 0
   result.runtime_dir = if $runtime_dir == "": run_dir else: runtime_dir
   result.run_dir = run_dir
+  result.provenance_store = nil
   result.next_artifact_id = 0
   result.codex_runtime = nil
   result.pending_agent_starts = initTable[string, PendingAgentStart[A]]()
@@ -878,6 +881,11 @@ proc allocate_artifact_meta*[A](
   reserve_artifact_meta(
     context, predecessor_ids, operation, flow_kind, request_id)
 
+proc lookup_artifact*[A](
+    context: RuntimeContext[A];
+    artifact_id: ArtifactID
+): ArtifactRecord[A]
+
 proc register_artifact*[A](
     context: RuntimeContext[A];
     data: A;
@@ -888,7 +896,12 @@ proc register_artifact*[A](
     raise newException(ValueError, "cannot register artifact without context")
   if context.artifacts.hasKey(meta.id):
     raise newException(ValueError, "artifact ID already registered: " & $meta.id)
+  var predecessor_dirs: seq[Path] = @[]
+  for predecessor_id in meta.predecessor_ids:
+    predecessor_dirs.add(lookup_artifact(context, predecessor_id).meta.artifact_dir)
   context.artifacts[meta.id] = ArtifactRecord[A](data: data, meta: meta)
+  if not context.provenance_store.isNil:
+    context.provenance_store.record_artifact(meta.artifact_dir, predecessor_dirs)
   result = meta.id
   ## One bounded commit event is canonical provenance input. Consumers can
   ## reconstruct the graph from these records without a final giant snapshot.
@@ -1946,6 +1959,8 @@ proc execute_flows*[A](
   let run_dir = create_run_directory(source_root)
   let context = new_runtime_context(
     submitter, transport, run_dir, source_root, logger)
+  context.provenance_store = open_provenance_store(
+    run_dir / Path("vecherinka_provenance.sqlite3"), run_dir)
   context.runtime_log(
     "run.start",
     "vecherinka",
@@ -1993,6 +2008,15 @@ proc execute_flows*[A](
     else:
       context.runtime_log("run.abort", "vecherinka",
         log_fields(("reason", %"plan initialization failed")))
+    if not context.provenance_store.isNil:
+      let status = if result.failed:
+        "failed"
+      elif result.finished:
+        "finished"
+      else:
+        "aborted"
+      context.provenance_store.set_status(status)
+      context.provenance_store.close()
     if readers_started:
       stop_codex_readers(readers)
     retire_llm_tool_bindings(cast[pointer](context), owned_runtime)
