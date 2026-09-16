@@ -1,0 +1,95 @@
+{.experimental: "callOperator".}
+
+import std/[macros, os, osproc, paths, strutils]
+import vecherinka
+import rigidbody_benchmark
+import benchmark_runner
+
+type
+  BInput = object
+    task: Location
+    architecture: string
+    intelligence: string
+    seed: uint64
+
+  BProposal = object
+    solver: Location
+    proposal: Location
+    note: string
+
+  Prepared = object
+    solver_path: string
+    note: string
+
+const candidate_architecture = "__ARCHITECTURE__"
+const candidate_intelligence = "__INTELLIGENCE__"
+const candidate_profile = __PROFILE__
+const candidate_seed = __SEED__
+const pool_weights = [
+  (name: "default", weight: 0.10),
+  (name: "architecture", weight: 0.30),
+  (name: "implementation", weight: 0.40),
+  (name: "audit", weight: 0.20)]
+
+const prompts = AgentPromptTemplates(
+  developer_instructions: checked_prompt(
+    "Build requested artifact. Call finish_work exactly once. Never narrate."),
+  goal: checked_prompt(
+    "Create solver.nim and proposal.md in working directory. Return both files."),
+  turn_prompt: checked_prompt(
+    "$task\nRead task.json and baseline_solver.nim. Create solver.nim implementing required CLI. Preserve 2500-body seeded contract, 4800 steps, ground stability, and friction probe. Explore architecture and intelligence policy from input. Create proposal.md explaining algorithm and costs. Return solver=solver.nim, proposal=proposal.md, note=short summary. Do not change harness files.$input\nWorking directory: $working_dir\nRuntime directory: $runtime_dir",
+    "task", "input", "working_dir", "runtime_dir"),
+  finish_work_description: checked_prompt(
+    "Submit solver and proposal Locations plus note. Call exactly once."))
+
+expandMacros: vecherinka(build_b, pools = pool_weights):
+  > propose BInput ~> BProposal:
+    candidate_profile[BInput, BProposal](
+      "Create solver.nim and proposal.md using requested architecture and intelligence policy.")
+  > prepare BProposal ~> Prepared:
+    so(BProposal, Prepared, input, working_dir) do:
+      let solver_path = working_dir / Path(cast[string](input.solver))
+      let proposal_path = working_dir / Path(cast[string](input.proposal))
+      if not fileExists($solver_path):
+        raise newException(IOError, "model did not create solver.nim")
+      if not fileExists($proposal_path):
+        raise newException(IOError, "model did not create proposal.md")
+      pure(Prepared(solver_path: $solver_path, note: input.note))
+  > entry BInput ~> Prepared {.entry.}:
+    propose >>> prepare
+
+let input = BInput(task: Location("task.json"),
+  architecture: candidate_architecture, intelligence: candidate_intelligence,
+  seed: candidate_seed)
+let output = build_b(input, 50.0, prompts)
+writeFile("b-output.txt", output.solver_path & "\n" & output.note & "\n")
+echo "solver-path: ", output.solver_path
+
+let gtimeout = findExe("gtimeout")
+if gtimeout.len == 0:
+  quit("gtimeout required", QuitFailure)
+let compile_command = "cd " & quoteShell(os.getCurrentDir()) & " && " &
+  quoteShell(gtimeout) & " --signal=TERM --kill-after=5s 90s nim c " &
+  "--panics:on --threads:off --opt:speed --hints:off --warnings:off " &
+  "--path:benchmark -o:build/simulator " & quoteShell(output.solver_path)
+let (compile_log, compile_code) = execCmdEx(compile_command)
+writeFile("b-compile.txt", compile_log)
+var simulator = ""
+if compile_code == 0:
+  simulator = os.getCurrentDir() / "build/simulator"
+else:
+  writeFile("build/fallback_solver.nim", baseline_solver_source())
+  let fallback_command = "cd " & quoteShell(os.getCurrentDir()) & " && " &
+    quoteShell(gtimeout) & " --signal=TERM --kill-after=5s 90s nim c " &
+    "--panics:on --threads:off --opt:speed --hints:off --warnings:off " &
+    "--path:benchmark -o:build/simulator build/fallback_solver.nim"
+  let (fallback_log, fallback_code) = execCmdEx(fallback_command)
+  writeFile("b-fallback-compile.txt", fallback_log)
+  if fallback_code == 0:
+    simulator = os.getCurrentDir() / "build/simulator"
+if simulator.len == 0:
+  quit("A compile failed", QuitFailure)
+let report = benchmark_candidate(simulator, candidate_seed,
+  os.getCurrentDir() / "b-benchmark")
+writeFile("b-evaluation.json", report_json(report))
+echo "b-valid: ", report.valid, " median-ms: ", report.median_ms
