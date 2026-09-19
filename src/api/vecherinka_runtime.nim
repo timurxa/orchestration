@@ -107,9 +107,10 @@ type
       branches*: seq[Flow[A]]
       coalesce*: proc(values: seq[A]): A {.nimcall.}
     of fk_so:
-      ## `working_dir` belongs to current value's artifact. It is available
-      ## for synchronous side effects without exposing RuntimeContext.
-      execute*: proc(input: A; working_dir: Path;
+      ## `runtime_dir` is the stable run root used to resolve canonical
+      ## Location values. `working_dir` belongs to the current value's
+      ## artifact and is where this callback may create output files.
+      execute*: proc(input: A; runtime_dir, working_dir: Path;
         budget: BudgetContext): Flow[A] {.nimcall.}
     of fk_lift:
       inner*: Flow[A]
@@ -173,6 +174,7 @@ type
     arguments*: JsonNode
     ## Runtime-only root used by generated Location verification. Transports
     ## leave it empty; the owner thread supplies it before materialization.
+    runtime_dir*: Path
     working_dir*: Path
 
   LlmToolBinding* = object
@@ -363,7 +365,7 @@ const default_agent_prompt_templates* = AgentPromptTemplates(
   developer_instructions: "Complete task. Call finish_work exactly once when done. Never narrate. The file vecherinka_model_input_materialization.txt in the working directory contains raw artifact data passed to you.",
   goal: "Complete task. Call `finish_work` exactly once after completion." &
     " Put final result in finish_work arguments. Never narrate.",
-  turn_prompt: "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nThe file vecherinka_model_input_materialization.txt in $working_dir contains raw artifact data passed to you. Read it for exact input values.\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
+  turn_prompt: "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nThe file vecherinka_model_input_materialization.txt in $working_dir contains raw artifact data passed to you. Read it for exact input values.\nLocation rules:\n- Input Location values are canonical paths relative to $runtime_dir; resolve them from runtime_dir, never working_dir.\n- Output Location values are filenames relative to this model call's working_dir; create them there before returning.\n- Runtime validates outputs, canonicalizes them relative to runtime_dir, and makes them available downstream.\n- Never return absolute paths or assume a raw output filename is a cross-call reference.\n$input",
   finish_work_description: "Submit final structured result. Call exactly once when task is complete.")
 
 proc valid_budget_value(value: Budget): bool {.inline.} =
@@ -1191,6 +1193,20 @@ proc verify_location_payload*(working_dir: Path; location: string): string =
     return "Location source does not exist: " & $source
   ""
 
+proc canonicalize_output_location*(
+    runtime_dir, working_dir: Path; location: string
+): string =
+  ## Validate an output Location in its producer directory, then return the
+  ## stable runtime-relative spelling used by later flow consumers.
+  let error = verify_location_payload(working_dir, location)
+  if error.len != 0:
+    raise newException(IOError, error)
+  let source = working_dir / Path(location)
+  if not source.isRelativeTo(runtime_dir):
+    raise newException(IOError,
+      "Location source is outside runtime directory: " & $source)
+  $relativePath(source, runtime_dir)
+
 proc allocate_request_id[A](context: RuntimeContext[A]): RequestId =
   result = RequestId(kind: rid_integer,
     integer_value: context.next_request_id)
@@ -1945,7 +1961,8 @@ proc handle_invocation*[A](
       let working_dir = lookup_artifact(
         plan.context, value_id).meta.artifact_dir
       let child = current.execute(
-        value, working_dir, plan.budget.budget_context(active_pool))
+        value, plan.context.runtime_dir, working_dir,
+        plan.budget.budget_context(active_pool))
       let child_destination = prepend_continuation(current.continuation,
         destination)
       if child.isNil:
@@ -2048,6 +2065,7 @@ proc handle_runtime_event[A](
       materialize(event.output_kind, LlmOutput(
         tool_name: event.output_tool_name,
         arguments: parseJson(event.output_arguments),
+        runtime_dir: plan.context.runtime_dir,
         working_dir: output_meta.artifact_dir))
     except CatchableError as error:
       ModelMaterialization[A](ok: false, error: error.msg)

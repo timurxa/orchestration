@@ -123,6 +123,17 @@ proc so_syntax*[A, B](
 ): FlowSpec[A, B] =
   FlowSpec[A, B](ir: FlowIR(kind: firk_so))
 
+proc so_syntax*[A, B](
+    fn: proc(input: A; runtime_dir, working_dir: Path): FlowSpec[void, B]
+): FlowSpec[A, B] =
+  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
+
+proc so_syntax*[A, B](
+    fn: proc(input: A; runtime_dir, working_dir: Path;
+      budget: BudgetContext): FlowSpec[void, B]
+): FlowSpec[A, B] =
+  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
+
 macro so*(domain, codomain, pattern, body: untyped): untyped =
   let parameter = ident(pattern.strVal)
   result = quote do:
@@ -135,6 +146,16 @@ macro so*(domain, codomain, pattern, working_dir_name, body: untyped): untyped =
   result = quote do:
     so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
         `working_dir_parameter`: Path):
+      FlowSpec[void, `codomain`] = `body`)
+
+macro so*(domain, codomain, pattern, runtime_dir_name,
+    working_dir_name, body: untyped): untyped =
+  let parameter = ident(pattern.strVal)
+  let runtime_dir_parameter = ident(runtime_dir_name.strVal)
+  let working_dir_parameter = ident(working_dir_name.strVal)
+  result = quote do:
+    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
+        `runtime_dir_parameter`: Path; `working_dir_parameter`: Path):
       FlowSpec[void, `codomain`] = `body`)
 
 macro so_budget*(domain, codomain, pattern, budget_name, body: untyped): untyped =
@@ -153,6 +174,18 @@ macro so_budget*(domain, codomain, pattern, working_dir_name,
   result = quote do:
     so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
         `working_dir_parameter`: Path;
+        `budget_parameter`: BudgetContext):
+      FlowSpec[void, `codomain`] = `body`)
+
+macro so_budget*(domain, codomain, pattern, runtime_dir_name,
+    working_dir_name, budget_name, body: untyped): untyped =
+  let parameter = ident(pattern.strVal)
+  let runtime_dir_parameter = ident(runtime_dir_name.strVal)
+  let working_dir_parameter = ident(working_dir_name.strVal)
+  let budget_parameter = ident(budget_name.strVal)
+  result = quote do:
+    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
+        `runtime_dir_parameter`: Path; `working_dir_parameter`: Path;
         `budget_parameter`: BudgetContext):
       FlowSpec[void, `codomain`] = `body`)
 
@@ -685,19 +718,21 @@ proc so_parts(
 
 proc so_lambda_parts(
     lambda: NimNode;
-    parameter, input_type, working_dir_parameter, budget_parameter,
+    parameter, input_type, runtime_dir_parameter, working_dir_parameter,
+    budget_parameter,
     body: var NimNode
 ): bool =
   if lambda.kind != nnkLambda or lambda.len < 7:
     return false
   let formals = lambda[3]
-  if formals.kind != nnkFormalParams or formals.len notin 2 .. 4:
+  if formals.kind != nnkFormalParams or formals.len notin 2 .. 5:
     return false
   if formals[1].kind != nnkIdentDefs or formals[1].len != 3 or
       formals[1][0].kind != nnkSym:
     return false
   parameter = formals[1][0]
   input_type = formals[1][1]
+  runtime_dir_parameter = newEmptyNode()
   working_dir_parameter = newEmptyNode()
   budget_parameter = newEmptyNode()
   if formals.len >= 3:
@@ -705,18 +740,32 @@ proc so_lambda_parts(
       formals[2][0].kind != nnkSym:
       return false
     if formals[2][1].is_named("Path"):
-      working_dir_parameter = formals[2][0]
+      if formals.len >= 4 and formals[3].kind == nnkIdentDefs and
+          formals[3].len == 3 and formals[3][1].is_named("Path"):
+        runtime_dir_parameter = formals[2][0]
+        working_dir_parameter = formals[3][0]
+      else:
+        working_dir_parameter = formals[2][0]
     elif formals[2][1].is_named("BudgetContext"):
       budget_parameter = formals[2][0]
     else:
       return false
-  if formals.len == 4:
+  if formals.len == 4 and working_dir_parameter.kind != nnkEmpty and
+      runtime_dir_parameter.kind == nnkEmpty:
     if working_dir_parameter.kind == nnkEmpty or
         formals[3].kind != nnkIdentDefs or formals[3].len != 3 or
         formals[3][0].kind != nnkSym or
         not formals[3][1].is_named("BudgetContext"):
       return false
     budget_parameter = formals[3][0]
+  if formals.len == 5:
+    if runtime_dir_parameter.kind == nnkEmpty or
+        working_dir_parameter.kind == nnkEmpty or
+        formals[4].kind != nnkIdentDefs or formals[4].len != 3 or
+        formals[4][0].kind != nnkSym or
+        not formals[4][1].is_named("BudgetContext"):
+      return false
+    budget_parameter = formals[4][0]
   if lambda[6].kind != nnkAsgn or lambda[6].len != 2:
     return false
   body = lambda[6][1]
@@ -1161,16 +1210,18 @@ proc walk_artifact_tree*[T](
     result.add(case_statement)
   of ank_seq:
     let index = genSym(nskForVar, "artifact_index")
-    let item = genSym(nskForVar, "artifact_item")
     let sequence_value = artifact_runtime_value(node, value)
+    let index_range = newTree(nnkInfix, ident(".."),
+      newCall(bindSym("low"), sequence_value),
+      newCall(bindSym("high"), sequence_value))
     result = newTree(
       nnkForStmt,
       index,
-      item,
-      newCall(bindSym("pairs"), sequence_value),
-        walk_artifact_tree(
+      index_range,
+      walk_artifact_tree(
         node.element,
-        item,
+        newTree(nnkBracketExpr, copyNimTree(sequence_value),
+          copyNimTree(index)),
         append_artifact_sequence_path(path, index,
           if node.fixed_array: node.fixed_lower_bound else: 0),
         state,
@@ -1272,6 +1323,10 @@ type
     working_dir: NimNode
     errors: NimNode
 
+  NormalizeLocationsEmitState = object
+    runtime_dir: NimNode
+    working_dir: NimNode
+
 proc verify_locations_callback(
     node: ArtifactNode;
     value, path: NimNode;
@@ -1291,6 +1346,37 @@ proc verify_locations_callback(
         `working_dir`, `location_value`)
       if `verification_error`.len != 0:
         `errors`.add(`path_copy` & ": " & `verification_error` & "\n")
+  else:
+    nil
+
+proc normalize_locations_callback(
+    node: ArtifactNode;
+    value, path: NimNode;
+    state: var NormalizeLocationsEmitState
+): NimNode =
+  case node.kind
+  of ank_inline, ank_option_none:
+    return newStmtList()
+  of ank_option:
+    let option_item = genSym(nskVar, "normalized_option_item")
+    let option_value = copyNimTree(value)
+    let option_body = walk_artifact_tree(
+      node.element, option_item, path, state, normalize_locations_callback)
+    quote do:
+      if isSome(`option_value`):
+        var `option_item` = get(`option_value`)
+        `option_body`
+        `option_value` = some(`option_item`)
+  of ank_location:
+    let normalized = genSym(nskLet, "normalized_location")
+    let runtime_dir = copyNimTree(state.runtime_dir)
+    let working_dir = copyNimTree(state.working_dir)
+    let location_type = copyNimTree(node.type_expr)
+    let location_value = quote do: cast[string](`value`)
+    quote do:
+      let `normalized` = canonicalize_output_location(
+        `runtime_dir`, `working_dir`, `location_value`)
+      `value` = cast[`location_type`](`normalized`)
   else:
     nil
 
@@ -1541,7 +1627,9 @@ proc emit_model_materializer(
     emit_wire_conversion(output_tree, parsed_value, output_type)
   else:
     copyNimTree(parsed_value)
-  let packed_output = registry.emit_artifact_pack(output_type, packed_value)
+  let normalized_value = genSym(nskVar, "model_normalized_output")
+  let packed_output = registry.emit_artifact_pack(
+    output_type, normalized_value)
   let location_errors = genSym(nskVar, "location_errors")
   var verify_state = VerifyLocationsEmitState(
     working_dir: newDotExpr(
@@ -1560,6 +1648,20 @@ proc emit_model_materializer(
       return ModelMaterialization[`artifact_name`](
         ok: false,
         error: "invalid finish_work locations: " & `location_errors`)
+  var normalize_state = NormalizeLocationsEmitState(
+    runtime_dir: newDotExpr(
+      copyNimTree(materializer_output), ident("runtime_dir")),
+    working_dir: newDotExpr(
+      copyNimTree(materializer_output), ident("working_dir")))
+  let normalize_locations_body = walk_artifact_tree(
+    output_tree,
+    normalized_value,
+    newLit("output"),
+    normalize_state,
+    normalize_locations_callback)
+  let normalize_locations = quote do:
+    var `normalized_value` = `packed_value`
+    `normalize_locations_body`
   let output_contract_expr = model_output_contract(output_type)
   let materializer_body = quote do:
     case `materializer_kind`
@@ -1573,6 +1675,7 @@ proc emit_model_materializer(
           error: "invalid finish_work result (" &
             $`parsed_output`.issues.len & " schema issues)")
       `verify_locations`
+      `normalize_locations`
       return ModelMaterialization[`artifact_name`](
         ok: true,
         value: `packed_output`)
@@ -2260,10 +2363,10 @@ proc lower_so(
     flow_type, lambda: NimNode;
     context: var FlowWalkContext
 ): NimNode =
-  var parameter, input_type, working_dir_parameter, budget_parameter,
-      body: NimNode
+  var parameter, input_type, runtime_dir_parameter, working_dir_parameter,
+      budget_parameter, body: NimNode
   doAssert so_lambda_parts(lambda, parameter, input_type,
-    working_dir_parameter, budget_parameter, body),
+    runtime_dir_parameter, working_dir_parameter, budget_parameter, body),
     "malformed so callback"
 
   let domain = flow_type[1]
@@ -2272,12 +2375,16 @@ proc lower_so(
 
   let artifact_name = context.artifact_registry.artifact_name
   let artifact_input = genSym(nskParam, "so_artifact")
+  let so_runtime_dir = genSym(nskParam, "so_runtime_dir")
   let so_working_dir = genSym(nskParam, "so_working_dir")
   let typed_input = genSym(nskLet, "so_input")
   let unpacked = context.artifact_registry.emit_artifact_unpack(
     domain, artifact_input)
   let transformed_body = map_nim_tree(body, context)
   var rebound_body = replace_symbol(transformed_body, parameter, typed_input)
+  if runtime_dir_parameter.kind != nnkEmpty:
+    rebound_body = replace_symbol(
+      rebound_body, runtime_dir_parameter, so_runtime_dir)
   if working_dir_parameter.kind != nnkEmpty:
     rebound_body = replace_symbol(
       rebound_body, working_dir_parameter, so_working_dir)
@@ -2285,7 +2392,8 @@ proc lower_so(
   if budget_parameter.kind != nnkEmpty:
     rebound_body = replace_symbol(rebound_body, budget_parameter, so_budget)
   let expand = quote do:
-    proc (`artifact_input`: `artifact_name`; `so_working_dir`: Path;
+    proc (`artifact_input`: `artifact_name`; `so_runtime_dir`,
+        `so_working_dir`: Path;
         `so_budget`: BudgetContext):
         Flow[`artifact_name`] {.nimcall.} =
       let `typed_input` = `unpacked`

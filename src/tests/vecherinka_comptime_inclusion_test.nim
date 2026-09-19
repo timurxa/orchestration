@@ -791,6 +791,7 @@ suite "artifact_tree generated output verifier":
     writeFile(root / "present.txt", "payload")
     let valid = test_located_output_materializer(0, LlmOutput(
       arguments: parseJson("{\"note\":\"ok\",\"artifact\":\"present.txt\"}"),
+      runtime_dir: Path(root),
       working_dir: Path(root)))
     check valid.ok
     let invalid = test_located_output_materializer(0, LlmOutput(
@@ -846,6 +847,7 @@ suite "artifact_tree generated output verifier":
     writeFile(root / "second.txt", "second")
     let locations = test_fixed_location_output_materializer(0, LlmOutput(
       arguments: parseJson("{\"args\":[\"first.txt\",\"second.txt\"]}"),
+      runtime_dir: Path(root),
       working_dir: Path(root)))
     check locations.ok
     check cast[string](locations.value[0]) == "first.txt"
