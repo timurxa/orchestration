@@ -758,7 +758,7 @@ suite "artifact_tree generated output verifier":
       materialize: nil)
     check format_agent_prompt(
       "$task|$input|$working_dir|$runtime_dir|$model|$effort", spec) ==
-      "do task|\n\ninput:\ninput.text: string = value\n|/work|/runtime|gpt-5.6-luna|re_low"
+      "do task|\n\ninput:\ninput.text: string = value\n|/work|/runtime|gpt-6-luna|re_low"
 
   test "goal and finish_work text come from prompt templates":
     let templates = AgentPromptTemplates(

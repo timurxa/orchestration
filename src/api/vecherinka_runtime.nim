@@ -422,7 +422,7 @@ proc validate_pool_keyword(name: string) =
 
 proc model_name*(model: ModelProfile): string =
   case model
-  of luna: "gpt-5.6-luna"
+  of luna: "gpt-6-luna"
   of terra: "gpt-5.6-terra"
   of sol: "gpt-5.6-sol"
   of astra: "gpt-6-astra"
