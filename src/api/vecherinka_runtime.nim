@@ -82,6 +82,10 @@ type
     fk_pool_restore
 
   Flow*[A] = ref object
+    ## Stable generated code identity used by data-only checkpoints. Dynamic
+    ## `so` graphs must be reconstructed and registered before restoring any
+    ## invocation that refers to one of their nodes.
+    flow_key*: string
     continuation*: Flow[A]
     pool_id*: int
     case kind*: FlowKind
@@ -365,7 +369,7 @@ const default_agent_prompt_templates* = AgentPromptTemplates(
   developer_instructions: "Complete task. Call finish_work exactly once when done. Never narrate. The file vecherinka_model_input_materialization.txt in the working directory contains raw artifact data passed to you.",
   goal: "Complete task. Call `finish_work` exactly once after completion." &
     " Put final result in finish_work arguments. Never narrate.",
-  turn_prompt: "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nThe file vecherinka_model_input_materialization.txt in $working_dir contains raw artifact data passed to you. Read it for exact input values.\nLocation rules:\n- Input Location values are canonical paths relative to $runtime_dir; resolve them from runtime_dir, never working_dir.\n- Output Location values are filenames relative to this model call's working_dir; create them there before returning.\n- Runtime validates outputs, canonicalizes them relative to runtime_dir, and makes them available downstream.\n- Never return absolute paths or assume a raw output filename is a cross-call reference.\n$input",
+  turn_prompt: "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nThe file vecherinka_model_input_materialization.txt in $working_dir describes the exact input values.\nBlob rules:\n- Input Blob and BlobTree values are materialized under $working_dir; use those local paths.\n- For a Blob output, create a regular file in $working_dir and return its relative filename. For BlobTree, create a directory and return its relative path.\n- Vecherinka imports the output bytes before storing the value. Paths are local to this call and are not cross-call references.\n- Never return absolute paths, parent traversal, symbolic links, or paths outside $working_dir.\n$input",
   finish_work_description: "Submit final structured result. Call exactly once when task is complete.")
 
 proc valid_budget_value(value: Budget): bool {.inline.} =
