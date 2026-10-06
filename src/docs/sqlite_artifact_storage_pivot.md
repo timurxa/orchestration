@@ -397,9 +397,15 @@ querying becomes a required product feature.
   now returns a Blob value directly.
 - Verified the direct dynamic-`so` restore path, model-result commit-before-ACK
   ordering, pending-model retry, codec round trips, static key generation, and
-  generated path-free `so` compilation with focused tests. Full workflow
-  execution with the supplied Codex state and the complete focused suite are
-  still pending.
+  generated path-free `so` compilation with focused suites. Then ran the
+  four-topic parallel research workflow in an isolated disposable worktree
+  using the supplied local Codex state and `luna.low`: all six model attempts
+  committed, 13 artifacts were persisted, and the terminal checkpoint is
+  `finished`. The workflow produced `parallel-research.jsonl`; its run database
+  contains serialized artifact payloads and no per-artifact directories.
+  Official SQLite WAL and DuckDB concurrency documentation were spot-checked
+  against the report's source claims; the example itself has no web-search tool,
+  so the remaining report citations were not independently re-fetched.
 
 Potential reversal: callback replay relies on the documented purity contract,
 which Nim cannot enforce for arbitrary callback bodies. If users need
