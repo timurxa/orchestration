@@ -165,11 +165,13 @@ open.
 
 Artifact values are materialized in a temporary model-call workspace only
 while an agent is working. The runtime reads submitted file bytes back into
-the typed output before committing the artifact and checkpoint. Optional
-JSONL logs and `tools/artifact_graph.py` are diagnostic views; they are not
-required to resume and do not contain the artifact payloads. Legacy path-based
-provenance APIs and the `vecherinka_provenance_poc_runner` are separate from
-the SQLite execution path and do not describe the current storage contract.
+the typed output before committing the artifact and checkpoint. Optional JSONL
+logs and `tools/artifact_graph.py` are diagnostic views, not required to resume.
+Runtime logs can include serialized `finish_work` arguments, but they are not a
+complete or canonical artifact store; SQLite is authoritative. Legacy
+path-based provenance APIs and the `vecherinka_provenance_poc_runner` are
+separate from the SQLite execution path and do not describe the current storage
+contract.
 
 Implementation map: lowering and generated codecs are in
 `src/api/vecherinka_comptime.nim`; artifact persistence, model boundaries, and
