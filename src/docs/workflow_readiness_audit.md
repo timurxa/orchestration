@@ -19,9 +19,16 @@ because a child turn ended without calling `finish_work`. Their schema-6
 databases persisted the failure: checkpoint sequences 17 and 16 were marked
 `failed`, with 9 and 8 artifacts respectively. Each DB also retained the
 committed and failed model-attempt states; one or more parallel attempts were
-still `submitted`. These terminal failed runs cannot be resumed. This confirms
-durable partial progress and failure recording, but exposes live-agent
-completion reliability as an unresolved limitation.
+still `submitted`. These terminal failed runs cannot be resumed.
+
+The default developer instructions, goal, turn prompt, and tool description
+were then strengthened to say that ordinary assistant text is not a submission
+and to correct/retry rejected tool arguments. Three fresh GPT-6 Luna runs with
+the revised prompts all finished. Direct inspection of all three SQLite DBs
+confirmed schema 6, checkpoint sequence 21/status `finished`, 13 artifacts, 16
+predecessor edges with no missing parent IDs, and six `sasCommitted` attempts.
+This small sample is encouraging, not a reliability guarantee. It confirms the
+workflow can complete and that each successful state is present in SQLite.
 
 ## Remaining implementation limits
 
@@ -45,8 +52,8 @@ completion reliability as an unresolved limitation.
   again.
 - **Completion tool:** the goal and prompts ask the agent to call
   `finish_work`, and the runtime detects an omitted call, but it fails that run
-  instead of automatically prompting the same agent again. The two direct
-  recheck runs both hit this path.
+  instead of automatically prompting the same agent again. The two pre-revision
+  recheck runs hit this path; all three post-revision runs completed.
 
 The research workflow itself has no search/retrieval tool. The run's SQLite WAL
 and DuckDB concurrency claims were spot-checked against their documentation;

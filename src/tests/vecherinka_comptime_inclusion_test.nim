@@ -782,6 +782,17 @@ suite "artifact_tree generated output verifier":
     check spec.prompt_templates.turn_prompt == "turn text for $task"
     check spec.prompt_templates.finish_work_description == "tool text"
 
+  test "default prompts make finish_work the required result submission":
+    let templates = default_agent_prompt_templates
+    check templates.developer_instructions.contains(
+      "workflow accepts your result only through the `finish_work` tool")
+    check templates.goal.contains(
+      "workflow receives the tool arguments, not a prose response")
+    check templates.turn_prompt.contains(
+      "A normal assistant message")
+    check templates.finish_work_description.contains(
+      "This tool is the only way to submit the result")
+
   test "thread goal request uses Codex goal protocol":
     let message = Message(
       kind: mk_request,
