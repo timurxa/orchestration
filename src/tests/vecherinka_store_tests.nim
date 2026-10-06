@@ -135,3 +135,21 @@ suite "Vecherinka SQLite value store":
     check store.artifact(1).isNone
     check store.checkpoint().isNone
     store.close()
+
+  test "terminal run status cannot be reopened as active":
+    let root = Path(createTempDir("vecherinka-store-terminal-", ""))
+    let database = root / Path("run.sqlite3")
+    let store = create_vecherinka_store(database, test_metadata())
+    store.commit_transition(-1, [], StoreCheckpoint(sequence: 0,
+      format_version: checkpoint_format_version, status: "running",
+      payload_text: "active"))
+    store.commit_transition(0, [], StoreCheckpoint(sequence: 1,
+      format_version: checkpoint_format_version, status: "finished",
+      payload_text: "done"))
+    expect ValueError:
+      store.set_status("running")
+    expect ValueError:
+      store.commit_transition(1, [], checkpoint(2, "reopen"))
+    check store.status() == "finished"
+    check store.checkpoint().get.status == "finished"
+    store.close()

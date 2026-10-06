@@ -221,12 +221,23 @@ proc validate_status(status: string) =
   if status notin ["created", "running", "interrupted", "finished", "failed"]:
     raise newException(ValueError, "invalid run status: " & status)
 
+proc validate_status_transition(previous, next: string) =
+  validate_status(next)
+  let allowed = previous == next or
+    (previous == "created" and next in ["running", "interrupted", "failed"]) or
+    (previous == "running" and next in ["interrupted", "finished", "failed"]) or
+    (previous == "interrupted" and next in ["running", "failed"])
+  if not allowed:
+    raise newException(ValueError,
+      "invalid run status transition: " & previous & " -> " & next)
+
 proc set_status*(store: VecherinkaStore; status: string) =
   require_open(store)
-  validate_status(status)
   exec_sql(store.db, "BEGIN IMMEDIATE")
   var committed = false
   try:
+    let previous = store.db.getValue(sql"SELECT status FROM run_metadata WHERE singleton = 1")
+    validate_status_transition(previous, status)
     store.db.exec(sql"UPDATE run_metadata SET status = ? WHERE singleton = 1", status)
     store.db.exec(sql"UPDATE checkpoint SET status = ? WHERE singleton = 1", status)
     exec_sql(store.db, "COMMIT")
@@ -348,7 +359,6 @@ proc commit_transition*(store: VecherinkaStore;
       "checkpoint sequence must immediately follow its expected predecessor")
   if checkpoint.format_version != checkpoint_format_version:
     raise newException(ValueError, "unsupported checkpoint format version")
-  validate_status(checkpoint.status)
   exec_sql(store.db, "BEGIN IMMEDIATE")
   var committed = false
   try:
@@ -356,6 +366,9 @@ proc commit_transition*(store: VecherinkaStore;
     let actual_previous = if previous.len > 0: parseBiggestInt(previous) else: -1'i64
     if actual_previous != expected_previous_sequence:
       raise newException(ValueError, "checkpoint changed since transition was prepared")
+    let previous_status = store.db.getValue(
+      sql"SELECT status FROM run_metadata WHERE singleton = 1")
+    validate_status_transition(previous_status, checkpoint.status)
     for artifact in artifacts:
       insert_artifact(store.db, artifact)
     for attempt in attempts:
