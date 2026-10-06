@@ -29,7 +29,7 @@ type
     sources: seq[string]
     caveats: seq[string]
 
-const research_profile = luna.medium
+const research_profile = luna.low
 
 vecherinka(solve_parallel_research, default_agent_prompt_templates):
   > make_plan InformationRequest ~> ResearchPlan:
