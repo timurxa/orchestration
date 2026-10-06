@@ -14,7 +14,7 @@ type
 
 proc `$`(value: Issues): string {.borrow.}
 
-const cheap = luna.medium
+const cheap = luna.low
 
 const manual_agent_prompts = AgentPromptTemplates(
   developer_instructions: checked_prompt(

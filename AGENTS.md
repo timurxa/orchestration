@@ -7,6 +7,7 @@ model's filesystem workspace is temporary staging.
 
 ```bash
 cd /Users/alex/areas/productive/orchestration
+PATH="/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS:$PATH" \
 CODEX_HOME="$PWD/.codex-task-state" \
 CODEX_SQLITE_HOME="$PWD/.codex-task-state" \
 nim c -r --panics:on --threads:on --path:src/api \
@@ -14,9 +15,12 @@ nim c -r --panics:on --threads:on --path:src/api \
 ```
 
 The child `codex app-server` needs writable Codex state, valid authentication,
-and outbound access to the Codex service. If `.codex-task-state/` is missing or
-stale, create or refresh this physical copy from a normal Terminal while Codex
-and other `codex` processes are closed:
+and outbound access to the Codex service. GPT-6 Luna requires a CLI/model
+catalog that includes `gpt-6-luna`; the system Homebrew CLI 0.146 rejected it,
+while the app-bundled CLI 0.160 succeeded. `codex_runtime` resolves `codex` via
+`PATH`, so put a compatible executable first. If `.codex-task-state/` is
+missing or stale, create or refresh this physical copy from a normal Terminal
+while Codex and other `codex` processes are closed:
 
 ```bash
 mkdir -p .codex-task-state
@@ -29,10 +33,8 @@ This copy may contain authentication data. It is ignored by Git; do not commit
 or expose it. A symlink to the external state directory is insufficient in a
 restricted task sandbox.
 
-The Luna profile maps to `gpt-6-luna`. The supplied state snapshot's model
-catalog exposes only GPT-5.6 Luna, and its app-server rejected GPT-6 Luna with
-HTTP 400. Verify that the account/model catalog supports GPT-6 Luna before
-claiming a live workflow run.
+The Luna profile maps to `gpt-6-luna`. Verify the example's `run-*` SQLite
+database reaches `finished` before treating a live workflow run as successful.
 
 ## Runtime limits
 

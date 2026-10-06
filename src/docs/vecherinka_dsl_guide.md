@@ -23,7 +23,7 @@ type
   Output = object
     response: string
 
-const model = "gpt-6-luna".medium
+const model = "gpt-6-luna".low
 
 expandMacros: vecherinka(solve):
   > answer Input ~> Output {.entry.}:
