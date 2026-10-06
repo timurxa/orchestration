@@ -1,6 +1,7 @@
 # Intention: SQLite-backed runs, artifacts, and resumption
 
-Status: design impact audit; implementation remains unchanged.
+Status: migration design. Implementation is in progress; this file records
+the decisions that implementation must preserve.
 
 ## Intention
 
@@ -247,6 +248,78 @@ audit.
 - File sizes and fan-out patterns are unknown. Benchmark BLOB and tree import/read latency, memory, WAL growth, and backup size before selecting a chunk threshold. For large streaming imports, stage invisible rows first and publish them with a short transaction.
 - The Codex child still needs a filesystem cwd. Existing sandbox settings do not enforce the prompt's directory boundary; the temporary workspace remains a separate execution concern.
 - `run-*` may remain as a container for the DB and temporary workspace. It must stop serving as the canonical identity or content path for artifacts.
+
+## Migration decisions
+
+The alternatives were reviewed against the current runtime and Nim type system
+before implementation:
+
+1. **SQLite owns artifact bytes.** Filesystem object stores and run-local blob
+   caches are rejected as canonical storage because they leave a second source
+   of truth. Serialized values and complete file bytes live in the run DB.
+   Temporary paths are derived workspaces used only while an LLM or a
+   subprocess runs.
+2. **`Blob` is the durable file value.** Replace path-valued `Location` in
+   workflow data with a Blob/content representation. Model tool output still
+   uses workspace-relative filenames; the runtime validates and reads those
+   files before it commits the typed Blob value. Existing directory-valued
+   locations require a corresponding canonical tree representation rather
+   than silently changing the contract to files only.
+3. **Use a versioned checkpoint snapshot.** Event replay would have to capture
+   every scheduler mutation and safely replay callbacks. Fully normalized
+   scheduler tables would duplicate the current `WorkPlan` structure. A
+   versioned data-only checkpoint row is the smaller recovery representation;
+   SQLite transactions publish artifacts and the next checkpoint together.
+4. **Persist identities and data, never Nim pointers.** The current runtime
+   graph includes closures, callback pointers, and recursive destinations.
+   Stable workflow/node keys must bind persisted work to code regenerated from
+   the current compiled workflow. Current `so`-returned compositions need a
+   serializable route/transition representation; arbitrary pointer graphs and
+   captured process state are not a persistence format. Local callbacks that
+   were not committed may run again after a crash, so their side effects must
+   be staged/idempotent or explicitly at-least-once.
+5. **Use generated direct constructors for typed decoding.** `jsonutils` and
+   Schematic cannot decode the entire existing artifact shape set: range
+   fields inside variants trigger default-initialization failures, and
+   Schematic misses nested variants and fixed arrays. Generate the decoder
+   from the existing `ArtifactNode` metadata and construct complete Nim
+   values without `default(T)`. Keep the tool output schema separate from this
+   storage codec.
+6. **Keep `codex_json` and `codex_runtime` stable absent proof.** Workflow
+   resume retries an interrupted model step from its committed input; it does
+   not promise same-thread Codex reattachment. The existing Codex JSON model
+   already has a workspace-write sandbox option. The runtime sandbox setting
+   will change only if real app-server verification confirms that full access
+   would let an agent alter the canonical DB.
+
+The primary checkpoint promise is recovery from the last committed scheduler
+transition. SQLite cannot make an external model call or arbitrary callback
+exactly-once. An interrupted, uncommitted model request may be retried and
+incur another call; this must be recorded as at-least-once behavior. A durable
+received response is committed before tool success is acknowledged.
+
+### Alternatives considered and not selected
+
+- **Store blobs in an adjacent content-addressed directory:** simpler large
+  file I/O and deduplication, but violates the requirement that SQLite fully
+  contain artifact data.
+- **Keep `Location` and rewrite it to a private blob-cache path:** reduces
+  source changes, but makes a path look like the durable value and hides the
+  storage boundary from workflow authors. `Blob` makes the value semantics
+  explicit.
+- **Serialize the complete arbitrary runtime Flow pointer graph:** closest to
+  today's most dynamic `so` callbacks, but requires a second recursive IR,
+  callback capture codecs, and factory identities. This is more machinery than
+  a stable route/transition key and is not justified by current examples.
+- **Replay the whole workflow from the beginning:** avoids restoring scheduler
+  state but repeats committed model calls, breaks budget accounting, and does
+  not meet interrupted-process resume.
+
+Reverse the selected route/transition representation only if a real workflow
+needs to synthesize arbitrary Flow graphs at runtime. Reverse the per-run DB
+choice only if cross-run deduplication or shared artifact querying becomes a
+required product feature. Neither change is needed to preserve current
+examples, whose `so` expressions select or compose statically authored flows.
 
 ## Audit limits
 
