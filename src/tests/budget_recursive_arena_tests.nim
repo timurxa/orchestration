@@ -57,23 +57,16 @@ expandMacros: vecherinka(solve_parallel, pools = arena_weights):
       pool(default) >>> loop_parallel,
       pool(wide) >>> loop_parallel)
 
-proc run_case(mode, log_path: string) =
-  let sink = new_log_file_sink(log_path)
-  let logger = new_structured_logger(sink.sink, run_id = mode)
-  try:
-    if mode == "sequence":
-      discard solve_sequence(BudgetItem(ticks: 0), 4.0,
-        default_agent_prompt_templates,
-        transport = immediate_transport, logger = logger)
-    elif mode == "parallel":
-      discard solve_parallel(BudgetItem(ticks: 0), 4.0,
-        default_agent_prompt_templates,
-        transport = immediate_transport, logger = logger)
-    else:
-      raise newException(ValueError, "mode must be sequence or parallel")
-  finally:
-    sink.close()
+proc run_case(mode: string) =
+  if mode == "sequence":
+    discard solve_sequence(BudgetItem(ticks: 0), 4.0,
+      default_agent_prompt_templates, transport = immediate_transport)
+  elif mode == "parallel":
+    discard solve_parallel(BudgetItem(ticks: 0), 4.0,
+      default_agent_prompt_templates, transport = immediate_transport)
+  else:
+    raise newException(ValueError, "mode must be sequence or parallel")
 
-if paramCount() != 2:
-  raise newException(ValueError, "usage: budget_recursive_arena_tests MODE LOG")
-run_case(paramStr(1), paramStr(2))
+if paramCount() != 1:
+  raise newException(ValueError, "usage: budget_recursive_arena_tests MODE")
+run_case(paramStr(1))

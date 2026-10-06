@@ -12,7 +12,8 @@ Luna at low effort and the app-bundled Codex CLI 0.160.0. That run committed
 six model attempts and 13 artifacts, and its checkpoint reached `finished`.
 The example exercises its combined dynamic `so`/`lift` workflow, but that exact
 example is not an automated end-to-end regression test. Focused codec, store,
-runtime, checkpoint, compile-time, and provenance suites passed.
+runtime, checkpoint, and compile-time suites passed. The former path-based
+provenance POC was retired when inspection moved into the run database.
 
 A direct SQLite recheck later that day launched two fresh runs; both failed
 because a child turn ended without calling `finish_work`. Their schema-6

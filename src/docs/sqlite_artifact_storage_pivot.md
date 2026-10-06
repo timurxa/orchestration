@@ -21,8 +21,9 @@ but it is not the artifact store's filesystem representation. Per-call model
 workspaces are created separately under the system temporary directory.
 
 Keep `codex_json` unchanged: it already models and serializes `workspace-write`.
-For the storage migration, `codex_runtime` now requests `workspace-write` and
-sets each child call's temporary working directory as cwd. The Luna model
+`codex_runtime` requests that mode, sets each child call's temporary working
+directory as cwd, and exposes an optional observer at its common JSON write
+boundary so Vecherinka can persist exact outgoing messages. The Luna model
 profile independently maps to `gpt-6-luna`.
 For workflow-level resume, restore the last committed Vecherinka checkpoint;
 retry an in-flight model step from its stored input if the same Codex thread
@@ -40,8 +41,11 @@ are materialized and submitted files are read back before committing the
 output.
 
 The database stores workflow metadata, artifacts and ordered predecessor IDs,
-model-attempt state, and a versioned scheduler checkpoint. Generated flow keys
-and a source manifest identify static code. Checkpoints store stable flow keys,
+model-attempt state, and a versioned scheduler checkpoint. Schema 7 also stores
+the static and activated work graph, execution generations, worker sessions,
+and app-server JSON conversation events. `codex_runtime` has one optional
+observer hook at its common JSON write boundary; `codex_json` is unchanged.
+Generated flow keys and a source manifest identify static code. Checkpoints store stable flow keys,
 budget state, ready work, joins, model invocations, counters, outputs, and
 dynamic `so` expansion recipes. Resume replays those path-free callbacks from
 the saved serialized input and exact budget snapshot, then checks the generated
@@ -50,17 +54,45 @@ side-effect-free contract. Model submission remains at-least-once across an
 uncertain interruption; a committed result is stored with its checkpoint
 before the tool success response is sent.
 
-The current store schema is version 6, the generated artifact codec is version
+The current store schema is version 7, the generated artifact codec is version
 1, and the scheduler checkpoint format is version 2. Opening a compatible
-schema-5 store advances its schema marker and leaves its unused legacy table
-and rows intact. This does not reconstruct typed values or checkpoints that
-older provenance-only databases never stored.
+schema-5 or schema-6 store advances its schema marker and leaves its existing
+artifact/checkpoint rows intact. It does not reconstruct typed values or
+checkpoints that older provenance-only databases never stored.
 
 The old non-durable public `execute_flows` entry points have been removed. Use
 the generated `solve`/`resume_<solve>` pair or the explicit
-`create_sqlite_run`/`resume_sqlite_run` low-level API. For storage and
-resumption, `codex_runtime` changes to select the already-supported
-`workspace-write` mode; `codex_json` remains unchanged.
+`create_sqlite_run`/`resume_sqlite_run` low-level API. The former JSONL logger
+and generated logger parameters are removed; SQLite is the inspection source.
+The optional observer is the only `codex_runtime` change required to observe
+outgoing serialized messages. `codex_json` remains unchanged.
+
+## Inspectability design decisions
+
+- Keep current scheduler checkpoints as resume authority instead of
+  event-sourcing every scheduling decision. Store the topology separately so
+  users can inspect graph structure without decoding a checkpoint.
+- Store static nodes and typed edges by stable flow key. Store each activated
+  `so` graph under its checkpointed expansion ID and compare a canonical graph
+  signature during replay.
+- Keep `model_attempt` as the logical request identity. Record each restarted
+  Codex worker as a new `worker_session` generation; process-local agent and
+  JSON-RPC IDs are scoped to one `run_execution`.
+- Capture incoming JSON lines before protocol parsing. At the Codex write
+  boundary, save the exact serialized JSON before writing, then record the
+  local write result. This is not an acknowledgement from the app-server.
+- Remove both the JSONL `StructuredLogger` and the separate path-based
+  provenance POC/API. Keep inspection on the run's canonical SQLite store;
+  queryable tables and the graph renderer replace those parallel surfaces.
+- Expose a query-only live reader over WAL for checkpoint snapshots and
+  event-ID pages. Other graph and conversation queries remain ordinary SQL.
+- Use a 30-second execution heartbeat lease to reject a competing resume.
+  Takeover after a stale heartbeat gives writes a new execution ID; runtime
+  checkpoints and conversation rows from the old owner are fenced. The UI may
+  still treat heartbeat staleness as advisory because a paused process can
+  miss the lease window.
+- Upgrade schema 5 and 6 additively. Existing rows survive; missing past
+  messages and dynamic graph activations are not fabricated.
 
 ## Original design exploration (historical)
 

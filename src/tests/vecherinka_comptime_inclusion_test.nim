@@ -1289,30 +1289,6 @@ suite "runtime failure containment":
     finally:
       deallocShared(runtime)
 
-  test "protocol stdout log preserves complete message":
-    var lines: seq[string] = @[]
-    let logger = new_structured_logger(
-      proc(line: string) = lines.add(line),
-      ring_capacity = 2)
-    var plan = WorkPlan[JsonNode](
-      context: new_runtime_context[JsonNode](logger = logger))
-    var messenger = new_global_event_messenger()
-    var runtime = cast[ptr CodexRuntime](allocShared0(sizeof(CodexRuntime)))
-    runtime.state = new_runtime_state()
-    let message = "{\"id\":99,\"result\":{\"text\":\"quote: \\\"\"}}"
-    try:
-      handle_global_event(
-        plan,
-        messenger,
-        runtime,
-        GlobalEvent(kind: gek_stdout_line, message: message))
-      let record = parseJson(lines[0])
-      check record["event"].getStr == "protocol.stdout"
-      check record["fields"]["bytes"].getInt == message.len
-      check record["fields"]["message"].getStr == message
-    finally:
-      deallocShared(runtime)
-
   test "pending agent survives stdout before creation event":
     let context = new_runtime_context[JsonNode]()
     open_global_events(context)

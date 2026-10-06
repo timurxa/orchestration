@@ -1,4 +1,4 @@
-import json
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,62 +7,37 @@ from artifact_graph import dot_text, load_graph
 
 
 class ArtifactGraphTests(unittest.TestCase):
-    def test_reconstructs_edges_and_marks_missing_parent(self):
-        records = [
-            {
-                "event": "artifact.commit",
-                "run_id": "run-1",
-                "fields": {
-                    "artifact_id": 0,
-                    "artifact_dir": "source",
-                    "predecessor_ids": [],
-                    "operation": "input",
-                },
-            },
-            {
-                "event": "artifact.commit",
-                "run_id": "run-1",
-                "fields": {
-                    "artifact_id": 2,
-                    "artifact_dir": "artifact-2",
-                    "predecessor_ids": [0, 0, 9],
-                    "operation": "join.fanout",
-                    "flow_kind": "fk_fanout",
-                },
-            },
-        ]
+    def test_joins_workflow_artifacts_attempts_and_workers(self):
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "run.jsonl"
-            path.write_text(
-                "DIRECT_RESULT answer=ok\n"
-                + "".join(json.dumps(record) + "\n" for record in records),
-                encoding="utf-8",
-            )
+            path = Path(directory) / "run.sqlite3"
+            with sqlite3.connect(path) as db:
+                db.executescript("""
+                    CREATE TABLE workflow_node(flow_key, kind, expansion_id, details_json);
+                    CREATE TABLE workflow_edge(source_flow_key, edge_kind, position, target_flow_key);
+                    CREATE TABLE artifact(artifact_id, operation, flow_kind, request_id);
+                    CREATE TABLE predecessor(predecessor_id, artifact_id, position);
+                    CREATE TABLE model_attempt(request_id, flow_key, input_artifact_id, output_artifact_id);
+                    CREATE TABLE worker_session(session_id, request_id, generation, state, thread_id);
+                    INSERT INTO workflow_node VALUES('answer', 'fk_model', 0, '{}');
+                    INSERT INTO workflow_node VALUES('done', 'fk_pure', 0, '{}');
+                    INSERT INTO workflow_edge VALUES('answer', 'continuation', 0, 'done');
+                    INSERT INTO artifact VALUES(0, 'input', 'entry', '');
+                    INSERT INTO artifact VALUES(1, 'model', 'fk_model', 'i:7');
+                    INSERT INTO predecessor VALUES(0, 1, 0);
+                    INSERT INTO model_attempt VALUES('i:7', 'answer', 0, 1);
+                    INSERT INTO worker_session VALUES(3, 'i:7', 1, 'finished', 'thread-3');
+                """)
             graph = load_graph(path)
 
-        self.assertEqual(graph["commit_count"], 2)
-        self.assertEqual(graph["non_json_count"], 1)
-        self.assertEqual(graph["edges"][(0, 2)], 2)
-        self.assertTrue(graph["nodes"][9]["missing"])
+        self.assertIn(("a:0", "w:answer", "input", "dashed"), graph["edges"])
+        self.assertIn(("w:answer", "a:1", "output", "dashed"), graph["edges"])
+        self.assertIn(("w:answer", "s:3", "worker", "dotted"), graph["edges"])
+        self.assertIn(("a:0", "a:1", "predecessor", "solid"), graph["edges"])
         rendered = dot_text(graph)
-        self.assertIn('label="x2"', rendered)
-        self.assertIn('fillcolor="#ffe6e6"', rendered)
-        self.assertIn("operation: join.fanout", rendered)
-        self.assertIn("flow_kind: fk_fanout", rendered)
-
-    def test_rejects_mixed_runs_without_selection(self):
-        records = [
-            {"event": "artifact.commit", "run_id": "run-1", "fields": {"artifact_id": 0}},
-            {"event": "artifact.commit", "run_id": "run-2", "fields": {"artifact_id": 0}},
-        ]
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "run.jsonl"
-            path.write_text(
-                "".join(json.dumps(record) + "\n" for record in records),
-                encoding="utf-8",
-            )
-            with self.assertRaises(ValueError):
-                load_graph(path)
+        self.assertIn("thread-3", rendered)
+        self.assertIn("\\n", rendered)
+        self.assertNotIn("\\\\n", rendered)
+        self.assertIn('"w:answer" -> "w:done"', rendered)
 
 
 if __name__ == "__main__":

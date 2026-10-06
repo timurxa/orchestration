@@ -63,17 +63,12 @@ let request = InformationRequest(
   question: "How should a small engineering team choose between SQLite, PostgreSQL, and DuckDB for a local-first analytics product in 2026?",
   decision_context: "Compare concurrency, deployment and operational burden, analytical capability, cloud migration, ecosystem maturity, and total cost. Recommend a default and explain when the alternatives win.")
 
-let log_file = new_log_file_sink("parallel-research.jsonl")
-let logger = new_structured_logger(log_file.sink, run_id = "parallel-research")
-try:
-  let report = solve_parallel_research(request, 100.0,
-    default_agent_prompt_templates, logger = logger)
-  echo "RECOMMENDATION: ", report.recommendation
-  for rationale in report.rationale:
-    echo "RATIONALE: ", rationale
-  for source in report.sources:
-    echo "SOURCE: ", source
-  for caveat in report.caveats:
-    echo "CAVEAT: ", caveat
-finally:
-  log_file.close()
+let report = solve_parallel_research(request, 100.0,
+  default_agent_prompt_templates)
+echo "RECOMMENDATION: ", report.recommendation
+for rationale in report.rationale:
+  echo "RATIONALE: ", rationale
+for source in report.sources:
+  echo "SOURCE: ", source
+for caveat in report.caveats:
+  echo "CAVEAT: ", caveat

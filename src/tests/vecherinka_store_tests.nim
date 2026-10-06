@@ -1,4 +1,4 @@
-import std/[options, os, paths, strutils, tempfiles, unittest]
+import std/[options, os, paths, sequtils, strutils, tempfiles, unittest]
 import db_connector/db_sqlite
 import ../api/vecherinka_store
 
@@ -69,6 +69,7 @@ suite "Vecherinka SQLite value store":
     check attempt.isSome
     check attempt.get.state == sasPrepared
     check attempt.get.payload_text == "{\"input_artifact\":7}"
+    check attempt.get.output_artifact_id.isNone
     reopened.commit_transition(0, [], checkpoint(1, "submitted"),
       attempts = [StoreAttempt(request_id: "request-1", state: sasSubmitted,
         payload_text: "{\"input_artifact\":7}")])
@@ -128,6 +129,101 @@ suite "Vecherinka SQLite value store":
     check store.checkpoint().get.payload_text == "saved"
     store.close()
 
+  test "graph, worker conversations, and live polling are queryable in SQLite":
+    let root = Path(createTempDir("vecherinka-inspectability-", ""))
+    let database = root / Path("run.sqlite3")
+    let store = create_vecherinka_store(database, test_metadata())
+    let execution = store.start_execution("owner-test", 42)
+    expect ValueError:
+      discard store.start_execution("owner-intruder", 43)
+    store.register_workflow_graph(
+      [WorkflowNode(flow_key: "entry", kind: "fk_model"),
+       WorkflowNode(flow_key: "finish", kind: "fk_pure")],
+      [WorkflowEdge(source_flow_key: "entry", edge_kind: "continuation",
+        position: 0, target_flow_key: "finish")], execution)
+    discard store.append_conversation_event(ConversationEvent(
+      execution_id: execution, kind: "run.note", details_json: "{}"))
+    store.commit_transition(-1, [stored(0, "input"), stored(1, "output",
+      @[0'u64], request_id = "i:0")], checkpoint(0, "{}"),
+      attempts = [StoreAttempt(request_id: "i:0", state: sasPrepared,
+        payload_text: "{}", flow_key: "entry", input_artifact_id: 0,
+        reserved_output_artifact_id: 1,
+        model: "luna", effort: "low")])
+    let session = store.start_worker_session("i:0", execution, "agent-1")
+    check store.attempt("i:0").get.reserved_output_artifact_id == 1
+    check store.attempt("i:0").get.output_artifact_id.isNone
+    let outgoing = store.append_conversation_event(ConversationEvent(
+      execution_id: execution, kind: "protocol.message", direction: "outgoing",
+      request_id: "i:0", session_id: session.session_id, agent_id: "agent-1",
+      rpc_id: "i:12", raw_json: "{\"id\":12,\"method\":\"turn/start\"}",
+      write_state: "attempted"))
+    store.set_conversation_write_state(outgoing, "write_returned")
+    discard store.append_conversation_event(ConversationEvent(
+      execution_id: execution, kind: "protocol.message", direction: "incoming",
+      rpc_id: "i:12", thread_id: "thread-1", raw_json:
+        "{\"id\":12,\"result\":{\"thread\":{\"id\":\"thread-1\"}}}"))
+    let server_request = store.append_conversation_event(ConversationEvent(
+      execution_id: execution, kind: "protocol.message", direction: "incoming",
+      request_id: "i:0", session_id: session.session_id, agent_id: "agent-1",
+      rpc_id: "i:40", raw_json: "{\"id\":40,\"method\":\"tool/call\"}"))
+    discard store.append_conversation_event(ConversationEvent(
+      execution_id: execution, kind: "protocol.message", direction: "outgoing",
+      rpc_id: "i:40", raw_json: "{\"id\":40,\"result\":{}}"))
+    let reader = open_vecherinka_reader(database)
+    defer: reader.close()
+    let snapshot = reader.poll(0)
+    check snapshot.snapshot.status == "running"
+    check snapshot.events.len >= 4
+    let protocol = snapshot.events.filterIt(it.kind == "protocol.message" and
+      it.rpc_id == "i:12")
+    check protocol.len == 2
+    check protocol[0].request_id == "i:0"
+    check protocol[0].session_id == session.session_id
+    check protocol[0].write_state == "write_returned"
+    check protocol[1].request_id == "i:0"
+    check protocol[1].session_id == session.session_id
+    check protocol[1].thread_id == "thread-1"
+    let response = snapshot.events.filterIt(it.rpc_id == "i:40" and
+      it.direction == "outgoing")
+    check response.len == 1
+    check response[0].request_id == "i:0"
+    check response[0].session_id == session.session_id
+    check server_request > 0
+    check session.session_id > 0
+    let query_only = open($database, "", "", "")
+    query_only.exec(SqlQuery("PRAGMA query_only = ON"))
+    expect DbError:
+      query_only.exec(SqlQuery("UPDATE run_metadata SET status = 'failed'"))
+    query_only.close()
+    discard store.append_conversation_event(ConversationEvent(
+      execution_id: execution, kind: "protocol.message", direction: "outgoing",
+      request_id: "i:0", session_id: session.session_id,
+      raw_json: "{}", write_state: "attempted"))
+    store.finish_execution(execution)
+    let restarted = store.start_execution("owner-restarted", 43)
+    let final_page = reader.poll(snapshot.last_event_id)
+    check final_page.events.anyIt(it.write_state == "outcome_unknown")
+    store.finish_execution(restarted)
+    store.close()
+
+  test "stale execution takeover fences the previous writer":
+    let root = Path(createTempDir("vecherinka-execution-lease-", ""))
+    let database = root / Path("run.sqlite3")
+    let store = create_vecherinka_store(database, test_metadata())
+    let previous = store.start_execution("owner-old", 51)
+    let external = open($database, "", "", "")
+    external.exec(sql"UPDATE run_execution SET heartbeat_at_ns = 0 WHERE execution_id = ?",
+      previous)
+    external.close()
+    let current = store.start_execution("owner-new", 52)
+    expect ValueError:
+      store.commit_transition(-1, [], checkpoint(0, "stale"),
+        execution_id = previous)
+    check store.checkpoint().isNone
+    store.check_execution_owner(current)
+    store.finish_execution(current)
+    store.close()
+
   test "resume never creates a missing database":
     let root = Path(createTempDir("vecherinka-store-missing-", ""))
     let database = root / Path("missing.sqlite3")
@@ -139,11 +235,32 @@ suite "Vecherinka SQLite value store":
     let root = Path(createTempDir("vecherinka-store-upgrade-", ""))
     let database = root / Path("run.sqlite3")
     let metadata = test_metadata()
-    let store = create_vecherinka_store(database, metadata)
-    store.commit_transition(-1, [stored(1, "payload")], checkpoint(0, "saved"))
-    store.close()
-
     let legacy = open($database, "", "", "")
+    legacy.exec(SqlQuery("""CREATE TABLE run_metadata (
+      singleton INTEGER PRIMARY KEY, run_id TEXT NOT NULL, workflow_id TEXT NOT NULL,
+      workflow_fingerprint TEXT NOT NULL, workflow_manifest_json TEXT NOT NULL,
+      codec_version INTEGER NOT NULL, checkpoint_version INTEGER NOT NULL,
+      status TEXT NOT NULL)"""))
+    legacy.exec(sql"""INSERT INTO run_metadata VALUES(1, ?, ?, ?, ?, ?, ?, 'interrupted')""",
+      metadata.run_id, metadata.workflow_id, metadata.workflow_fingerprint,
+      metadata.workflow_manifest_json, metadata.codec_version,
+      metadata.checkpoint_version)
+    legacy.exec(SqlQuery("""CREATE TABLE artifact (
+      artifact_id INTEGER PRIMARY KEY, codec_id TEXT NOT NULL,
+      codec_version INTEGER NOT NULL, payload_text TEXT NOT NULL,
+      operation TEXT NOT NULL, flow_kind TEXT NOT NULL, request_id TEXT NOT NULL)"""))
+    legacy.exec(SqlQuery("""CREATE TABLE predecessor (
+      artifact_id INTEGER NOT NULL REFERENCES artifact(artifact_id),
+      position INTEGER NOT NULL, predecessor_id INTEGER NOT NULL REFERENCES artifact(artifact_id),
+      PRIMARY KEY (artifact_id, position))"""))
+    legacy.exec(SqlQuery("CREATE TABLE checkpoint (singleton INTEGER PRIMARY KEY, sequence INTEGER NOT NULL, format_version INTEGER NOT NULL, status TEXT NOT NULL, payload_text TEXT NOT NULL)"))
+    legacy.exec(SqlQuery("CREATE TABLE model_attempt (request_id TEXT PRIMARY KEY, state TEXT NOT NULL, payload_text TEXT NOT NULL)"))
+    legacy.exec(sql"""INSERT INTO artifact VALUES(1, 'test', 1, 'payload', '', '', '')""")
+    legacy.exec(sql"""INSERT INTO artifact VALUES(2, 'test', 1, 'model-output',
+      'model', 'fk_model', 'i:9')""")
+    legacy.exec(sql"""INSERT INTO model_attempt VALUES('i:9', 'sasCommitted',
+      '{"flow_key":"old-model","input_artifact_id":"1","output_artifact_id":"2"}')""")
+    legacy.exec(sql"INSERT INTO checkpoint VALUES(1, 0, 2, 'interrupted', 'saved')")
     legacy.exec(SqlQuery("""CREATE TABLE artifact_file (
       artifact_id INTEGER NOT NULL REFERENCES artifact(artifact_id),
       name TEXT NOT NULL,
@@ -156,9 +273,19 @@ suite "Vecherinka SQLite value store":
 
     let reopened = open_vecherinka_store(database, metadata)
     check reopened.artifact(1).get.payload_text == "payload"
+    let migrated_attempt = reopened.attempt("i:9").get
+    check migrated_attempt.flow_key == "old-model"
+    check migrated_attempt.input_artifact_id == 1
+    check migrated_attempt.reserved_output_artifact_id == 2
+    check migrated_attempt.output_artifact_id == some(2'i64)
+    reopened.register_workflow_graph(
+      [WorkflowNode(flow_key: "old-model", kind: "fk_model",
+        details_json: "{\"model\":\"gpt-6-luna\",\"effort\":\"low\"}")], [])
+    check reopened.attempt("i:9").get.model == "gpt-6-luna"
+    check reopened.attempt("i:9").get.effort == "low"
     reopened.close()
     let verify = open($database, "", "", "")
-    check verify.getValue(SqlQuery("PRAGMA user_version")) == "6"
+    check verify.getValue(SqlQuery("PRAGMA user_version")) == "7"
     check verify.getValue(sql"SELECT COUNT(*) FROM artifact_file") == "1"
     verify.close()
 

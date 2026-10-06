@@ -22,6 +22,15 @@ type
   CodexRuntimeLiveness* = ref object
     alive*: bool
 
+  ProtocolWritePhase* = enum
+    pwpStarting,
+    pwpReturned,
+    pwpRaised
+
+  ProtocolObserver* = proc(context: pointer; phase: ProtocolWritePhase;
+      raw_json: string; agent_id: Option[AgentId]; rpc_id: string;
+      event_id: int64): int64 {.nimcall.}
+
   Agent* = object
     id*: AgentId
     thread_id*: Nullable[string]
@@ -66,6 +75,8 @@ type
     initialized*: bool
     initialization_error*: Option[string]
     state*: RuntimeState
+    protocol_observer*: ProtocolObserver
+    observer_context*: pointer
 
 template agents*(runtime: ptr CodexRuntime): untyped = runtime.state.agents
 template requests*(runtime: ptr CodexRuntime): untyped = runtime.state.requests
@@ -503,20 +514,35 @@ proc apply_notification*(state: var RuntimeState; notification: Notification) =
   of nk_initialized, nk_server_request_resolved, nk_unknown:
     discard
 
-proc send(stream: Stream; message: JsonNode) =
-  stream.writeLine($message)
-  stream.flush()
+proc send(runtime: ptr CodexRuntime; stream: Stream; message: JsonNode;
+    agent_id: Option[AgentId] = none(AgentId); rpc_id: string = "") =
+  let raw_json = $message
+  var event_id = 0'i64
+  if not runtime.protocol_observer.isNil:
+    event_id = runtime.protocol_observer(runtime.observer_context,
+      pwpStarting, raw_json, agent_id, rpc_id, 0)
+  try:
+    stream.writeLine(raw_json)
+    stream.flush()
+  except CatchableError:
+    if not runtime.protocol_observer.isNil:
+      discard runtime.protocol_observer(runtime.observer_context,
+        pwpRaised, raw_json, agent_id, rpc_id, event_id)
+    raise
+  if not runtime.protocol_observer.isNil:
+    discard runtime.protocol_observer(runtime.observer_context,
+      pwpReturned, raw_json, agent_id, rpc_id, event_id)
 
 proc send_server_response(runtime: ptr CodexRuntime; response: ServerResponse) =
   if runtime.process.isNil:
     return
-  send(runtime.process.inputStream, serialize_message(Message(
+  send(runtime, runtime.process.inputStream, serialize_message(Message(
     kind: mk_server_response,
     server_response: response
-  )))
+  )), rpc_id = request_id_key(response.id))
 
 proc send_initialized(runtime: ptr CodexRuntime) =
-  send(runtime.process.inputStream, serialize_message(Message(
+  send(runtime, runtime.process.inputStream, serialize_message(Message(
     kind: mk_notification,
     notification: Notification(
       kind: nk_initialized,
@@ -533,7 +559,13 @@ proc send_initialized(runtime: ptr CodexRuntime) =
 
 proc send_pending_requests(runtime: ptr CodexRuntime) =
   for message in runtime.pending:
-    send(runtime.process.inputStream, serialize_message(message))
+    let key = request_id_key(message.request.id)
+    let agent_id = if runtime.state.requests.hasKey(key):
+      runtime.state.requests[key].agent_id
+    else:
+      none(AgentId)
+    send(runtime, runtime.process.inputStream, serialize_message(message),
+      agent_id, key)
 
 proc queue_request(runtime: ptr CodexRuntime; request_kind: RequestKind;
     params: Params; agent_id: Option[AgentId]): RequestId =
@@ -551,10 +583,10 @@ proc queue_request(runtime: ptr CodexRuntime; request_kind: RequestKind;
     error: none(string)
   )
   if request_kind == mk_initialize or runtime.initialized:
-    send(runtime.process.inputStream, serialize_message(Message(
+    send(runtime, runtime.process.inputStream, serialize_message(Message(
       kind: mk_request,
       request: request
-    )))
+    )), agent_id, request_id_key(id))
   id
 
 proc apply_dynamic_tool_call*(state: var RuntimeState; request: ServerRequest) =
@@ -769,9 +801,20 @@ proc deinit_codex_runtime*(codex: ptr CodexRuntime) =
   reset(codex.state.turn_tombstones)
   reset(codex.state.server_requests)
   reset(codex.state.server_request_tombstones)
+  codex.protocol_observer = nil
+  codex.observer_context = nil
   deallocShared(codex)
 
-proc init_codex_runtime*(cwd: string): ptr CodexRuntime =
+proc set_protocol_observer*(runtime: ptr CodexRuntime;
+    observer: ProtocolObserver; context: pointer) =
+  if runtime.isNil:
+    raise newException(ValueError, "Codex runtime is nil")
+  runtime.protocol_observer = observer
+  runtime.observer_context = context
+
+proc init_codex_runtime*(cwd: string;
+    observer: ProtocolObserver = nil;
+    observer_context: pointer = nil): ptr CodexRuntime =
   if not dirExists(cwd):
     raise newException(ValueError, "cwd is not a directory: " & cwd)
   let canonical_cwd = expandFilename(cwd)
@@ -787,6 +830,8 @@ proc init_codex_runtime*(cwd: string): ptr CodexRuntime =
   result.cwd = canonical_cwd
   result.initialized = false
   result.initialization_error = none(string)
+  result.protocol_observer = observer
+  result.observer_context = observer_context
 
   try:
     result.process = startProcess(

@@ -3507,7 +3507,6 @@ proc lower_vecherinka_runtime(
   let initial_budget_name = ident("initial_budget")
   let prompt_templates_name = ident("prompt_templates")
   let transport_name = ident("transport")
-  let logger_name = ident("logger")
   let database_path_param = ident("database_path")
   let workflow_id_name = ident(solve.strVal & "_workflow_id")
   let workflow_manifest_name = ident(solve.strVal & "_workflow_manifest")
@@ -3561,8 +3560,7 @@ proc lower_vecherinka_runtime(
       initial_budget = `initial_budget_name`,
       prompt_templates = `prompt_templates_name`,
       pool_weights = `pool_weights`,
-      transport = `transport_name`,
-      logger = `logger_name`)
+      transport = `transport_name`)
     if `work_plan_name`.output.isNone:
       if `work_plan_name`.failure_message.isSome:
         raise newException(ValueError, `work_plan_name`.failure_message.get)
@@ -3576,8 +3574,7 @@ proc lower_vecherinka_runtime(
     let `resume_work_plan_name` = `resume_sqlite_run`(`resume_data_name`,
       `database_path_param`, `resume_metadata_name`, `resume_flow_nodes_name`,
       prompt_templates = `prompt_templates_name`,
-      transport = `transport_name`,
-      logger = `logger_name`)
+      transport = `transport_name`)
     if `resume_work_plan_name`.output.isNone:
       if `resume_work_plan_name`.failure_message.isSome:
         raise newException(ValueError,
@@ -3591,14 +3588,12 @@ proc lower_vecherinka_runtime(
         `initial_budget_name`: Budget;
         `prompt_templates_name`: AgentPromptTemplates = `prompt_templates`;
         `transport_name`: LlmTransport[`artifact_name`] = nil;
-        `logger_name`: StructuredLogger = nil;
         `database_path_param`: Path = Path("")): `entry_codomain` =
       `proc_body`
   let generated_resume_proc = quote do:
     proc `resume_proc_name`(`database_path_param`: Path;
         `prompt_templates_name`: AgentPromptTemplates = `prompt_templates`;
-        `transport_name`: LlmTransport[`artifact_name`] = nil;
-        `logger_name`: StructuredLogger = nil): `entry_codomain` =
+        `transport_name`: LlmTransport[`artifact_name`] = nil): `entry_codomain` =
       `resume_proc_body`
   var generated = newStmtList()
   generated.add(generated_flows_proc)

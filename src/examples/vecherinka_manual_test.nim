@@ -58,16 +58,7 @@ let implementation_request = ImplementationRequest("")
 let codebase = Codebase(BlobTree(suggestedFilename: "codebase", entries: @[]))
 let issues = Issues(@[""])
 let simple = Simple(number: 4)
-let log_file = new_log_file_sink("manual-test.jsonl")
-let debug_logger = new_structured_logger(
-  log_file.sink,
-  run_id = "manual-test")
-
-try:
-  echo "test: calling generated solve"
-  let debug_value = solve(simple, 100.0, manual_agent_prompts,
-    logger = debug_logger)
-  echo "test: generated solve returned ", debug_value[0].number,
-    " and ", debug_value[1].number
-finally:
-  log_file.close()
+echo "test: calling generated solve"
+let debug_value = solve(simple, 100.0, manual_agent_prompts)
+echo "test: generated solve returned ", debug_value[0].number,
+  " and ", debug_value[1].number

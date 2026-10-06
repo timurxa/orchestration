@@ -39,10 +39,10 @@ The generated signature is:
 ```nim
 solve(input, initial_budget,
   prompt_templates = default_agent_prompt_templates,
-  transport = nil, logger = nil, database_path = Path(""))
+  transport = nil, database_path = Path(""))
 resume_solve(database_path,
   prompt_templates = default_agent_prompt_templates,
-  transport = nil, logger = nil)
+  transport = nil)
 ```
 
 `initial_budget` is required. The defaults apply to all arguments after it.
@@ -147,8 +147,8 @@ nim c -r --panics:on --threads:on --path:src/api \
 ```
 
 It prints a recommendation, rationale, sources, and caveats. The current
-directory receives `parallel-research.jsonl` and a `run-*` directory containing
-the SQLite database. Model-call workspaces are created separately under the
+directory receives a `run-*` directory containing the SQLite database.
+Model-call workspaces are created separately under the
 system temporary directory, used only for staging, and removed when the
 runtime call exits. Run from an isolated disposable checkout. Child threads use
 Codex's `workspace-write` sandbox with their per-call workspace as cwd. Source
@@ -163,22 +163,44 @@ turn ends without a valid `finish_work`, the plan fails.
 ## Durable storage and inspection
 
 The per-run `vecherinka.sqlite3` database is the canonical record of the run.
-It stores versioned serialized artifact values (including complete Blob and
-BlobTree bytes), predecessor edges, model-attempt state, and scheduler
-checkpoints. A default database is placed at
+Schema version 7 stores versioned serialized artifact values (including
+complete Blob and BlobTree bytes), ordered predecessor edges, the static and
+activated workflow graph, model attempts, Codex worker sessions, exact
+app-server JSON messages, execution generations, and scheduler checkpoints.
+A default database is placed at
 `run-*/vecherinka.sqlite3`; pass `database_path` to choose a stable path for
 later resumption. Keep the SQLite WAL/SHM files with the database while it is
 open.
 
 Artifact values are materialized in a temporary model-call workspace only
 while an agent is working. The runtime reads submitted file bytes back into
-the typed output before committing the artifact and checkpoint. Optional JSONL
-logs and `tools/artifact_graph.py` are diagnostic views, not required to resume.
-Runtime logs can include serialized `finish_work` arguments, but they are not a
-complete or canonical artifact store; SQLite is authoritative. Legacy
-path-based provenance APIs and the `vecherinka_provenance_poc_runner` are
-separate from the SQLite execution path and do not describe the current storage
-contract.
+the typed output before committing the artifact and checkpoint. There is no
+separate Vecherinka JSONL logging path. `tools/artifact_graph.py <database>`
+renders workflow nodes, artifact lineage, model input/output links, and worker
+sessions from SQLite. Conversation JSON remains available in
+`conversation_event` and can be joined to `worker_session`, `model_attempt`,
+and `workflow_node` by their stable IDs. The `VecherinkaReader.poll` API
+provides a query-only connection for live checkpoint and event polling; direct
+SQL readers can inspect the rest of the schema.
+
+`conversation_event.raw_json` contains the exact app-server JSON message body
+on one line, excluding the newline used as transport framing. Incoming records
+are persisted before parsing. Outgoing records are persisted before write and
+then marked `write_returned` or `write_raised`; these labels describe the local
+pipe write only, not remote receipt. Codex does not expose hidden reasoning.
+The database may contain prompts, model inputs, tool arguments, and outputs;
+protect it with the same care as the workflow's source data.
+`outcome_unknown` means the prior process stopped before recording the local
+write result. A second resume is rejected while the current owner's heartbeat
+is newer than 30 seconds; stale ownership may be taken over after that window.
+The old owner is fenced from subsequent SQLite transitions. A reader can
+compare `heartbeat_at_ns` with its own clock, but must treat staleness as
+advisory because a paused process can also miss heartbeats.
+Runs created before schema 7 retain their artifact/checkpoint history, but the
+new schema does not invent graph activations, worker sessions, or conversation
+messages that were never recorded. Static graph rows become available when a
+compatible workflow is resumed. `run_metadata.history_started_at_ns` marks
+when inspectability history begins for this database.
 
 Implementation map: lowering and generated codecs are in
 `src/api/vecherinka_comptime.nim`; artifact persistence, model boundaries, and
@@ -188,3 +210,63 @@ restore are in `src/api/vecherinka_checkpoint.nim` and
 `src/api/vecherinka_checkpoint_adapter_impl.nim`. Projection and lift grammars
 are in `src/api/it_projection.nim` and
 `src/api/lift_pattern_typed.nim`.
+
+### Reading graph and conversation history
+
+The main tables are:
+
+- `workflow_node` and `workflow_edge`: stable flow keys and typed topology
+  edges. `expansion_id = 0` is the static graph; nonzero values identify
+  activated `so` graphs.
+- `workflow_expansion`: the parent flow, input artifact, selected root, and
+  canonical topology signature for each `so` activation.
+- `artifact` and `predecessor`: complete serialized values and ordered data
+  lineage.
+- `model_attempt`: one logical model request, including its workflow node,
+  input artifact, reserved and committed output artifact, model profile, and
+  current status.
+- `run_execution`, `worker_session`, and `conversation_event`: process runs,
+  Codex sessions and their generations, and append-only protocol/state events.
+
+For example, this query maps model nodes to attempts, worker sessions, and
+messages:
+
+```sql
+SELECT n.flow_key, a.request_id, s.session_id, s.generation, s.thread_id,
+       e.event_id, e.direction, e.kind, e.write_state, e.raw_json
+FROM workflow_node AS n
+JOIN model_attempt AS a ON a.flow_key = n.flow_key
+LEFT JOIN worker_session AS s ON s.request_id = a.request_id
+LEFT JOIN conversation_event AS e
+  ON e.session_id = s.session_id OR e.request_id = a.request_id
+ORDER BY a.request_id, s.generation, e.event_id;
+```
+
+Artifact lineage is available directly from `predecessor`:
+
+```sql
+SELECT p.artifact_id, p.position, p.predecessor_id,
+       a.operation, a.flow_kind, a.request_id
+FROM predecessor AS p
+JOIN artifact AS a ON a.artifact_id = p.artifact_id
+ORDER BY p.artifact_id, p.position;
+```
+
+A live Nim observer can open a second connection and page conversation events
+without taking ownership of the workflow database:
+
+```nim
+let reader = open_vecherinka_reader(database_path)
+defer: reader.close()
+var cursor = 0'i64
+while true:
+  let page = reader.poll(cursor)
+  # Refresh UI from page.snapshot; append page.events.
+  cursor = page.last_event_id
+```
+
+Poll again on the application's normal refresh interval. The reader enables
+SQLite `query_only`, uses a bounded busy timeout, and holds a read transaction
+only while capturing one consistent snapshot and event page. Checkpoint payloads
+are versioned JSON snapshots; decoded table values remain the durable source
+for artifacts, graph edges, sessions, and messages.

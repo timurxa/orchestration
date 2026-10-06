@@ -1,8 +1,8 @@
 # Vecherinka budgeting contract
 
 `Budget` is a `float64` scheduling unit. `solve(input, initial_budget, ...)`
-requires a finite, non-negative initial budget; templates, transport, and
-logger are optional. This ledger limits admitted model work using fixed
+requires a finite, non-negative initial budget; templates and transport are
+optional. This ledger limits admitted model work using fixed
 estimates. It does not measure provider charges, tokens, or transport retries.
 
 ## Profiles and fixed costs

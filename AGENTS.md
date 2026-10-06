@@ -1,9 +1,9 @@
 # Running Vecherinka workflows
 
-Run from the repository root. The example below writes `parallel-research.jsonl`
-and a `run-*` directory containing `vecherinka.sqlite3` under the current
-working directory. SQLite is the durable artifact and checkpoint store; the
-model's filesystem workspace is temporary staging.
+Run from the repository root. The example below writes a `run-*` directory
+containing `vecherinka.sqlite3` under the current working directory. SQLite is
+the durable artifact, graph, conversation, and checkpoint store; the model's
+filesystem workspace is temporary staging.
 
 ```bash
 cd /Users/alex/areas/productive/orchestration
@@ -57,6 +57,7 @@ workflow language and supported shapes are documented in the
 [DSL guide](src/docs/vecherinka_dsl_guide.md).
 
 Generated workflows expose `resume_<solve>(database_path, ...)`. Preserve the
-database path printed or selected by the caller to resume after interruption.
+database path selected by the caller, or locate it under `run-*/`, to resume
+after interruption.
 Dynamic `so` callbacks must be deterministic and side-effect free because
 resume rebuilds their returned graph from the saved input and budget snapshot.
