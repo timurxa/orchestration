@@ -30,6 +30,32 @@ predecessor edges with no missing parent IDs, and six `sasCommitted` attempts.
 This small sample is encouraging, not a reliability guarantee. It confirms the
 workflow can complete and that each successful state is present in SQLite.
 
+An additional real-model reliability ladder on 2026-10-05 covered four shapes
+with GPT-6 Luna at low effort: nested object output with enum, `Option`, and an
+ordered sequence; two distinct fan branches followed by an ordered join; a
+two-call root-`Blob` handoff; and a combined fan/join that creates a `BlobTree`
+with nested files and an empty directory for a later model to read. All four
+finished with exact-value assertions. Direct SQLite inspection confirmed
+committed attempts and predecessor edges. The root-`Blob` case also compared
+the consumer's text byte-for-byte against the stored Blob payload; the combined
+case confirmed both stored file contents and the empty directory survived.
+
+The ladder identified a likely model-tool contract defect: root `string` and
+`Blob` outputs were emitted as primitive JSON Schemas, and two real root-`Blob`
+turns ended without `finish_work`. The output contract now wraps non-object
+roots under `args`, producing object-shaped tool arguments and restoring the
+declared value in the materializer. After this change and an explicit prompt
+instruction for the `args` path, the root-`Blob` live run passed. The live
+experiment changed schema shape and wording together, so it does not isolate
+which change resolved the omissions. Schema and materializer regressions cover
+root `string`, `Blob`, `BlobTree`, sequence, tuple, option, and variant values.
+
+The first wrapped-Blob trial also used an assertion that expected a space after
+the canary prefix, although its prompt had not required one. The prompt was
+tightened to specify the exact prefix, including that space; the subsequent
+live Blob run matched it. These cases are evidence from one run per successful
+shape, not a broad reliability guarantee.
+
 ## Remaining implementation limits
 
 - **Filesystem boundary:** agents use `approval_policy=never` and
@@ -52,8 +78,9 @@ workflow can complete and that each successful state is present in SQLite.
   again.
 - **Completion tool:** the goal and prompts ask the agent to call
   `finish_work`, and the runtime detects an omitted call, but it fails that run
-  instead of automatically prompting the same agent again. The two pre-revision
-  recheck runs hit this path; all three post-revision runs completed.
+  instead of automatically prompting the same agent again. Stronger prompts
+  and the non-object root wrapper address observed causes, but other omissions
+  can still terminate a run.
 
 The research workflow itself has no search/retrieval tool. The run's SQLite WAL
 and DuckDB concurrency claims were spot-checked against their documentation;

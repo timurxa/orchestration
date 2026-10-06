@@ -2022,9 +2022,9 @@ proc wire_record_list(record: NimNode; owner: ArtifactNode;
       doAssert false, "wire schema cannot rebuild record field " & field.repr
 
 proc model_output_requires_args_wrapper(node: ArtifactNode): bool =
-  ## Dynamic function tools receive direct sequence arguments under `args`.
-  ## Keep object-root outputs unchanged.
-  not node.isNil and node.kind == ank_seq
+  ## Dynamic function tools require an object-shaped argument schema. Keep
+  ## named object fields direct; wrap every other root value under `args`.
+  not node.isNil and node.kind != ank_object
 
 proc artifact_wire_type(node: ArtifactNode): NimNode =
   ## Schematic has no array extractor. Replace fixed arrays by seqs in a

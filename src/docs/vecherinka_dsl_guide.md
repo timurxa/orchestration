@@ -103,6 +103,13 @@ variants, distinct values, and constrained integers. Some variant/array cases
 and positional-tuple round trips are not established; Schematic support alone
 does not prove Vecherinka support.
 
+When the output schema is not object-shaped, `finish_work` receives the value
+under an `args` property so its tool arguments remain an object. For example, a
+root `string` uses `{"args":"..."}`, and a root `Blob` uses
+`{"args":"relative-file.txt"}`; object-shaped outputs keep their named fields
+directly. The runtime decodes this wrapper back to the declared Nim type before
+storing the artifact.
+
 ## Files and `Blob`
 
 `Blob` carries a suggested filename and the complete file bytes. `BlobTree`

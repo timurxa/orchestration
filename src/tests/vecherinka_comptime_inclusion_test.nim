@@ -413,6 +413,9 @@ static:
 
 declare_model_materializer(TestOutput, test_output_materializer)
 declare_model_materializer(TestBlobOutput, test_blob_output_materializer)
+declare_model_materializer(string, test_string_output_materializer)
+declare_model_materializer(Blob, test_root_blob_output_materializer)
+declare_model_materializer(BlobTree, test_root_blob_tree_output_materializer)
 declare_model_materializer(TestBlobTreeOutput, test_blob_tree_output_materializer)
 declare_model_materializer(DistinctBlobOutput, test_distinct_blob_output_materializer)
 declare_model_materializer(TestConstrainedOutput, test_constrained_output_materializer)
@@ -790,6 +793,8 @@ suite "artifact_tree generated output verifier":
       "workflow receives the tool arguments, not a prose response")
     check templates.turn_prompt.contains(
       "A normal assistant message")
+    check templates.turn_prompt.contains(
+      "For a root Blob or BlobTree, `args` must be the output file or directory's relative path")
     check templates.finish_work_description.contains(
       "This tool is the only way to submit the result")
 
@@ -814,7 +819,17 @@ suite "artifact_tree generated output verifier":
     check object_schema["type"].getStr == "object"
     check object_schema["properties"].hasKey("text")
     let variant_schema = toJsonSchema(output_contract(TestVariant))
-    check variant_schema.hasKey("oneOf")
+    check variant_schema["type"].getStr == "object"
+    check variant_schema["properties"]["args"].hasKey("oneOf")
+    let string_schema = toJsonSchema(output_contract(string))
+    check string_schema["type"].getStr == "object"
+    check string_schema["properties"]["args"]["type"].getStr == "string"
+    let blob_schema = toJsonSchema(output_contract(Blob))
+    check blob_schema["type"].getStr == "object"
+    check blob_schema["properties"]["args"]["type"].getStr == "string"
+    let blob_tree_schema = toJsonSchema(output_contract(BlobTree))
+    check blob_tree_schema["type"].getStr == "object"
+    check blob_tree_schema["properties"]["args"]["type"].getStr == "string"
     let fixed_schema = toJsonSchema(output_contract(Fixed))
     check fixed_schema["type"].getStr == "object"
     check fixed_schema["additionalProperties"].getBool == false
@@ -824,6 +839,41 @@ suite "artifact_tree generated output verifier":
     let seq_schema = toJsonSchema(output_contract(PlainSeq))
     check seq_schema["type"].getStr == "object"
     check seq_schema["properties"]["args"]["type"].getStr == "array"
+
+  test "root scalar and Blob materializers unwrap args":
+    let string_result = test_string_output_materializer(0, LlmOutput(
+      arguments: parseJson("{\"args\":\"exact scalar\"}"),
+      working_dir: Path(getTempDir())))
+    check string_result.ok
+    check string_result.value == "exact scalar"
+
+    let root = getTempDir() / "vecherinka-root-blob-output-test"
+    createDir(root)
+    writeFile(root / "present.txt", "root blob payload")
+    let blob_result = test_root_blob_output_materializer(0, LlmOutput(
+      arguments: parseJson("{\"args\":\"present.txt\"}"),
+      working_dir: Path(root)))
+    check blob_result.ok
+    check blob_result.value.suggestedFilename == "present.txt"
+    var expected_bytes = newSeq[byte]("root blob payload".len)
+    for index, ch in "root blob payload":
+      expected_bytes[index] = byte(ch)
+    check blob_result.value.bytes == expected_bytes
+    remove_tree(root)
+
+    let tree_root = getTempDir() / "vecherinka-root-blob-tree-output-test"
+    remove_tree(tree_root)
+    createDir(tree_root / "bundle" / "empty")
+    createDir(tree_root / "bundle" / "nested")
+    writeFile(tree_root / "bundle" / "nested" / "payload.txt", "tree bytes")
+    let tree_result = test_root_blob_tree_output_materializer(0, LlmOutput(
+      arguments: parseJson("{\"args\":\"bundle\"}"),
+      working_dir: Path(tree_root)))
+    check tree_result.ok
+    check tree_result.value.suggestedFilename == "bundle"
+    check tree_result.value.entries.mapIt(it.path) ==
+      @["empty", "nested", "nested/payload.txt"]
+    remove_tree(tree_root)
 
   test "materializer parses and rejects real structured output":
     let valid = test_output_materializer(0, LlmOutput(
@@ -887,7 +937,8 @@ suite "artifact_tree generated output verifier":
     createDir(root)
     writeFile(root / "payload.bin", "bytes")
     let result = test_distinct_blob_output_materializer(0, LlmOutput(
-      arguments: parseJson("\"payload.bin\""), working_dir: Path(root)))
+      arguments: parseJson("{\"args\":\"payload.bin\"}"),
+      working_dir: Path(root)))
     check result.ok
     check Blob(result.value).bytes == @[byte('b'), byte('y'), byte('t'),
       byte('e'), byte('s')]
@@ -943,20 +994,21 @@ suite "artifact_tree generated output verifier":
 
   test "tuple, Option alias, and distinct output extraction":
     let parsed_named = test_named_tuple_output_materializer(0, LlmOutput(
-      arguments: parseJson("{\"a\":9,\"b\":\"nine\"}"),
+      arguments: parseJson("{\"args\":{\"a\":9,\"b\":\"nine\"}}"),
       working_dir: Path(getTempDir())))
     check parsed_named.ok
     check parsed_named.value.a == 9
     check parsed_named.value.b == "nine"
 
     let present = test_option_output_materializer(0, LlmOutput(
-      arguments: parseJson("{\"text\":\"some\",\"count\":2}"),
+      arguments: parseJson("{\"args\":{\"text\":\"some\",\"count\":2}}"),
       working_dir: Path(getTempDir())))
     check present.ok
     check present.value.isSome
     check present.value.get.text == "some"
     let absent = test_option_output_materializer(0, LlmOutput(
-      arguments: newJNull(), working_dir: Path(getTempDir())))
+      arguments: parseJson("{\"args\":null}"),
+      working_dir: Path(getTempDir())))
     check absent.ok
     check absent.value.isNone
 
@@ -975,7 +1027,8 @@ suite "artifact_tree generated output verifier":
     check constrained.ok
     check constrained.value.count == 4
     let variant = test_variant_output_materializer(0, LlmOutput(
-      arguments: parseJson("{\"common\":\"c\",\"kind\":\"tkText\",\"text\":\"v\"}"),
+      arguments: parseJson(
+        "{\"args\":{\"common\":\"c\",\"kind\":\"tkText\",\"text\":\"v\"}}"),
       working_dir: Path(getTempDir())))
     check variant.ok
     check variant.value.kind == tkText
@@ -987,7 +1040,8 @@ suite "artifact_tree generated output verifier":
     createDir(root)
     writeFile(root / "payload.txt", "payload")
     let result = test_variant_multi_blob_output_materializer(0, LlmOutput(
-      arguments: parseJson("""{"kind":"tkFile","file":"payload.txt"}"""),
+      arguments: parseJson(
+        """{"args":{"kind":"tkFile","file":"payload.txt"}}"""),
       working_dir: Path(root)))
     check result.ok
     check result.value.kind == tkFile
