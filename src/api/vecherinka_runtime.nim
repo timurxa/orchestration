@@ -3,12 +3,14 @@
 ## Included by `vecherinka.nim`. Keep compile-time AST and macro machinery out
 ## of this fragment.
 
-import std/[json, options, tables, posix, strutils, os, math,
+import std/[algorithm, json, options, tables, sets, posix, strutils, os, math,
   paths, tempfiles]
 import ./codex_json
 import ./codex_runtime
 import ./structured_log
 import ./vecherinka_provenance
+import ./vecherinka_store
+import ./vecherinka_checkpoint
 
 type
   ArtifactID* = uint64
@@ -31,6 +33,13 @@ type
     pool_spent*: Budget
     pool_remaining*: Budget
     global_remaining*: Budget
+
+  SoExpansion* = object
+    id*: uint64
+    parent_flow_key*: string
+    input_artifact_id*: ArtifactID
+    budget*: BudgetContext
+    flow_keys*: seq[string]
 
   BudgetLedger* = ref object
     initial_budget*: Budget
@@ -111,11 +120,9 @@ type
       branches*: seq[Flow[A]]
       coalesce*: proc(values: seq[A]): A {.nimcall.}
     of fk_so:
-      ## `runtime_dir` is the stable run root used to resolve canonical
-      ## Location values. `working_dir` belongs to the current value's
-      ## artifact and is where this callback may create output files.
-      execute*: proc(input: A; runtime_dir, working_dir: Path;
-        budget: BudgetContext): Flow[A] {.nimcall.}
+      ## Local transformations receive the complete serialized value and a
+      ## budget snapshot. Filesystem paths exist only at the model boundary.
+      execute*: proc(input: A; budget: BudgetContext): Flow[A] {.nimcall.}
     of fk_lift:
       inner*: Flow[A]
       destructure*: proc(input: A):
@@ -335,6 +342,15 @@ type
     pending_agent_starts*: Table[string, PendingAgentStart[A]]
     model_turn_requests*: Table[string, string]
     prompt_templates*: AgentPromptTemplates
+    store*: VecherinkaStore
+    checkpoint_sequence*: int64
+    pending_store_artifacts*: seq[StoredArtifact]
+    pending_store_attempts*: seq[StoreAttempt]
+    pending_model_dispatches*: seq[string]
+    so_expansions*: seq[SoExpansion]
+    next_so_expansion_id*: uint64
+    last_checkpoint_payload*: string
+    last_checkpoint_status*: string
 
   ModelSubmitter*[A] = proc(
     context: RuntimeContext[A];
@@ -1020,6 +1036,15 @@ proc new_runtime_context*[A](
   result.pending_agent_starts = initTable[string, PendingAgentStart[A]]()
   result.model_turn_requests = initTable[string, string]()
   result.prompt_templates = prompt_templates
+  result.store = nil
+  result.checkpoint_sequence = -1
+  result.pending_store_artifacts = @[]
+  result.pending_store_attempts = @[]
+  result.pending_model_dispatches = @[]
+  result.so_expansions = @[]
+  result.next_so_expansion_id = 1
+  result.last_checkpoint_payload = ""
+  result.last_checkpoint_status = ""
 
 proc create_run_directory*(source_root: Path): Path =
   ## Keep run state in a unique child of the program working directory.
@@ -1027,6 +1052,69 @@ proc create_run_directory*(source_root: Path): Path =
     raise newException(ValueError, "source root is not a directory: " &
       $source_root)
   Path(createTempDir("run-", "", $source_root))
+
+proc default_sqlite_database_path*(source_root: Path): Path =
+  ## A default durable run is discoverable as `run-*/vecherinka.sqlite3`.
+  create_run_directory(source_root) / Path("vecherinka.sqlite3")
+
+proc append_flow_nodes[A](flow: Flow[A]; seen: var HashSet[pointer];
+    output: var seq[Flow[A]]) =
+  if flow.isNil:
+    return
+  let address = cast[pointer](flow)
+  if address in seen:
+    return
+  seen.incl(address)
+  output.add(flow)
+  append_flow_nodes(flow.continuation, seen, output)
+  case flow.kind
+  of fk_top:
+    append_flow_nodes(flow.body, seen, output)
+  of fk_fanout:
+    for branch in flow.branches:
+      append_flow_nodes(branch, seen, output)
+  of fk_lift:
+    append_flow_nodes(flow.inner, seen, output)
+  else:
+    discard
+
+proc collect_flow_nodes*[A](top_level_flows: openArray[Flow[A]]): seq[Flow[A]] =
+  ## Include every statically instantiated node reachable from workflow roots.
+  ## `so` callback results are dynamic and must be rebuilt from their origins.
+  var seen = initHashSet[pointer]()
+  for flow in top_level_flows:
+    append_flow_nodes(flow, seen, result)
+
+proc workflow_store_metadata*(workflow_id, source_manifest: string;
+    prompt_templates: AgentPromptTemplates;
+    pool_weights: openArray[PoolWeight]): StoreMetadata =
+  if workflow_id.len == 0 or source_manifest.len == 0:
+    raise newException(ValueError, "workflow identity and manifest are required")
+  var manifest = parseJson(source_manifest)
+  if manifest.kind != JObject:
+    raise newException(ValueError, "workflow manifest must be a JSON object")
+  var prompts = newJObject()
+  prompts["developer_instructions"] = %prompt_templates.developer_instructions
+  prompts["goal"] = %prompt_templates.goal
+  prompts["turn_prompt"] = %prompt_templates.turn_prompt
+  prompts["finish_work_description"] = %prompt_templates.finish_work_description
+  manifest["prompt_templates"] = prompts
+  var pools = newJArray()
+  for pool in pool_weights:
+    var item = newJObject()
+    item["name"] = %pool.name
+    item["weight"] = %pool.weight
+    pools.add(item)
+  manifest["pool_weights"] = pools
+  let manifest_text = $manifest
+  var checksum = 14695981039346656037'u64
+  for character in manifest_text:
+    checksum = (checksum xor uint64(ord(character))) * 1099511628211'u64
+  result = StoreMetadata(run_id: "", workflow_id: workflow_id,
+    workflow_fingerprint: "fnv1a64:" & $checksum,
+    workflow_manifest_json: manifest_text,
+    codec_version: 1,
+    checkpoint_version: checkpoint_format_version)
 
 proc reserve_artifact_meta*[A](
     context: RuntimeContext[A];
@@ -1040,13 +1128,15 @@ proc reserve_artifact_meta*[A](
   inc context.next_artifact_id
   result = ArtifactMeta(
     id: context.next_artifact_id,
-    artifact_dir: context.run_dir /
-      Path("artifact-" & $context.next_artifact_id),
+    artifact_dir: if context.store.isNil:
+      context.run_dir / Path("artifact-" & $context.next_artifact_id)
+      else: Path(""),
     predecessor_ids: predecessor_ids,
     operation: operation,
     flow_kind: flow_kind,
     request_id: request_id)
-  createDir($result.artifact_dir)
+  if $result.artifact_dir != "":
+    createDir($result.artifact_dir)
   context.runtime_log(
     "artifact.reserve",
     "vecherinka",
@@ -1074,6 +1164,20 @@ proc lookup_artifact*[A](
     artifact_id: ArtifactID
 ): ArtifactRecord[A]
 
+const stored_artifact_codec_id = "vecherinka.artifact.v1"
+
+proc to_stored_artifact[A](data: A; meta: ArtifactMeta;
+    codec_version: int): StoredArtifact =
+  when A is string:
+    StoredArtifact(id: meta.id, codec_id: stored_artifact_codec_id,
+      codec_version: codec_version, payload_text: data,
+      predecessor_ids: meta.predecessor_ids,
+      operation: meta.operation, flow_kind: meta.flow_kind,
+      request_id: meta.request_id)
+  else:
+    raise newException(ValueError,
+      "SQLite runtime currently requires serialized string artifacts")
+
 proc register_artifact*[A](
     context: RuntimeContext[A];
     data: A;
@@ -1088,6 +1192,10 @@ proc register_artifact*[A](
   for predecessor_id in meta.predecessor_ids:
     predecessor_dirs.add(lookup_artifact(context, predecessor_id).meta.artifact_dir)
   context.artifacts[meta.id] = ArtifactRecord[A](data: data, meta: meta)
+  if not context.store.isNil:
+    let store_metadata = context.store.metadata()
+    context.pending_store_artifacts.add(to_stored_artifact(
+      data, meta, store_metadata.codec_version))
   if not context.provenance_store.isNil:
     context.provenance_store.record_artifact(meta.artifact_dir, predecessor_dirs)
   result = meta.id
@@ -1108,11 +1216,114 @@ proc lookup_artifact*[A](
     context: RuntimeContext[A];
     artifact_id: ArtifactID
 ): ArtifactRecord[A] =
-  if context.isNil or not context.artifacts.hasKey(artifact_id):
+  if context.isNil:
+    raise newException(ValueError, "unknown artifact ID: " & $artifact_id)
+  if not context.artifacts.hasKey(artifact_id) and not context.store.isNil:
+    let stored = context.store.artifact(artifact_id)
+    if stored.isSome:
+      let item = stored.get
+      if item.codec_id != stored_artifact_codec_id or
+          item.codec_version != context.store.metadata().codec_version:
+        raise newException(ValueError,
+          "stored artifact codec does not match runtime: " & $artifact_id)
+      when A is string:
+        var meta = ArtifactMeta(id: item.id,
+          artifact_dir: if context.store.isNil:
+            context.run_dir / Path("artifact-" & $item.id) else: Path(""),
+          predecessor_ids: item.predecessor_ids,
+          operation: item.operation, flow_kind: item.flow_kind,
+          request_id: item.request_id)
+        if $meta.artifact_dir != "" and not dirExists($meta.artifact_dir):
+          createDir($meta.artifact_dir)
+        context.artifacts[item.id] = ArtifactRecord[A](
+          data: item.payload_text, meta: meta)
+      else:
+        raise newException(ValueError,
+          "SQLite runtime currently requires serialized string artifacts")
+  if not context.artifacts.hasKey(artifact_id):
     raise newException(ValueError, "unknown artifact ID: " & $artifact_id)
   result = context.artifacts[artifact_id]
   if result.meta.id != artifact_id:
     raise newException(ValueError, "artifact table key and metadata ID mismatch")
+
+proc collect_so_expansion_nodes[A](root: Flow[A]; id: uint64): seq[Flow[A]] =
+  if root.isNil:
+    raise newException(ValueError, "so callback returned a nil graph")
+  result = collect_flow_nodes(@[root])
+  var localKeys = initHashSet[string]()
+  for flow in result:
+    if flow.flow_key.len == 0 or flow.flow_key in localKeys:
+      raise newException(ValueError,
+        "so callback graph has an empty or duplicate flow key")
+    localKeys.incl(flow.flow_key)
+  for flow in result:
+    flow.flow_key = "so-" & $id & "/" & flow.flow_key
+
+proc runtime_budget(snapshot: CheckpointBudgetContext): BudgetContext =
+  BudgetContext(pool_name: snapshot.pool_name,
+    pool_weight: snapshot.pool_weight,
+    pool_capacity: snapshot.pool_capacity,
+    pool_spent: snapshot.pool_spent,
+    pool_remaining: snapshot.pool_remaining,
+    global_remaining: snapshot.global_remaining)
+
+proc checkpoint_budget(snapshot: BudgetContext): CheckpointBudgetContext =
+  CheckpointBudgetContext(pool_name: snapshot.pool_name,
+    pool_weight: snapshot.pool_weight,
+    pool_capacity: snapshot.pool_capacity,
+    pool_spent: snapshot.pool_spent,
+    pool_remaining: snapshot.pool_remaining,
+    global_remaining: snapshot.global_remaining)
+
+proc reconstruct_so_expansions[A](checkpoint: WorkPlanCheckpoint;
+    context: RuntimeContext[A];
+    static_nodes: openArray[Flow[A]]): seq[Flow[A]] =
+  ## Replay pure, path-free graph builders in expansion order before resolving
+  ## any checkpoint flow key. Model work itself is never replayed here.
+  var flowByKey = initTable[string, Flow[A]]()
+  result = @static_nodes
+  for flow in result:
+    if flow.isNil or flow.flow_key.len == 0 or flowByKey.hasKey(flow.flow_key):
+      raise newException(ValueError, "static flow resolver has invalid keys")
+    flowByKey[flow.flow_key] = flow
+  context.so_expansions.setLen(0)
+  for saved in checkpoint.so_expansions:
+    if not flowByKey.hasKey(saved.parent_flow_key):
+      raise newException(ValueError,
+        "so expansion parent is missing: " & saved.parent_flow_key)
+    let parent = flowByKey[saved.parent_flow_key]
+    if parent.kind != fk_so:
+      raise newException(ValueError,
+        "so expansion parent is not a so callback: " & saved.parent_flow_key)
+    when A is string:
+      let input = lookup_artifact(context, saved.input_artifact_id).data
+      let child = parent.execute(input, runtime_budget(saved.budget))
+      if child.isNil:
+        raise newException(ValueError,
+          "so callback no longer yields its saved graph")
+      let dynamicNodes = collect_so_expansion_nodes(child, saved.id)
+      var rebuiltKeys: seq[string]
+      for flow in dynamicNodes:
+        rebuiltKeys.add(flow.flow_key)
+        if flowByKey.hasKey(flow.flow_key):
+          raise newException(ValueError,
+            "dynamic so flow key collides with an existing key: " & flow.flow_key)
+        flowByKey[flow.flow_key] = flow
+      rebuiltKeys.sort(system.cmp[string])
+      var expectedKeys = saved.flow_keys
+      expectedKeys.sort(system.cmp[string])
+      if rebuiltKeys != expectedKeys:
+        raise newException(ValueError,
+          "replayed so graph does not match its checkpoint")
+      result.add(dynamicNodes)
+      context.so_expansions.add(SoExpansion(id: saved.id,
+        parent_flow_key: saved.parent_flow_key,
+        input_artifact_id: saved.input_artifact_id,
+        budget: runtime_budget(saved.budget), flow_keys: saved.flow_keys))
+    else:
+      raise newException(ValueError,
+        "SQLite so expansion replay requires serialized string artifacts")
+  context.next_so_expansion_id = checkpoint.next_so_expansion_id
 
 proc register_generated_artifact[A](
     context: RuntimeContext[A];
@@ -1762,7 +1973,7 @@ proc suspend_model[A](
     pool_id: int;
     pool_stack: seq[int]
 ) =
-  let input_record = lookup_artifact(plan.context, input_id)
+  discard lookup_artifact(plan.context, input_id)
   let cost = profile_cost(flow.profile.model, flow.profile.effort)
   plan.budget.admit_model(
     pool_id,
@@ -1796,6 +2007,14 @@ proc suspend_model[A](
   plan_assert(plan, not plan.model_requests.hasKey(key),
     "duplicate model request ID")
   plan.model_requests[key] = invocation
+  plan.context.pending_model_dispatches.add(key)
+  if not plan.context.store.isNil:
+    plan.context.pending_store_attempts.add(StoreAttempt(
+      request_id: key, state: sasPrepared,
+      payload_text: $(%*{
+        "flow_key": flow.flow_key,
+        "input_artifact_id": $input_id,
+        "output_artifact_id": $output_meta.id})))
   plan.context.runtime_log(
     "model.submit",
     "vecherinka",
@@ -1806,16 +2025,6 @@ proc suspend_model[A](
       ("output_artifact_id", %output_meta.id),
       ("submitter", %(if flow.submit.isNil: "default" else: "custom")),
       ("working_dir", %($output_meta.artifact_dir))))
-  if not flow.submit.isNil:
-    flow.submit(
-      plan.context, request_id, input_record.data, output_meta.artifact_dir)
-  else:
-    let submitter = if not plan.context.submitter.isNil:
-      plan.context.submitter
-    else:
-      default_model_submit[A]
-    submitter(
-      plan.context, request_id, input_record.data, output_meta.artifact_dir)
 
 proc begin_fanout[A](
     plan: var WorkPlan[A];
@@ -1962,17 +2171,25 @@ proc handle_invocation*[A](
         fail_runtime(plan, error.msg)
       return
     of fk_so:
-      let working_dir = lookup_artifact(
-        plan.context, value_id).meta.artifact_dir
-      let child = current.execute(
-        value, plan.context.runtime_dir, working_dir,
-        plan.budget.budget_context(active_pool))
+      let soBudget = plan.budget.budget_context(active_pool)
+      let child = current.execute(value, soBudget)
       let child_destination = prepend_continuation(current.continuation,
         destination)
       if child.isNil:
         deliver_destination(
           plan, child_destination, value_id, active_pool, active_stack)
       else:
+        let expansionId = plan.context.next_so_expansion_id
+        inc plan.context.next_so_expansion_id
+        let dynamicNodes = collect_so_expansion_nodes(child, expansionId)
+        var flowKeys: seq[string]
+        for dynamicFlow in dynamicNodes:
+          flowKeys.add(dynamicFlow.flow_key)
+        flowKeys.sort(system.cmp[string])
+        plan.context.so_expansions.add(SoExpansion(id: expansionId,
+          parent_flow_key: current.flow_key,
+          input_artifact_id: value_id, budget: soBudget,
+          flow_keys: flowKeys))
         enqueue_ready(plan, new_invocation(
           child,
           value_id,
@@ -1992,6 +2209,12 @@ proc handle_invocation*[A](
       return
 
   deliver_destination(plan, destination, value_id, active_pool, active_stack)
+
+proc snapshot_work_plan*[A](plan: WorkPlan[A]): WorkPlanCheckpoint
+proc restore_work_plan*[A](checkpoint: WorkPlanCheckpoint;
+    top_level_flows: seq[Flow[A]]; context: RuntimeContext[A];
+    flow_nodes: openArray[Flow[A]]): WorkPlan[A]
+proc persist_plan_checkpoint[A](plan: var WorkPlan[A]; status: string)
 
 proc handle_runtime_event[A](
     plan: var WorkPlan[A];
@@ -2096,11 +2319,6 @@ proc handle_runtime_event[A](
          $event.output_meta.get.artifact_dir == $output_meta.artifact_dir and
          event.output_meta.get.predecessor_ids == output_meta.predecessor_ids),
       "model completion output metadata mismatch")
-    if can_ack_tool:
-      runtime.accept_tool_response(
-        event.tool_request_id.get,
-        true,
-        @[dynamic_tool_text(event.output_arguments)])
     ## Keep binding alive until context teardown. A queued duplicate callback
     ## must still be able to send an idempotent response or be quarantined.
     plan.model_requests.del(key)
@@ -2108,15 +2326,30 @@ proc handle_runtime_event[A](
     if plan.context.pending_agent_starts.hasKey(key):
       plan.context.pending_agent_starts.del(key)
     let output_id = register_artifact(plan.context, artifact, output_meta)
+    if not plan.context.store.isNil:
+      let attempt = plan.context.store.attempt(key)
+      if attempt.isNone:
+        plan.fail_runtime("model attempt disappeared before output commit: " & key)
+        return
+      plan.context.pending_store_attempts.add(StoreAttempt(
+        request_id: key, state: sasCommitted,
+        payload_text: attempt.get.payload_text))
+    deliver_destination(
+      plan, invocation.destination, output_id, invocation.pool_id,
+      invocation.pool_stack)
+    persist_plan_checkpoint(plan,
+      if plan.failed: "failed" elif plan.finished: "finished" else: "running")
+    if can_ack_tool:
+      runtime.accept_tool_response(
+        event.tool_request_id.get,
+        true,
+        @[dynamic_tool_text(event.output_arguments)])
     plan.context.runtime_log(
       "model.finish",
       "vecherinka",
       log_fields(
         ("request_id", %(request_id_key(event.request_id))),
         ("output_artifact_id", %output_id)))
-    deliver_destination(
-      plan, invocation.destination, output_id, invocation.pool_id,
-      invocation.pool_stack)
   of rev_model_error:
     let key = request_id_key(event.request_id)
     if not plan.model_requests.hasKey(key):
@@ -2125,6 +2358,12 @@ proc handle_runtime_event[A](
         "vecherinka",
         log_fields(("request_id", %key), ("reason", %"unknown or duplicate error")))
       return
+    if not plan.context.store.isNil:
+      let attempt = plan.context.store.attempt(key)
+      if attempt.isSome and attempt.get.state notin {sasCommitted, sasFailed}:
+        plan.context.pending_store_attempts.add(StoreAttempt(
+          request_id: key, state: sasFailed,
+          payload_text: attempt.get.payload_text))
     plan.model_requests.del(key)
     plan.context.model_turn_requests.del(key)
     if plan.context.pending_agent_starts.hasKey(key):
@@ -2207,6 +2446,8 @@ proc handle_global_event[A](
     plan.context.runtime_log("run.shutdown", "vecherinka")
     plan.finished = true
 
+proc dispatch_model_requests[A](plan: var WorkPlan[A])
+
 proc run_work_plan*[A](
     plan: var WorkPlan[A];
     runtime: ptr CodexRuntime = nil
@@ -2218,6 +2459,9 @@ proc run_work_plan*[A](
     let received = try_recv_global_event(plan.context)
     if received.data_available:
       handle_global_event(plan, messenger, runtime, received.event)
+      persist_plan_checkpoint(plan,
+        if plan.failed: "failed" elif plan.finished: "finished" else: "running")
+      dispatch_model_requests(plan)
     elif not messenger.process_exited and
         messenger.codex_process_exit_seen(runtime):
       ## Poll process status while channel is idle. Reader EOF events still
@@ -2230,30 +2474,186 @@ proc run_work_plan*[A](
     else:
       sleep(1)
 
-proc execute_flows*[A](
+proc persist_plan_checkpoint[A](plan: var WorkPlan[A]; status: string) =
+  let context = plan.context
+  if context.isNil or context.store.isNil:
+    return
+  let payload = encode_checkpoint(snapshot_work_plan(plan))
+  if payload == context.last_checkpoint_payload and
+      status == context.last_checkpoint_status and
+      context.pending_store_artifacts.len == 0 and
+      context.pending_store_attempts.len == 0:
+    return
+  context.pending_store_artifacts.sort(
+    proc(left, right: StoredArtifact): int = cmp(left.id, right.id))
+  let checkpoint = StoreCheckpoint(
+    sequence: context.checkpoint_sequence + 1,
+    format_version: checkpoint_format_version,
+    status: status,
+    payload_text: payload)
+  context.store.commit_transition(
+    context.checkpoint_sequence,
+    context.pending_store_artifacts,
+    checkpoint,
+    context.pending_store_attempts)
+  context.checkpoint_sequence = checkpoint.sequence
+  context.last_checkpoint_payload = payload
+  context.last_checkpoint_status = status
+  context.pending_store_artifacts.setLen(0)
+  context.pending_store_attempts.setLen(0)
+  # The store is authoritative. Scheduler state carries artifact IDs, so
+  # discard hydrated values after the transition and load them only when used.
+  context.artifacts.clear()
+
+proc request_id_from_key(key: string): RequestId =
+  if key.len < 3 or key[1] != ':':
+    raise newException(ValueError, "invalid Vecherinka request key: " & key)
+  case key[0]
+  of 'i':
+    let value = parseBiggestInt(key[2 .. ^1])
+    RequestId(kind: rid_integer, integer_value: value)
+  of 's':
+    RequestId(kind: rid_string, string_value: key[2 .. ^1])
+  else:
+    raise newException(ValueError, "unknown Vecherinka request key: " & key)
+
+proc flow_needs_codex[A](flow: Flow[A]; seen: var HashSet[pointer]): bool =
+  if flow.isNil:
+    return false
+  let address = cast[pointer](flow)
+  if address in seen:
+    return false
+  seen.incl(address)
+  if flow.kind in {fk_model, fk_so}:
+    return true
+  if flow_needs_codex(flow.continuation, seen):
+    return true
+  case flow.kind
+  of fk_top:
+    flow_needs_codex(flow.body, seen)
+  of fk_fanout:
+    for branch in flow.branches:
+      if flow_needs_codex(branch, seen): return true
+    false
+  of fk_lift:
+    flow_needs_codex(flow.inner, seen)
+  else:
+    false
+
+proc workflow_needs_codex[A](flows: openArray[Flow[A]]): bool =
+  var seen = initHashSet[pointer]()
+  for flow in flows:
+    if flow_needs_codex(flow, seen): return true
+  false
+
+proc dispatch_model_requests[A](plan: var WorkPlan[A]) =
+  if plan.context.pending_model_dispatches.len == 0:
+    return
+  let pending = plan.context.pending_model_dispatches
+  plan.context.pending_model_dispatches.setLen(0)
+  for key in pending:
+    if not plan.model_requests.hasKey(key):
+      continue
+    let invocation = plan.model_requests[key]
+    if invocation.flow.isNil or invocation.flow.kind != fk_model or
+        invocation.output_meta.isNone:
+      plan.fail_runtime("cannot dispatch invalid model invocation")
+      return
+    let request_id = request_id_from_key(key)
+    let input_record = lookup_artifact(plan.context, invocation.input_id)
+    var output_meta = invocation.output_meta.get
+    if $output_meta.artifact_dir == "":
+      output_meta.artifact_dir = plan.context.run_dir /
+        Path("artifact-" & $output_meta.id)
+      if not dirExists($output_meta.artifact_dir):
+        createDir($output_meta.artifact_dir)
+      invocation.output_meta = some(output_meta)
+
+    if not plan.context.store.isNil:
+      let saved_attempt = plan.context.store.attempt(key)
+      if saved_attempt.isNone:
+        plan.fail_runtime("model attempt is missing from SQLite: " & key)
+        return
+      let payload = saved_attempt.get.payload_text
+      if saved_attempt.get.state == sasSubmitted:
+        plan.context.pending_store_attempts.add(StoreAttempt(
+          request_id: key, state: sasUnknown, payload_text: payload))
+        persist_plan_checkpoint(plan, "running")
+      let current_attempt = plan.context.store.attempt(key)
+      if current_attempt.isNone or current_attempt.get.state notin
+          {sasPrepared, sasUnknown, sasSubmitted}:
+        plan.fail_runtime(
+          "model attempt cannot be resumed from SQLite: " & key)
+        return
+      plan.context.pending_store_attempts.add(StoreAttempt(
+        request_id: key, state: sasSubmitted,
+        payload_text: current_attempt.get.payload_text))
+      persist_plan_checkpoint(plan, "running")
+
+    try:
+      if not invocation.flow.submit.isNil:
+        invocation.flow.submit(plan.context, request_id, input_record.data,
+          output_meta.artifact_dir)
+      else:
+        let submitter = if not plan.context.submitter.isNil:
+          plan.context.submitter
+        else:
+          default_model_submit[A]
+        submitter(plan.context, request_id, input_record.data,
+          output_meta.artifact_dir)
+    except CatchableError as error:
+      enqueue_agent_error(plan.context, request_id, error.msg)
+    if not plan.context.store.isNil:
+      plan.context.artifacts.clear()
+
+proc metadata_for_database(path: Path; metadata: StoreMetadata): StoreMetadata =
+  result = metadata
+  if result.run_id.len == 0:
+    result.run_id = "sqlite:" & absolutePath($path)
+
+proc execute_flows_impl[A](
     top_level_flows: seq[Flow[A]];
-    input: A;
+    input: Option[A];
     initial_budget: Budget = 0.0;
     prompt_templates: AgentPromptTemplates = default_agent_prompt_templates;
     pool_weights: seq[PoolWeight] = @[(name: "default", weight: 1.0)];
     submitter: ModelSubmitter[A] = nil;
     transport: LlmTransport[A] = nil;
     runtime: ptr CodexRuntime = nil;
-    logger: StructuredLogger = nil
+    logger: StructuredLogger = nil;
+    database_path: Path;
+    store_metadata: StoreMetadata;
+    flow_nodes: seq[Flow[A]];
+    resume: bool = false
 ): WorkPlan[A] =
   ## The main thread owns runtime protocol state. A supplied runtime is
   ## borrowed; otherwise this call owns the complete Codex lifecycle.
   let source_root = Path(expandFilename(os.getCurrentDir()))
-  let run_dir = create_run_directory(source_root)
+  let run_dir = create_run_directory(Path(getTempDir()))
   let context = new_runtime_context(
     submitter, transport, run_dir, source_root, logger, prompt_templates)
-  context.provenance_store = open_provenance_store(
-    run_dir / Path("vecherinka_provenance.sqlite3"), run_dir)
+  when A is string:
+    discard
+  else:
+    raise newException(ValueError,
+      "SQLite execution currently requires serialized string artifacts")
+  if store_metadata.codec_version != 1 or
+      store_metadata.checkpoint_version != checkpoint_format_version:
+    raise newException(ValueError,
+      "unsupported SQLite artifact or checkpoint version")
+  let actual_metadata = if resume: store_metadata else:
+    metadata_for_database(database_path, store_metadata)
+  context.store = if resume:
+    open_vecherinka_store(database_path, actual_metadata)
+  else:
+    create_vecherinka_store(database_path, actual_metadata)
   context.runtime_log(
     "run.start",
     "vecherinka",
     log_fields(
       ("run_dir", %($lastPathPart(run_dir))),
+      ("database_path", %(if context.store.isNil: ""
+        else: $context.store.database_path)),
       ("runtime_dir", %($lastPathPart(source_root))),
       ("owns_runtime", %runtime.isNil)))
   var owned_runtime = false
@@ -2262,31 +2662,73 @@ proc execute_flows*[A](
   var readers_started = false
   var plan_initialized = false
   try:
-    if active_runtime.isNil:
+    if active_runtime.isNil and transport.isNil and submitter.isNil and
+        workflow_needs_codex(top_level_flows):
       active_runtime = init_codex_runtime($context.run_dir)
       owned_runtime = true
     context.codex_runtime = active_runtime
     open_global_events(context)
-    start_codex_readers(readers, context, active_runtime)
-    readers_started = true
-    result = init_work_plan(
-      top_level_flows, context, initial_budget, pool_weights)
-    plan_initialized = true
-    let input_meta = ArtifactMeta(
-      id: 0,
-      artifact_dir: source_root,
-      predecessor_ids: @[],
-      operation: "input",
-      flow_kind: "entry",
-      request_id: "")
-    let input_id = register_artifact(context, input, input_meta)
-    enqueue_ready(result, new_invocation(
-      result.entry,
-      input_id,
-      Destination[A](kind: dk_finished)))
+    if not active_runtime.isNil:
+      start_codex_readers(readers, context, active_runtime)
+      readers_started = true
+    if resume:
+      if not input.isNone:
+        raise newException(ValueError, "resume does not accept a new input")
+      let existing_status = context.store.status()
+      if existing_status in ["finished", "failed"]:
+        raise newException(ValueError,
+          "cannot resume a terminal SQLite run: " & existing_status)
+      let saved = context.store.checkpoint()
+      if saved.isNone:
+        raise newException(ValueError, "SQLite run has no work plan checkpoint")
+      let saved_checkpoint = decode_checkpoint(saved.get.payload_text)
+      context.checkpoint_sequence = saved.get.sequence
+      context.last_checkpoint_payload = saved.get.payload_text
+      context.last_checkpoint_status = saved.get.status
+      let allFlowNodes = reconstruct_so_expansions(saved_checkpoint,
+        context, flow_nodes)
+      result = restore_work_plan(saved_checkpoint, top_level_flows,
+        context, allFlowNodes)
+      plan_initialized = true
+      for key in result.model_requests.keys:
+        context.pending_model_dispatches.add(key)
+      persist_plan_checkpoint(result, "running")
+      for ready_id in result.pending_ready.keys:
+        send_global_event(context, GlobalEvent(kind: gek_ready,
+          ready_id: ready_id))
+    else:
+      if input.isNone:
+        raise newException(ValueError, "new execution requires an input")
+      result = init_work_plan(
+        top_level_flows, context, initial_budget, pool_weights)
+      plan_initialized = true
+      let input_meta = ArtifactMeta(
+        id: 0,
+        artifact_dir: Path(""),
+        predecessor_ids: @[],
+        operation: "input",
+        flow_kind: "entry",
+        request_id: "")
+      let input_id = register_artifact(context, input.get, input_meta)
+      enqueue_ready(result, new_invocation(
+        result.entry,
+        input_id,
+        Destination[A](kind: dk_finished)))
+      persist_plan_checkpoint(result, "running")
+    dispatch_model_requests(result)
     run_work_plan(result, active_runtime)
   finally:
     if plan_initialized:
+      if not context.store.isNil:
+        if result.output.isSome:
+          discard lookup_artifact(context, result.output.get)
+        try:
+          persist_plan_checkpoint(result,
+            if result.failed: "failed" elif result.finished: "finished"
+            else: "interrupted")
+        except CatchableError as error:
+          context.runtime_log("checkpoint.error", "sqlite",
+            log_fields(("error", %error.msg)))
       context.runtime_log(
         if result.failed: "run.fail" elif result.finished: "run.finish"
         else: "run.abort",
@@ -2297,15 +2739,7 @@ proc execute_flows*[A](
     else:
       context.runtime_log("run.abort", "vecherinka",
         log_fields(("reason", %"plan initialization failed")))
-    if not context.provenance_store.isNil:
-      let status = if result.failed:
-        "failed"
-      elif result.finished:
-        "finished"
-      else:
-        "aborted"
-      context.provenance_store.set_status(status)
-      context.provenance_store.close()
+    context.store.close()
     if readers_started:
       stop_codex_readers(readers)
     retire_llm_tool_bindings(cast[pointer](context), owned_runtime)
@@ -2313,8 +2747,43 @@ proc execute_flows*[A](
     if owned_runtime:
       deinit_codex_runtime(active_runtime)
       context.codex_runtime = nil
+    try:
+      removeDir($run_dir)
+    except CatchableError:
+      discard
 
-proc execute_flows*[A](top_level_flows: seq[Flow[A]]) =
-  ## Compatibility entry point used by the current generated solve wrapper.
-  ## Full execution requires a real input and uses the overload above.
-  discard init_work_plan(top_level_flows)
+proc create_sqlite_run*[A](
+    top_level_flows: seq[Flow[A]];
+    input: A;
+    database_path: Path;
+    metadata: StoreMetadata;
+    flow_nodes: seq[Flow[A]];
+    initial_budget: Budget = 0.0;
+    prompt_templates: AgentPromptTemplates = default_agent_prompt_templates;
+    pool_weights: seq[PoolWeight] = @[(name: "default", weight: 1.0)];
+    submitter: ModelSubmitter[A] = nil;
+    transport: LlmTransport[A] = nil;
+    runtime: ptr CodexRuntime = nil;
+    logger: StructuredLogger = nil
+): WorkPlan[A] =
+  execute_flows_impl(top_level_flows, some(input), initial_budget,
+    prompt_templates, pool_weights, submitter, transport, runtime, logger,
+    database_path, metadata, flow_nodes, false)
+
+proc resume_sqlite_run*[A](
+    top_level_flows: seq[Flow[A]];
+    database_path: Path;
+    metadata: StoreMetadata;
+    flow_nodes: seq[Flow[A]];
+    prompt_templates: AgentPromptTemplates = default_agent_prompt_templates;
+    submitter: ModelSubmitter[A] = nil;
+    transport: LlmTransport[A] = nil;
+    runtime: ptr CodexRuntime = nil;
+    logger: StructuredLogger = nil
+): WorkPlan[A] =
+  execute_flows_impl(top_level_flows, none(A), prompt_templates =
+    prompt_templates, submitter = submitter, transport = transport,
+    runtime = runtime, logger = logger, database_path = database_path,
+    store_metadata = metadata, flow_nodes = flow_nodes, resume = true)
+
+include vecherinka_checkpoint_adapter_impl

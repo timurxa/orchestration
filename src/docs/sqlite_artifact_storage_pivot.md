@@ -1,7 +1,8 @@
 # Intention: SQLite-backed runs, artifacts, and resumption
 
-Status: migration design. Implementation is in progress; this file records
-the decisions that implementation must preserve.
+Status: implementation integrated; verification and workflow fault checks are
+in progress. This file keeps the original impact analysis and records the
+implemented design and reversals below.
 
 ## Intention
 
@@ -10,40 +11,47 @@ execution state as is needed to continue an interrupted workflow. Store typed
 artifact values in a versioned serialized form, store complete file contents in
 SQLite, and persist the work graph and its current execution checkpoint.
 
-Keep the existing filesystem boundary where Codex or a subprocess needs a
-working directory. Those directories are temporary staging areas: materialize
-inputs from SQLite, let the process use paths, then import submitted outputs
-back into SQLite. A run directory may still contain the database and temporary
+Keep the local-filesystem boundary only where Codex needs a working directory.
+That directory is temporary staging: materialize Blob inputs from SQLite, let
+the model use local paths, then import submitted output bytes back into
+SQLite. A run directory may still contain the database and temporary
 workspaces, but it is not the artifact store.
 
-Keep `codex_json` unchanged unless exact Codex-thread reattachment proves to
-need a protocol operation that its current types do not represent. One narrow
-`codex_runtime` change is already indicated: the current agent gets full
-filesystem access, which is incompatible with trusting SQLite as canonical
-state. Use an effective workspace-only boundary or keep DB access behind a
-parent-process broker. For workflow-level resume, restore the last committed
-Vecherinka checkpoint; retry an in-flight model step from its stored input if
-the same Codex thread cannot be reattached.
+Keep `codex_json` unchanged: it already models and serializes `workspace-write`.
+The thread sandbox default in `codex_runtime` has been changed from
+`danger-full-access` to `workspace-write`, because unrestricted child writes
+are incompatible with trusting SQLite as canonical state. Each child receives
+its per-call working directory as cwd.
+For workflow-level resume, restore the last committed Vecherinka checkpoint;
+retry an in-flight model step from its stored input if the same Codex thread
+cannot be reattached.
 
-## Current design and gap
+## Implemented model
 
-Today, typed `A` values live only in `RuntimeContext.artifacts`; files live in
-`artifact-N` directories; SQLite stores run key/value metadata and artifact
-paths/lineage only. The `WorkPlan` also exists only in memory. It contains the
-ready queue, joins, continuations, model invocations, budget ledger, result,
-and terminal flags. Its `Flow` values contain Nim procedures and closures, so
-the current plan cannot be serialized directly.
+Generated `solve` wrappers create a SQLite-backed run; generated
+`resume_<solve>` wrappers reopen its database and restore the latest checkpoint.
+Every artifact is a versioned serialized `string` envelope in SQLite. The
+generated codec serializes typed values, including complete Blob and BlobTree
+bytes. Runtime memory is a lazy cache. Durable runs do not create artifact
+directories; only an LLM call gets a temporary workspace where Blob values are
+materialized and submitted files are read back before committing the output.
 
-`execute_flows` always creates a new `run-*` directory and database, registers
-input artifact ID 0 against the launch directory, runs the plan, and closes
-Codex. Reopening the current provenance DB resets run status/timestamps rather
-than resuming. Thus durable artifact bytes alone would not resume the workflow.
+The database stores workflow metadata, artifacts and ordered predecessor IDs,
+model-attempt state, and a versioned scheduler checkpoint. Generated flow keys
+and a source manifest identify static code. Checkpoints store stable flow keys,
+budget state, ready work, joins, model invocations, counters, outputs, and
+dynamic `so` expansion recipes. Resume replays those path-free callbacks from
+the saved serialized input and exact budget snapshot, then checks the generated
+flow keys before restoring. `so` callbacks therefore have a deterministic,
+side-effect-free contract. Model submission remains at-least-once across an
+uncertain interruption; a committed result is stored with its checkpoint
+before the tool success response is sent.
 
-Sources: [run lifecycle](../api/vecherinka_runtime.nim#L2229),
-[`WorkPlan` state](../api/vecherinka_runtime.nim#L348),
-[artifact storage](../api/vecherinka_runtime.nim#L316),
-[provenance schema](../api/vecherinka_provenance.nim#L40),
-[provenance initialization](../api/vecherinka_provenance.nim#L98).
+The old non-durable `execute_flows` entry points have been removed. Use the
+generated `solve`/`resume_<solve>` pair or the explicit
+`create_sqlite_run`/`resume_sqlite_run` low-level API. `codex_json` remains
+unchanged; `codex_runtime` changes only the child sandbox selection to the
+already-supported `workspace-write` mode.
 
 ## Simplest target model
 
@@ -100,20 +108,19 @@ inspection needs justify it.
 
 ### `Blob` and directory payloads
 
-[`Location`](../api/vecherinka_comptime.nim#L34) currently means “path relative
-to `RuntimeContext.runtime_dir`,” not content. `Blob` should mean “durable file
-content available from this run's SQLite store,” not a user-visible filesystem
-reference. It can be represented internally by a stable ID; the complete bytes
-live in the DB. File paths remain local references only at the model or
-subprocess boundary.
+[`Location`](../api/vecherinka_comptime.nim#L34) originally meant “path
+relative to `RuntimeContext.runtime_dir`,” not content. The DSL now rejects it
+as an artifact type and directs authors to content values. `Blob` means
+“durable file content available from this run's SQLite store,” not a
+user-visible filesystem reference. The complete bytes live in the DB. File
+paths remain local references only in the temporary model workspace.
 
-The runtime currently permits a `Location` to name either a file or a
-directory. Preserve that behavior explicitly: either define a `BlobTree`
-manifest of normalized relative paths to Blob IDs, or define a single packed
-directory Blob format. A single-file Blob type alone would silently narrow the
-current contract. Tree rules must cover empty directories, path traversal,
-symlinks, permissions/executable bits, and duplicate basenames when materialized
-into the model workspace.
+The legacy runtime allowed a `Location` to name either a file or a directory.
+`BlobTree` preserves directory layouts using normalized relative paths and
+complete file bytes, including empty directories. Tree rules cover traversal,
+symlinks, file/directory conflicts, and duplicate basenames when materialized
+into the model workspace. Executable bits and other filesystem metadata are
+not part of the current content contract.
 
 Import only files/directories referenced by the workflow input, not the entire
 launch directory. Snapshot those external inputs into SQLite before scheduling
@@ -185,24 +192,21 @@ Codex-session resume path:
 - [`codex_json.RequestKind`](../api/codex_json.nim#L6) and the runtime calls
   cover initialize, thread start, turn start, goal set, and stop; there is no
   resume/read/reconcile operation in this source.
-- `create_agent` currently requests `sm_danger_full_access`
-  ([codex_runtime.nim](../api/codex_runtime.nim#L886)); the project instructions
-  explicitly say the prompt's working-directory limit is not an OS boundary
-  ([AGENTS.md](../../AGENTS.md#L30)). A model process with that access must not
-  be trusted with a writable SQLite database that contains canonical artifacts
-  and checkpoints.
+- `create_agent` currently requests `workspace-write`
+  ([codex_runtime.nim](../api/codex_runtime.nim#L886)); the agent cwd is the
+  per-call workspace and the canonical run DB is its parent. The effective
+  filesystem boundary still needs integration verification against the actual
+  app-server before workspace confinement is treated as proven.
 - Active callbacks also contain process-local pointers and generated
   materializer procedures. These must be recreated by Vecherinka, not written
   into SQLite as pointers.
 
 `codex_json.SandboxMode` already includes `sm_workspace_write`
-([codex_json.nim](../api/codex_json.nim#L42)), so requesting that mode appears
-not to require a JSON type change. Its effective behavior still needs
-verification against the app-server in use, specifically that an agent whose
-cwd is a per-artifact workspace cannot write the sibling run database. If it
-cannot confine the agent to that workspace, use a parent-process storage broker
-or another enforced isolation boundary before relying on SQLite as canonical
-state.
+([codex_json.nim](../api/codex_json.nim#L42)), so requesting that mode required
+no JSON type change. A fake-server test confirms the request is serialized.
+The effective filesystem boundary still needs integration verification against
+the app-server in use, especially that a model process cannot write the sibling
+run database.
 
 Therefore persist Vecherinka invocation/attempt state, not `CodexRuntime`,
 `Process`, reader threads, channels, or tool-binding pointers. Recreate the same
@@ -213,7 +217,7 @@ investigate a narrow reattach/reconcile hook in `codex_runtime`; only change
 the external app-server supports such a hook is not established by this source
 audit.
 
-## Impact map
+## Original impact map (historical)
 
 | Surface | Current contract | Reformulation needed |
 | --- | --- | --- |
@@ -221,10 +225,10 @@ audit.
 | Workflow lowering | `Flow` is a runtime object graph containing closures/procs, roots, continuations, and branch data. | Emit stable node/implementation keys and a deterministic static manifest. Rebuild executable procs from the current binary; save only IDs/config and dynamic continuation state. Version the manifest and reject incompatible resume. |
 | Scheduler and joins | `WorkPlan` queues, invocations, join slots, flags, counters, and active pools are memory-only. | Serialize a versioned checkpoint DTO in SQLite after every logical transition. Persist budgets and dynamic branch choices. Advance checkpoint and artifacts in the same transaction; reconstruct `WorkPlan` on resume. |
 | Typed values | `ArtifactRecord[A].data` lives in a table in RAM; compile-time pack/unpack is not serialization. | Generate versioned encode/decode for supported types: inline values, objects, variants, tuples, sequences, options, fixed arrays, distinct wrappers, and Blob references. Persist root input and every generated/model/join value. |
-| Files and `Location` | `Location` is a runtime-relative path; inputs are copied into consumer folders and model outputs are canonicalized to run-relative paths. Runtime accepts files and directories. | Replace durable `Location` with `Blob` plus a directory-tree form if needed. Store all content; resolve `Blob` to a local temporary path only at process boundaries. Define immutable snapshot and tree semantics. |
+| Files and `Location` | `Location` used to be a runtime-relative path, but the DSL now rejects it as artifact data. Blob and BlobTree values carry full bytes; model inputs are materialized in the call workspace and outputs are read into Blob values. | Persist those complete values in SQLite and remove durable run-relative paths. Keep file paths only in the temporary model workspace. |
 | Model and submitter APIs | `LlmCallSpec`, `LlmOutput`, `ModelSubmitter`, prompts, and Codex cwd use `runtime_dir`/`working_dir`. | Keep the required cwd/path for Codex. Make it explicitly temporary staging. Materialize Blob inputs there, import outputs before accepting `finish_work`, and remove launch-root paths from durable contracts. Persist enough model-attempt data to retry. |
-| Filesystem isolation | `create_agent` sends `sm_danger_full_access`; the project instructions state that a prompt's working-directory limit is not enforced. | Before the SQLite DB is canonical, enforce a workspace-only boundary for the model process or broker all store access through the parent. The existing `SandboxMode` type already has `sm_workspace_write`; verify actual enforcement. This is the one currently proven Codex runtime concern; it does not require changing JSON schemas by itself. |
-| `so` and context | `so` gets input plus optional `Path`s and/or a `BudgetContext`; `working_dir` is the input artifact's directory. There is no `ctx` identifier or artifact access facade. | Keep pure routing `so` simple. For file work, expose a small storage/workspace context with Blob read, import, and export operations; keep the read-only budget snapshot separate. Eliminate implicit writes to a prior artifact directory. Require replay-safe local behavior. |
+| Filesystem isolation | `create_agent` now sends `sm_workspace_write`; `codex_json` already serializes this mode. | Verify the installed app-server confines a child to its call workspace before relying on this boundary. If it does not, place the DB outside an enforced sandbox or use a storage broker. |
+| `so` and context | `so` gets input plus optional `Path`s and/or a `BudgetContext`; `working_dir` is the input artifact's directory. There is no `ctx` identifier or artifact access facade. | Keep `so` as a pure typed transformation/routing callback. It receives complete Blob bytes through its input and never gets a filesystem path or storage handle. Keep the read-only `BudgetContext` separate. File staging belongs only at the LLM boundary. Require replay-safe local behavior because an uncommitted callback can run again after interruption. |
 | Run/Artifact store | `RuntimeContext` combines in-memory artifacts, paths, provenance store, transport, and protocol state. Registration mutates memory before recording lineage. | Make SQLite authoritative; make memory cache disposable. Commit data, Blob/tree rows, lineage, checkpoint, and attempt status together. Keep cleanup exception-safe. Version/open/create DB modes explicitly. |
 | Provenance and logging | Provenance rows key artifacts by path; JSONL carries artifact IDs and `artifact_dir`; logging is optional and non-fatal. | Use stable IDs and ordered predecessor IDs in SQLite. Keep JSONL diagnostic/export only. Preserve duplicate predecessor edges. Update or replace path-dependent event consumers. |
 | Consumers and tools | Workflows read `Location` with `readFile`; metaoptimizer scans nested run DBs; graph renderer parses JSONL `artifact.commit` with `artifact_dir`. | Use store reads or deliberate workspace exports. Update metaoptimizer/inspector, provenance POC, `tools/artifact_graph.py`, and event tests to use stable IDs/database queries or a versioned graph export. |
@@ -257,8 +261,7 @@ before implementation:
 1. **SQLite owns artifact bytes.** Filesystem object stores and run-local blob
    caches are rejected as canonical storage because they leave a second source
    of truth. Serialized values and complete file bytes live in the run DB.
-   Temporary paths are derived workspaces used only while an LLM or a
-   subprocess runs.
+   Temporary paths are derived workspaces used only while an LLM call runs.
 2. **`Blob` is the durable file value.** Replace path-valued `Location` in
    workflow data with a Blob/content representation. Model tool output still
    uses workspace-relative filenames; the runtime validates and reads those
@@ -270,14 +273,15 @@ before implementation:
    scheduler tables would duplicate the current `WorkPlan` structure. A
    versioned data-only checkpoint row is the smaller recovery representation;
    SQLite transactions publish artifacts and the next checkpoint together.
-4. **Persist identities and data, never Nim pointers.** The current runtime
-   graph includes closures, callback pointers, and recursive destinations.
-   Stable workflow/node keys must bind persisted work to code regenerated from
-   the current compiled workflow. Current `so`-returned compositions need a
-   serializable route/transition representation; arbitrary pointer graphs and
-   captured process state are not a persistence format. Local callbacks that
-   were not committed may run again after a crash, so their side effects must
-   be staged/idempotent or explicitly at-least-once.
+4. **Persist identities and data, never Nim pointers.** Static flow keys come
+   from deterministic lowering order and are included in the workflow
+   manifest. Checkpoints store keys and scheduler data, then rebuild static
+   code from the running binary. A dynamic `so` expansion stores its parent
+   key, input artifact ID, exact budget snapshot, expansion ID, and resulting
+   node keys; resume replays the path-free callback and verifies those keys.
+   `so` callbacks must be deterministic and side-effect free. Model work is
+   never replayed as a graph builder and retains its explicit at-least-once
+   retry semantics.
 5. **Use generated direct constructors for typed decoding.** `jsonutils` and
    Schematic cannot decode the entire existing artifact shape set: range
    fields inside variants trigger default-initialization failures, and
@@ -285,12 +289,13 @@ before implementation:
    from the existing `ArtifactNode` metadata and construct complete Nim
    values without `default(T)`. Keep the tool output schema separate from this
    storage codec.
-6. **Keep `codex_json` and `codex_runtime` stable absent proof.** Workflow
+6. **Keep the Codex protocol stable absent proof.** Workflow
    resume retries an interrupted model step from its committed input; it does
-   not promise same-thread Codex reattachment. The existing Codex JSON model
-   already has a workspace-write sandbox option. The runtime sandbox setting
-   will change only if real app-server verification confirms that full access
-   would let an agent alter the canonical DB.
+   not promise same-thread Codex reattachment. Source inspection proved that
+   `codex_runtime` requested `danger-full-access`. The existing `codex_json`
+   enum already supported `workspace-write`, so the minimal necessary runtime
+   change selects that mode. Leave the remaining Codex protocol and runtime
+   unchanged unless resume requirements prove otherwise.
 
 The primary checkpoint promise is recovery from the last committed scheduler
 transition. SQLite cannot make an external model call or arbitrary callback
@@ -307,20 +312,100 @@ received response is committed before tool success is acknowledged.
   source changes, but makes a path look like the durable value and hides the
   storage boundary from workflow authors. `Blob` makes the value semantics
   explicit.
-- **Serialize the complete arbitrary runtime Flow pointer graph:** closest to
-  today's most dynamic `so` callbacks, but requires a second recursive IR,
-  callback capture codecs, and factory identities. This is more machinery than
-  a stable route/transition key and is not justified by current examples.
+- **Serialize every runtime Flow node and closure:** would require a second
+  recursive IR, typed raw-value codecs, callback factories, and capture
+  identities. The current path-free `so` contract lets resume rebuild only
+  committed dynamic expansions from their origins with less machinery.
 - **Replay the whole workflow from the beginning:** avoids restoring scheduler
   state but repeats committed model calls, breaks budget accounting, and does
   not meet interrupted-process resume.
 
-Reverse the selected route/transition representation only if a real workflow
-needs to synthesize arbitrary Flow graphs at runtime. Reverse the per-run DB
-choice only if cross-run deduplication or shared artifact querying becomes a
-required product feature. Neither change is needed to preserve current
-examples, whose `so` expressions select or compose statically authored flows.
+Reverse callback replay if a workflow needs effectful or nondeterministic
+`so` behavior. Such a workflow would need a canonical serialized graph
+descriptor or a narrower DSL that makes the decision data explicit. Reverse
+the per-run DB choice only if cross-run deduplication or shared artifact
+querying becomes a required product feature.
 
-## Audit limits
+## Progress and decision log
 
-This is a static source audit and migration design. No code or tests were changed or run. Exact Codex thread reattachment, workflow version fingerprinting, Blob codec details, tree semantics, and retry cost guarantees need explicit decisions and focused prototypes before implementation.
+2026-10-05:
+
+- Added `vecherinka_blob.nim` value types for complete file bytes and canonical
+  directory trees, with safe import/materialization helpers. Added a
+  versioned SQLite store that keeps serialized artifact payloads, complete
+  file bytes, ordered predecessor edges, model-attempt state, and checkpoints.
+  Store transactions atomically commit artifacts and a checkpoint sequence.
+- Chose a versioned checkpoint snapshot over replaying all scheduler events or
+  normalizing every scheduler structure into tables. A snapshot mirrors the
+  existing `WorkPlan`; it does not duplicate that model in a second schema.
+- Reversed the original `Location` preservation idea: a path-valued workflow
+  artifact cannot be canonical SQLite data. `Blob`/`BlobTree` values carry the
+  bytes, while model output remains a temporary workspace-relative path until
+  the runtime imports it.
+- Independent review found `BlobTree` validation also needed to reject a file
+  used as an ancestor directory. That validation and a regression test were
+  added. Store creation and resume were also made distinct operations so a
+  resume cannot silently initialize or reset an existing database.
+- Focused Blob and store tests pass. The runtime still creates fresh runs,
+  stores typed artifacts and scheduler state in memory, and does not call the
+  new store. The migration is therefore not yet resumable.
+- Changed child threads from `danger-full-access` to the already-supported
+  `workspace-write` sandbox. CLI-generated app-server schema confirmed the
+  mode; a fake-server test confirms the runtime sends it. `codex_json` needed
+  no change. This scopes writes to the per-call cwd; the database will live in
+  the parent run directory, outside that cwd.
+- Added a standalone versioned checkpoint DTO with stable flow-key slots,
+  flattened destinations, ordered scheduler data, canonical JSON encoding,
+  and malformed-state validation. Its tests pass, but runtime conversion and
+  restore are not implemented yet.
+- Compared checkpoint restore with deterministic replay from the root. Replay
+  appeared smaller, but independent reviews found that it must also stabilize
+  activation identity, completion ordering, budget charging, artifact IDs,
+  dynamic `so` choices, and callback side effects. Keep checkpoint restore as
+  the default; reconsider replay only for a DSL subset that can enforce pure,
+  deterministic callbacks and stable activation IDs.
+- The remaining graph question is how checkpointed flows created by `so` are
+  rebound to code after restart. The current direction is to identify each
+  lowered flow node and store a data-only `so` origin (callback key, input
+  artifact, and the budget snapshot used for selection). Resume can recreate
+  only that selected callback graph; it must never serialize a Nim closure.
+  This can be reversed if a simpler canonical dynamic-flow representation
+  proves practical.
+- A separate store audit found that workflow execution still relies on RAM,
+  artifact folders, and a provenance-only database; `execute_flows` always
+  starts fresh, and tool success is acknowledged before the output artifact is
+  registered. These are integration blockers, not completed migration work.
+- Tightened the `so` migration target: callbacks consume and return typed
+  values, including Blob bytes, and do not materialize artifact files. This
+  removes dependence on ephemeral artifact directories and makes replay
+  behavior clearer. Codex workspaces remain the only Blob materialization
+  boundary.
+- Replaced duplicated generated `solve`/`resume` graph expressions with one
+  generated flow-builder procedure. This reduces generated code and keeps the
+  graph construction path identical on create and resume.
+- Wired generated wrappers to `create_sqlite_run` and `resume_sqlite_run`;
+  removed the non-durable `execute_flows` entry points. The run database holds
+  serialized artifacts and checkpoint state; runtime artifact directories
+  are created only for model-call staging.
+- Selected dynamic `so` origin replay after comparing it with canonical
+  topology serialization. The checkpoint now includes expansion IDs, parent
+  flow keys, input artifact IDs, exact budget snapshots, and generated node
+  keys. Resume rebuilds each expansion in order and rejects key mismatches.
+  Checkpoint format version 2 records this state.
+- Removed `Path` overloads from `so` and changed `Flow.execute` to receive only
+  serialized input plus `BudgetContext`. The only former path-taking example
+  now returns a Blob value directly.
+- Verified the direct dynamic-`so` restore path, model-result commit-before-ACK
+  ordering, pending-model retry, codec round trips, static key generation, and
+  generated path-free `so` compilation with focused tests. Full workflow
+  execution with the supplied Codex state and the complete focused suite are
+  still pending.
+
+Potential reversal: callback replay relies on the documented purity contract,
+which Nim cannot enforce for arbitrary callback bodies. If users need
+effectful or nondeterministic `so` callbacks, replace replay recipes with a
+canonical dynamic graph descriptor and generated callback factories.
+
+Keep `codex_json` unchanged. The only demonstrated `codex_runtime` change is
+selecting its already-supported `workspace-write` child sandbox so model calls
+run in their temporary staging directory.

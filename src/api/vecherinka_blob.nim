@@ -143,6 +143,31 @@ proc blobTreeFromDirectory*(source: Path): BlobTree =
   collect_directory(source, "", result.entries)
   result = canonicalBlobTree(result)
 
+proc verifyWorkspaceBlobPath*(workingDir: Path; relativePath: string;
+    expectDirectory: bool): string =
+  try:
+    let canonical = normalizeRelativePath(relativePath)
+    var source = workingDir
+    let components = canonical.split('/')
+    for index, component in components:
+      source = source / Path(component)
+      let info = getFileInfo($source, followSymlink = false)
+      if info.kind in {pcLinkToFile, pcLinkToDir}:
+        return "symbolic links are not supported: " & relativePath
+      if index < components.high and info.kind != pcDir:
+        return "path ancestor is not a directory: " & relativePath
+    if not source.isRelativeTo(workingDir):
+      return "path is outside working directory: " & relativePath
+    let info = getFileInfo($source, followSymlink = false)
+    if expectDirectory:
+      if info.kind != pcDir:
+        return "expected a directory: " & relativePath
+    elif info.kind != pcFile or info.isSpecial:
+      return "expected a regular file: " & relativePath
+    ""
+  except CatchableError as error:
+    error.msg
+
 proc require_new_destination(destination: Path) =
   if fileExists($destination) or dirExists($destination) or
       symlinkExists($destination):

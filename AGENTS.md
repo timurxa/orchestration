@@ -1,7 +1,9 @@
 # Running Vecherinka workflows
 
 Run from the repository root. The example below writes `parallel-research.jsonl`
-and a `run-*` directory under the current working directory.
+and a `run-*` directory containing `vecherinka.sqlite3` under the current
+working directory. SQLite is the durable artifact and checkpoint store; the
+model's filesystem workspace is temporary staging.
 
 ```bash
 cd /Users/alex/areas/productive/orchestration
@@ -29,10 +31,10 @@ restricted task sandbox.
 
 ## Runtime limits
 
-- The generated agent uses `approval_policy=never` and
-  `sandbox=danger-full-access`. The prompt's working-directory limit is not an
-  OS-enforced boundary. Run only trusted workflows in an isolated disposable
-  checkout or worktree.
+- Generated Codex agents use `approval_policy=never` and
+  `sandbox=workspace-write`, with each model call's working directory as its
+  cwd. The child can write its workspace, so run workflows only in an
+  isolated disposable checkout or worktree.
 - The research example requests current sources, but Vecherinka configures no
   search/retrieval tool. Source access depends on tools available to the child
   app-server; a prompt cannot provide browsing by itself. Verify sources in
@@ -46,3 +48,8 @@ restricted task sandbox.
 The repo has no `src/main.nim`; compile a specific example as above. The
 workflow language and supported shapes are documented in the
 [DSL guide](src/docs/vecherinka_dsl_guide.md).
+
+Generated workflows expose `resume_<solve>(database_path, ...)`. Preserve the
+database path printed or selected by the caller to resume after interruption.
+Dynamic `so` callbacks must be deterministic and side-effect free because
+resume rebuilds their returned graph from the saved input and budget snapshot.

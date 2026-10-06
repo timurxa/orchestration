@@ -5,6 +5,11 @@ Vecherinka is a typed Nim DSL that lowers workflow declarations into a
 and [run instructions](../../AGENTS.md). Source is authoritative; composite
 surface workflows are not all covered by end-to-end tests.
 
+Generated `solve` procedures use SQLite as the durable artifact store and
+checkpoint each scheduler transition. The generated `resume_<solve>` procedure
+restores an interrupted run from the same database. Blob values are
+materialized only in a temporary model workspace.
+
 ## Smallest workflow
 
 ```nim
@@ -34,11 +39,17 @@ The generated signature is:
 ```nim
 solve(input, initial_budget,
   prompt_templates = default_agent_prompt_templates,
+  transport = nil, logger = nil, database_path = Path(""))
+resume_solve(database_path,
+  prompt_templates = default_agent_prompt_templates,
   transport = nil, logger = nil)
 ```
 
 `initial_budget` is required. The defaults apply to all arguments after it.
-`solve` raises `ValueError` if execution fails or returns no output.
+An empty `database_path` creates `run-*/vecherinka.sqlite3` under the current
+directory. Pass a path to retain and resume a specific run. `solve` raises
+`ValueError` if execution fails or returns no output; `resume_solve` raises if
+the database is missing, incompatible, or already terminal.
 
 ## Composition and data
 
@@ -50,8 +61,12 @@ projection.
 - `fan(flow1, flow2, ...)` runs same-domain branches on the same input and
   returns a tuple in source order. Use `fan`, not internal `fanout`.
 - `so(A, B, input) do: ...` runs local routing and returns
-  `FlowSpec[void, B]`; return `pure(value)` for a direct result. Path forms
-  expose `runtime_dir` and `working_dir`; budget forms expose a snapshot.
+  `FlowSpec[void, B]`; return `pure(value)` for a direct result. The callback
+  receives typed input (including full Blob bytes), and `so_budget` also
+  receives a `BudgetContext` snapshot. These callbacks must be deterministic
+  and side-effect free: resume may replay them to rebuild a dynamic graph.
+  They cannot access artifact or workspace paths. Only model-call workspaces
+  materialize Blobs.
 - `it(Tuple)[[0, 1]]` projects selected tuple items;
   `it(Object)[[field]]` projects fields. Use nested selector groups for nested
   projections. Index and field selectors cannot mix in one group; a range
@@ -61,10 +76,9 @@ projection.
   Supported wrapper forms are deliberately restricted; do not assume
   `lift(Box[here])` works. `here` is a placeholder; `_` is not.
 
-These composite surface forms have implementation support, but a combined
-`fan`/`so`/`it`/`lift` workflow is not yet covered end-to-end. The research
-example demonstrates `so` plus `lift`; treat it as illustrative until that
-exact path is exercised.
+These composite surface forms have implementation support. Checkpoint restore
+rebuilds dynamic `so` graphs from their saved input and budget snapshot before
+resolving saved flow keys.
 
 ## Profiles, prompts, and output contracts
 
@@ -75,35 +89,39 @@ estimates are in the budgeting contract.
 `AgentPromptTemplates` customizes developer instructions, goal, turn prompt,
 and finish description. `checked_prompt(text, "name", ...)` validates literal
 templates. Supported substitutions are `$task`, `$input`, `$working_dir`,
-`$runtime_dir`, `$model`, and `$effort`; `$$` escapes `$`. The finish
-description is passed through without substitution.
+`$runtime_dir`, `$model`, and `$effort`; `$$` escapes `$`. The directory
+variables describe temporary model-call staging only. The finish description
+is passed through without substitution.
 
 Model output is parsed against the declared output type via `finish_work`.
 Prefer named object fields. Supported round-trip shapes include scalars,
-enums, plain objects, named tuples, sequences, options, locations, supported
+enums, plain objects, named tuples, sequences, options, Blobs, BlobTrees, supported
 variants, distinct values, and constrained integers. Some variant/array cases
 and positional-tuple round trips are not established; Schematic support alone
 does not prove Vecherinka support.
 
-## Files and `Location`
+## Files and `Blob`
 
-`Location("relative/path")` is a runtime-relative artifact path. Typed input
-is also written to `vecherinka_model_input_materialization.txt` in the call's
-artifact directory; read it for exact values. Prompt text and JSON schema are
-control data, not workflow input or output.
+`Blob` carries a suggested filename and the complete file bytes. `BlobTree`
+carries canonical relative paths, complete file bytes, and empty directories.
+These are workflow values; a filesystem path is never their stored identity.
+Typed input is also written to `vecherinka_model_input_materialization.txt`
+in the call's workspace; read it for exact values. Prompt text and JSON schema
+are control data, not workflow input or output.
 
-Input locations resolve under `runtime_dir` and are copied into the consumer
-artifact directory. Output locations must name an existing file or directory
-inside the producer's `working_dir`; Vecherinka validates and canonicalizes
-them relative to `runtime_dir` for downstream use. Empty, missing, or outside
-paths fail. Repeated basenames get `-1`, `-2`, etc. Input and output roots are
-different; a raw output filename is not itself a cross-call path.
+Before a model call, Vecherinka materializes input Blobs and BlobTrees into its
+temporary workspace. For output, the model returns a workspace-relative file
+path for a `Blob` or directory path for a `BlobTree`. Vecherinka rejects
+absolute paths, traversal, symbolic links, missing paths, and file/directory
+type mismatches, then reads the submitted bytes into the value. A returned
+path is only a local reference for that call; downstream nodes receive the
+Blob bytes. Repeated input basenames get `-1`, `-2`, etc.
 
-Use `string` for inline content and `Location` for file transfer. For example,
-an output field `patch_text: string` must contain patch text; a
-`report_file: Location` must name a file created in the current working
-directory. Do not put file contents in a `Location` or return a filename in a
-string field when file transfer is intended. Artifact leaves reject refs,
+Use `string` for small inline content and `Blob` for file transfer. For
+example, an output field `patch_text: string` contains patch text; a
+`report_file: Blob` names a file created in the current workspace. Use
+`BlobTree` when preserving a directory layout or empty directories matters.
+Do not return file contents in a path field. Artifact leaves reject refs,
 pointers, procedures, sets, `JsonNode`, `Table`, `char`, and `cstring`.
 
 ## Running the research example
@@ -118,12 +136,11 @@ nim c -r --panics:on --threads:on --path:src/api \
 ```
 
 It prints a recommendation, rationale, sources, and caveats. The current
-directory receives `parallel-research.jsonl` and a `run-*` directory
-containing the provenance database and artifact directories. Run from an
-isolated disposable checkout: the child agent currently has full filesystem
-access despite prompt instructions restricting writes to its working
-directory. Source lookup is not configured by this workflow; current-source
-research requires search-capable tools in the child app-server environment.
+directory receives `parallel-research.jsonl` and a `run-*` directory. Run
+from an isolated disposable checkout. Child threads use Codex's
+`workspace-write` sandbox with their per-call workspace as cwd. Source lookup
+is not configured by this workflow; current-source research requires
+search-capable tools in the child app-server environment.
 
 The public solve API has no timeout or cancellation. A stalled request can
 wait indefinitely. Invalid `finish_work` data is rejected and returned to the

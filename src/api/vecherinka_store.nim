@@ -25,6 +25,9 @@ type
     codec_version*: int
     payload_text*: string
     predecessor_ids*: seq[uint64]
+    operation*: string
+    flow_kind*: string
+    request_id*: string
     files*: seq[StoreFile]
 
   StoreMetadata* = object
@@ -55,8 +58,8 @@ type
     payload_text*: string
 
 const
-  store_schema_version* = 4
-  checkpoint_format_version* = 1
+  store_schema_version* = 5
+  checkpoint_format_version* = 2
 
 proc exec_sql(db: DbConn; statement: string) =
   db.exec(SqlQuery(statement))
@@ -124,7 +127,10 @@ proc initialize_schema(store: VecherinkaStore; metadata: StoreMetadata) =
       artifact_id INTEGER PRIMARY KEY,
       codec_id TEXT NOT NULL,
       codec_version INTEGER NOT NULL,
-      payload_text TEXT NOT NULL
+      payload_text TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      flow_kind TEXT NOT NULL,
+      request_id TEXT NOT NULL
     )""")
     exec_sql(store.db, """CREATE TABLE predecessor (
       artifact_id INTEGER NOT NULL REFERENCES artifact(artifact_id),
@@ -132,6 +138,8 @@ proc initialize_schema(store: VecherinkaStore; metadata: StoreMetadata) =
       predecessor_id INTEGER NOT NULL REFERENCES artifact(artifact_id),
       PRIMARY KEY (artifact_id, position)
     )""")
+    exec_sql(store.db, """CREATE UNIQUE INDEX artifact_request_unique_idx
+      ON artifact(request_id) WHERE request_id <> ''""")
     exec_sql(store.db, "CREATE INDEX predecessor_lookup_idx ON predecessor(predecessor_id)")
     exec_sql(store.db, """CREATE TABLE artifact_file (
       artifact_id INTEGER NOT NULL REFERENCES artifact(artifact_id),
@@ -158,7 +166,7 @@ proc initialize_schema(store: VecherinkaStore; metadata: StoreMetadata) =
       metadata.run_id, metadata.workflow_id, metadata.workflow_fingerprint,
       metadata.workflow_manifest_json,
       metadata.codec_version, metadata.checkpoint_version)
-    exec_sql(store.db, "PRAGMA user_version = 4")
+    exec_sql(store.db, "PRAGMA user_version = 5")
     exec_sql(store.db, "COMMIT")
     committed = true
   finally:
@@ -193,7 +201,8 @@ proc open_vecherinka_store*(database_path: Path;
     if row.len < 6:
       raise newException(ValueError, "store has no run metadata")
     let requested = expected
-    if row[0] != requested.run_id or row[1] != requested.workflow_id or
+    if (requested.run_id.len > 0 and row[0] != requested.run_id) or
+        row[1] != requested.workflow_id or
         row[2] != requested.workflow_fingerprint or
         row[3] != requested.workflow_manifest_json or
         parseInt(row[4]) != requested.codec_version or
@@ -279,8 +288,11 @@ proc insert_artifact(db: DbConn; artifact: StoredArtifact) =
   if artifact.codec_id.len == 0 or artifact.codec_version <= 0:
     raise newException(ValueError, "artifact codec identity is required")
   db.exec(sql"""INSERT INTO artifact(
-      artifact_id, codec_id, codec_version, payload_text) VALUES(?, ?, ?, ?)""",
-    artifact_id, artifact.codec_id, artifact.codec_version, artifact.payload_text)
+      artifact_id, codec_id, codec_version, payload_text,
+      operation, flow_kind, request_id) VALUES(?, ?, ?, ?, ?, ?, ?)""",
+    artifact_id, artifact.codec_id, artifact.codec_version,
+    artifact.payload_text, artifact.operation, artifact.flow_kind,
+    artifact.request_id)
 
   for position, predecessor_id in artifact.predecessor_ids:
     db.exec(sql"INSERT INTO predecessor(artifact_id, position, predecessor_id) VALUES(?, ?, ?)",
@@ -308,9 +320,9 @@ proc allowed_attempt_transition(previous, next: StoreAttemptState): bool =
   of sasPrepared:
     next in {sasSubmitted, sasUnknown, sasOutputReceived, sasFailed}
   of sasSubmitted:
-    next in {sasUnknown, sasOutputReceived, sasFailed}
+    next in {sasUnknown, sasOutputReceived, sasCommitted, sasFailed}
   of sasUnknown:
-    next in {sasSubmitted, sasOutputReceived, sasFailed}
+    next in {sasSubmitted, sasOutputReceived, sasCommitted, sasFailed}
   of sasOutputReceived:
     next in {sasCommitted, sasFailed}
   of sasCommitted, sasFailed:
@@ -391,13 +403,15 @@ proc artifact*(store: VecherinkaStore; id: uint64): Option[StoredArtifact] =
   require_open(store)
   let artifact_id = as_sql_id(id)
   let rows = store.db.getAllRows(
-    sql"SELECT codec_id, codec_version, payload_text FROM artifact WHERE artifact_id = ?",
+    sql"""SELECT codec_id, codec_version, payload_text, operation, flow_kind,
+        request_id FROM artifact WHERE artifact_id = ?""",
     artifact_id)
   if rows.len == 0:
     return none(StoredArtifact)
 
   result = some(StoredArtifact(id: id, codec_id: rows[0][0],
-    codec_version: parseInt(rows[0][1]), payload_text: rows[0][2]))
+    codec_version: parseInt(rows[0][1]), payload_text: rows[0][2],
+    operation: rows[0][3], flow_kind: rows[0][4], request_id: rows[0][5]))
   for row in store.db.getAllRows(sql"SELECT predecessor_id FROM predecessor WHERE artifact_id = ? ORDER BY position",
       artifact_id):
     result.get.predecessor_ids.add(as_artifact_id(row[0]))
@@ -407,6 +421,17 @@ proc artifact*(store: VecherinkaStore; id: uint64): Option[StoredArtifact] =
     for index, value in row[1]:
       bytes[index] = byte(value)
     result.get.files.add(StoreFile(name: row[0], bytes: bytes))
+
+proc artifact_for_request*(store: VecherinkaStore;
+    request_id: string): Option[StoredArtifact] =
+  require_open(store)
+  if request_id.len == 0:
+    raise newException(ValueError, "model request ID cannot be empty")
+  let row = store.db.getRow(sql"SELECT artifact_id FROM artifact WHERE request_id = ?",
+    request_id)
+  if row.len == 0 or row[0].len == 0:
+    return none(StoredArtifact)
+  artifact(store, as_artifact_id(row[0]))
 
 proc attempt*(store: VecherinkaStore; request_id: string): Option[StoreAttempt] =
   require_open(store)

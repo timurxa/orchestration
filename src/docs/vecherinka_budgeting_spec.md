@@ -91,16 +91,15 @@ Available forms include:
 
 ```nim
 so_budget(A, B, input, budget) do: ...
-so_budget(A, B, input, working_dir, budget) do: ...
-so_budget(A, B, input, runtime_dir, working_dir, budget) do: ...
-so(A, B, input, runtime_dir, working_dir) do: ...
+so(A, B, input) do: ...
 ```
 
-The existing forms without budget context accept `input`, or
-`input, working_dir`. `runtime_dir` resolves canonical input `Location`s;
-`working_dir` is where the callback creates output files. Outputs are checked
-there and normalized relative to `runtime_dir`. The returned flow inherits
-the current pool unless it switches explicitly.
+`so` callbacks receive complete typed values and have no filesystem or storage
+handle. SQLite resume replays a callback to reconstruct the graph it returned,
+so callbacks must be deterministic and side-effect free. `so_budget` receives
+the exact immutable snapshot that is saved with the expansion. The returned
+flow inherits the current pool unless it switches explicitly. Blob paths exist
+only in a temporary model-call workspace.
 
 The snapshot reports the effective pool and current ledger values; no
 automatic model downgrade or upgrade occurs. All recursive activations share

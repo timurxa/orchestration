@@ -1,9 +1,9 @@
 ## Typed source syntax, compile-time IR, and lowering.
 ## Included by `vecherinka.nim`; import the façade for public use.
 
-import std/[macros, assertions, options, strutils, math]
+import std/[macros, assertions, options, strutils, math, json]
 import fusion/matching
-import ./it_projection, ./lift_pattern_typed
+import ./it_projection, ./lift_pattern_typed, ./vecherinka_blob
 import schematic
 
 type
@@ -108,29 +108,7 @@ proc so_syntax*[A, B](
   FlowSpec[A, B](ir: FlowIR(kind: firk_so))
 
 proc so_syntax*[A, B](
-    fn: proc(input: A; working_dir: Path): FlowSpec[void, B]
-): FlowSpec[A, B] =
-  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
-
-proc so_syntax*[A, B](
     fn: proc(input: A; budget: BudgetContext): FlowSpec[void, B]
-): FlowSpec[A, B] =
-  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
-
-proc so_syntax*[A, B](
-    fn: proc(input: A; working_dir: Path;
-      budget: BudgetContext): FlowSpec[void, B]
-): FlowSpec[A, B] =
-  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
-
-proc so_syntax*[A, B](
-    fn: proc(input: A; runtime_dir, working_dir: Path): FlowSpec[void, B]
-): FlowSpec[A, B] =
-  FlowSpec[A, B](ir: FlowIR(kind: firk_so))
-
-proc so_syntax*[A, B](
-    fn: proc(input: A; runtime_dir, working_dir: Path;
-      budget: BudgetContext): FlowSpec[void, B]
 ): FlowSpec[A, B] =
   FlowSpec[A, B](ir: FlowIR(kind: firk_so))
 
@@ -140,52 +118,11 @@ macro so*(domain, codomain, pattern, body: untyped): untyped =
     so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`):
       FlowSpec[void, `codomain`] = `body`)
 
-macro so*(domain, codomain, pattern, working_dir_name, body: untyped): untyped =
-  let parameter = ident(pattern.strVal)
-  let working_dir_parameter = ident(working_dir_name.strVal)
-  result = quote do:
-    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
-        `working_dir_parameter`: Path):
-      FlowSpec[void, `codomain`] = `body`)
-
-macro so*(domain, codomain, pattern, runtime_dir_name,
-    working_dir_name, body: untyped): untyped =
-  let parameter = ident(pattern.strVal)
-  let runtime_dir_parameter = ident(runtime_dir_name.strVal)
-  let working_dir_parameter = ident(working_dir_name.strVal)
-  result = quote do:
-    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
-        `runtime_dir_parameter`: Path; `working_dir_parameter`: Path):
-      FlowSpec[void, `codomain`] = `body`)
-
 macro so_budget*(domain, codomain, pattern, budget_name, body: untyped): untyped =
   let parameter = ident(pattern.strVal)
   let budget_parameter = ident(budget_name.strVal)
   result = quote do:
     so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
-        `budget_parameter`: BudgetContext):
-      FlowSpec[void, `codomain`] = `body`)
-
-macro so_budget*(domain, codomain, pattern, working_dir_name,
-    budget_name, body: untyped): untyped =
-  let parameter = ident(pattern.strVal)
-  let working_dir_parameter = ident(working_dir_name.strVal)
-  let budget_parameter = ident(budget_name.strVal)
-  result = quote do:
-    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
-        `working_dir_parameter`: Path;
-        `budget_parameter`: BudgetContext):
-      FlowSpec[void, `codomain`] = `body`)
-
-macro so_budget*(domain, codomain, pattern, runtime_dir_name,
-    working_dir_name, budget_name, body: untyped): untyped =
-  let parameter = ident(pattern.strVal)
-  let runtime_dir_parameter = ident(runtime_dir_name.strVal)
-  let working_dir_parameter = ident(working_dir_name.strVal)
-  let budget_parameter = ident(budget_name.strVal)
-  result = quote do:
-    so_syntax[`domain`, `codomain`](proc (`parameter`: `domain`;
-        `runtime_dir_parameter`: Path; `working_dir_parameter`: Path;
         `budget_parameter`: BudgetContext):
       FlowSpec[void, `codomain`] = `body`)
 
@@ -309,11 +246,10 @@ macro lift*(pattern: untyped): untyped =
 type
   ArtifactTypeInfo = object
     type_expr: NimNode
-    kind_name: NimNode
-    value_name: NimNode
+    encode_name: NimNode
+    decode_name: NimNode
 
   ArtifactRegistry = object
-    kind_name: NimNode
     artifact_name: NimNode
     types: seq[ArtifactTypeInfo]
 
@@ -718,54 +654,25 @@ proc so_parts(
 
 proc so_lambda_parts(
     lambda: NimNode;
-    parameter, input_type, runtime_dir_parameter, working_dir_parameter,
-    budget_parameter,
-    body: var NimNode
+    parameter, input_type, budget_parameter, body: var NimNode
 ): bool =
   if lambda.kind != nnkLambda or lambda.len < 7:
     return false
   let formals = lambda[3]
-  if formals.kind != nnkFormalParams or formals.len notin 2 .. 5:
+  if formals.kind != nnkFormalParams or formals.len notin 2 .. 3:
     return false
   if formals[1].kind != nnkIdentDefs or formals[1].len != 3 or
       formals[1][0].kind != nnkSym:
     return false
   parameter = formals[1][0]
   input_type = formals[1][1]
-  runtime_dir_parameter = newEmptyNode()
-  working_dir_parameter = newEmptyNode()
   budget_parameter = newEmptyNode()
-  if formals.len >= 3:
+  if formals.len == 3:
     if formals[2].kind != nnkIdentDefs or formals[2].len != 3 or
-      formals[2][0].kind != nnkSym:
+        formals[2][0].kind != nnkSym or
+        not formals[2][1].is_named("BudgetContext"):
       return false
-    if formals[2][1].is_named("Path"):
-      if formals.len >= 4 and formals[3].kind == nnkIdentDefs and
-          formals[3].len == 3 and formals[3][1].is_named("Path"):
-        runtime_dir_parameter = formals[2][0]
-        working_dir_parameter = formals[3][0]
-      else:
-        working_dir_parameter = formals[2][0]
-    elif formals[2][1].is_named("BudgetContext"):
-      budget_parameter = formals[2][0]
-    else:
-      return false
-  if formals.len == 4 and working_dir_parameter.kind != nnkEmpty and
-      runtime_dir_parameter.kind == nnkEmpty:
-    if working_dir_parameter.kind == nnkEmpty or
-        formals[3].kind != nnkIdentDefs or formals[3].len != 3 or
-        formals[3][0].kind != nnkSym or
-        not formals[3][1].is_named("BudgetContext"):
-      return false
-    budget_parameter = formals[3][0]
-  if formals.len == 5:
-    if runtime_dir_parameter.kind == nnkEmpty or
-        working_dir_parameter.kind == nnkEmpty or
-        formals[4].kind != nnkIdentDefs or formals[4].len != 3 or
-        formals[4][0].kind != nnkSym or
-        not formals[4][1].is_named("BudgetContext"):
-      return false
-    budget_parameter = formals[4][0]
+    budget_parameter = formals[2][0]
   if lambda[6].kind != nnkAsgn or lambda[6].len != 2:
     return false
   body = lambda[6][1]
@@ -791,7 +698,8 @@ proc is_void_type(type_expr: NimNode): bool
 type
   ArtifactNodeKind = enum
     ank_inline
-    ank_location
+    ank_blob
+    ank_blob_tree
     ank_object
     ank_variant
     ank_tuple
@@ -815,6 +723,7 @@ type
   ArtifactField = object
     name: string
     selector: NimNode
+    declared_type: NimNode
     node: ArtifactNode
 
   ArtifactBranch = object
@@ -850,10 +759,25 @@ proc artifact_is_location(type_node: NimNode): bool =
       return true
     if current.kind in {nnkTupleTy, nnkTupleConstr}:
       return false
+    if current.kind == nnkSym:
+      let declaration = current.getImpl
+      if declaration.kind == nnkTypeDef and
+          declaration[^1].kind in {nnkSym, nnkBracketExpr} and
+          declaration[^1].repr != current.repr:
+        current = copyNimTree(declaration[^1])
+        continue
     let type_impl = current.getTypeImpl
     if type_impl.kind != nnkDistinctTy:
       return false
     current = artifact_type_inst(type_impl[0])
+
+proc artifact_blob_kind(type_node: NimNode): ArtifactNodeKind =
+  let base = artifact_unwrapped_type(type_node)
+  if is_named(base, "Blob"):
+    return ank_blob
+  if is_named(base, "BlobTree"):
+    return ank_blob_tree
+  ank_inline
 
 proc artifact_is_inline(type_node: NimNode): bool =
   let type_inst = artifact_unwrapped_type(type_node)
@@ -932,6 +856,7 @@ proc artifact_fields(
         result.add(ArtifactField(
           name: field[0].repr,
           selector: copyNimTree(field[0]),
+          declared_type: copyNimTree(field[1]),
           node: artifact_tree(field[1])))
       elif field.kind == nnkIdentDefs and field.len >= 3:
         # Compiler semantic trees represent named tuple slots as IdentDefs;
@@ -946,15 +871,35 @@ proc artifact_fields(
           result.add(ArtifactField(
             name: name,
             selector: selector,
+            declared_type: copyNimTree(field[^2]),
             node: artifact_tree(field[^2])))
       else:
         result.add(ArtifactField(
           name: "[" & $index & "]",
           selector: newLit(index),
+          declared_type: copyNimTree(field),
           node: artifact_tree(field)))
     return
 
   var tuple_index = 0
+  if fields.kind == nnkIdentDefs:
+    for index in 0 ..< fields.len - 2:
+      let name_node = artifact_field_name(fields, index)
+      let named = name_node.kind notin {nnkEmpty, nnkIdent} or
+        name_node.strVal != "_"
+      let name = if named: name_node.strVal else: "[" & $tuple_index & "]"
+      let selector = if tuple_fields and not named:
+        newLit(tuple_index)
+      else:
+        copyNimTree(name_node)
+      result.add(ArtifactField(
+        name: name,
+        selector: selector,
+        declared_type: copyNimTree(fields[^2]),
+        node: artifact_tree(fields[^2])))
+      inc tuple_index
+    return
+
   for field in fields:
     doAssert field.kind == nnkIdentDefs,
       "artifact walker only supports plain fields"
@@ -970,6 +915,7 @@ proc artifact_fields(
       result.add(ArtifactField(
         name: name,
         selector: selector,
+        declared_type: copyNimTree(field[^2]),
         node: artifact_tree(field[^2])))
       inc tuple_index
 
@@ -1014,17 +960,21 @@ proc artifact_variant_tree(type_node: NimNode): ArtifactNode =
 proc artifact_tree(type_node: NimNode): ArtifactNode =
   let type_inst = artifact_type_inst(type_node)
   if artifact_is_location(type_inst):
-    result = new_artifact_node(ank_location)
-    # Keep exact distinct wrapper for typed fixed-array/schema reconstruction;
-    # Location's wire representation remains string inside Schematic.
-    result.type_expr = copyNimTree(artifact_type_inst(type_node))
+    error("cannot use path-valued Location as an artifact; use Blob or BlobTree",
+      type_node)
+  let blob_kind = artifact_blob_kind(type_inst)
+  if blob_kind in {ank_blob, ank_blob_tree}:
+    result = new_artifact_node(blob_kind)
+    result.type_expr = copyNimTree(artifact_unwrapped_type(type_inst))
+    result.needs_runtime_cast = not sameType(type_inst, result.type_expr) or
+      type_inst.repr != result.type_expr.repr
     return
   let normalized_type = artifact_unwrapped_type(type_inst)
   let shape = normalized_type.getTypeImpl
   let type_repr = normalized_type.repr
   if type_repr in ["char", "cstring"] or shape.repr in ["char", "cstring"]:
     error("cannot use artifact type " & type_inst.repr &
-      "; use Location or seq", type_node)
+      "; use Blob or seq", type_node)
   if is_named(type_inst, "JsonNode") or
       (type_inst.kind == nnkBracketExpr and is_named(type_inst[0], "Table")) or
       (shape.kind == nnkRefTy and shape.len == 1 and
@@ -1032,7 +982,7 @@ proc artifact_tree(type_node: NimNode): ArtifactNode =
       (shape.kind == nnkObjectTy and shape.repr.contains("KeyValuePairSeq") and
         shape.repr.contains("counter")):
     error("cannot use artifact type " & type_inst.repr &
-      "; use Location or seq", type_node)
+      "; use Blob or seq", type_node)
   if artifact_is_inline(type_inst):
     result = new_artifact_node(ank_inline)
     result.type_expr = copyNimTree(normalized_type)
@@ -1165,7 +1115,7 @@ proc walk_artifact_tree*[T](
     return replacement
 
   case node.kind
-  of ank_inline, ank_location, ank_option_none:
+  of ank_inline, ank_blob, ank_blob_tree, ank_option_none:
     error("artifact walker callback did not handle leaf", value)
   of ank_object, ank_tuple:
     result = newStmtList()
@@ -1246,6 +1196,603 @@ proc walk_artifact_tree*[T](
         `none_body`
 
 type
+  ArtifactCodec*[T] = object
+    encode*: proc(value: T): string {.nimcall.}
+    decode*: proc(value: string): T {.nimcall.}
+
+var artifact_codec_name_counter {.compileTime.}: int
+
+proc require_artifact_json_kind*(value: JsonNode; kind: JsonNodeKind;
+    context: string) =
+  if value.isNil or value.kind != kind:
+    raise newException(ValueError, context & " has wrong JSON kind")
+
+proc require_artifact_json_fields*(value: JsonNode; expected: openArray[string];
+    context: string) =
+  require_artifact_json_kind(value, JObject, context)
+  if value.len != expected.len:
+    raise newException(ValueError, context & " has wrong field count")
+  for name in expected:
+    if not value.hasKey(name):
+      raise newException(ValueError, context & " is missing field " & name)
+
+proc artifact_json_signed[T](value: T): JsonNode =
+  newJString($value)
+
+proc artifact_json_unsigned[T](value: T): JsonNode =
+  newJString($value)
+
+proc artifact_json_float[T](value: T): JsonNode =
+  let converted = float64(value)
+  if classify(converted) in {fcNan, fcInf, fcNegInf}:
+    raise newException(ValueError, "non-finite artifact float")
+  newJFloat(converted)
+
+proc artifact_json_inline*[T](value: T): JsonNode =
+  when T is bool:
+    newJBool(value)
+  elif T is string:
+    newJString(value)
+  elif T is enum:
+    newJString($value)
+  elif T is SomeUnsignedInt:
+    artifact_json_unsigned(value)
+  elif T is SomeInteger:
+    artifact_json_signed(value)
+  elif T is SomeFloat:
+    artifact_json_float(value)
+  else:
+    {.error: "unsupported inline artifact codec type".}
+
+proc artifact_json_decode_inline*[T](value: JsonNode): T =
+  when T is bool:
+    require_artifact_json_kind(value, JBool, "artifact boolean")
+    value.getBool
+  elif T is string:
+    require_artifact_json_kind(value, JString, "artifact string")
+    value.getStr
+  elif T is enum:
+    require_artifact_json_kind(value, JString, "artifact enum")
+    let encoded = value.getStr
+    let separator = encoded.rfind(':')
+    let name = if separator >= 0: encoded[separator + 1 .. ^1] else: encoded
+    parseEnum[T](name)
+  elif T is SomeUnsignedInt:
+    require_artifact_json_kind(value, JString, "artifact unsigned integer")
+    let parsed = parseBiggestUInt(value.getStr)
+    if parsed > uint64(high(T)):
+      raise newException(ValueError, "artifact unsigned integer out of range")
+    T(parsed)
+  elif T is SomeInteger:
+    require_artifact_json_kind(value, JString, "artifact integer")
+    let parsed = parseBiggestInt(value.getStr)
+    if parsed < int64(low(T)) or parsed > int64(high(T)):
+      raise newException(ValueError, "artifact integer out of range")
+    T(parsed)
+  elif T is SomeFloat:
+    require_artifact_json_kind(value, JFloat, "artifact float")
+    let decoded = value.getFloat
+    if classify(decoded) in {fcNan, fcInf, fcNegInf}:
+      raise newException(ValueError, "non-finite artifact float")
+    if decoded < float64(low(T)) or decoded > float64(high(T)):
+      raise newException(ValueError, "artifact float out of range")
+    let converted = T(decoded)
+    if classify(float64(converted)) in {fcNan, fcInf, fcNegInf}:
+      raise newException(ValueError, "artifact float out of range")
+    converted
+  else:
+    {.error: "unsupported inline artifact codec type".}
+
+proc artifact_json_bytes*(value: openArray[byte]): JsonNode =
+  result = newJArray()
+  for item in value:
+    result.add(newJInt(int64(item)))
+
+proc artifact_json_decode_bytes*(value: JsonNode): seq[byte] =
+  require_artifact_json_kind(value, JArray, "artifact bytes")
+  result = newSeqOfCap[byte](value.len)
+  for item in value:
+    require_artifact_json_kind(item, JInt, "artifact byte")
+    let decoded = item.getBiggestInt
+    if decoded < 0 or decoded > 255:
+      raise newException(ValueError, "artifact byte is outside 0..255")
+    result.add(byte(decoded))
+
+proc artifact_type_key(type_expr: NimNode): string =
+  ## Source type spelling plus normalized shape stays independent of union arm
+  ## ordering. Callers must version this key when they intentionally evolve a
+  ## persisted type's meaning.
+  let declared = artifact_type_inst(type_expr)
+  let normalized = artifact_unwrapped_type(type_expr)
+  declared.repr & "|" & declared.getTypeImpl.repr & "|" &
+    normalized.repr & "|" & normalized.getTypeImpl.repr
+
+proc artifact_json_encode(node: ArtifactNode; value: NimNode): NimNode
+
+proc artifact_json_decode(node: ArtifactNode; value, target_type: NimNode): NimNode
+
+proc artifact_json_decode_variant(
+    node: ArtifactNode; value, target_type: NimNode): NimNode
+
+proc artifact_option_element_type(type_expr: NimNode): NimNode
+proc artifact_sequence_element_type(type_expr: NimNode): NimNode
+
+proc artifact_json_object_fields(names: seq[string]): NimNode =
+  result = newNimNode(nnkBracket)
+  for name in names:
+    result.add(newLit(name))
+
+proc artifact_has_discriminator(type_expr: NimNode): bool =
+  let shape = artifact_unwrapped_type(type_expr).getTypeImpl
+  if shape.kind != nnkObjectTy or shape.len < 3:
+    return false
+  for field in shape[2]:
+    if field.kind == nnkRecCase:
+      return true
+  false
+
+proc artifact_variant_branch_key(node: ArtifactNode;
+    branch: ArtifactBranch): string =
+  let tag_type = artifact_unwrapped_type(node.type_expr).getTypeImpl[2]
+  var tag_type_name = ""
+  for field in tag_type:
+    if field.kind == nnkRecCase:
+      tag_type_name = field[0][^2].repr
+      break
+  result = tag_type_name & ":"
+  if branch.tags.len > 0:
+    result.add(branch.tags[0].repr)
+  else:
+    result.add("else")
+
+proc artifact_variant_tag_type(node: ArtifactNode): NimNode =
+  let shape = artifact_unwrapped_type(node.type_expr).getTypeImpl
+  for field in shape[2]:
+    if field.kind == nnkRecCase:
+      return copyNimTree(field[0][^2])
+  error("artifact variant has no discriminator", node.type_expr)
+
+proc artifact_json_decode_variant(
+    node: ArtifactNode; value, target_type: NimNode): NimNode =
+  let json = copyNimTree(value)
+  let encoded_fields = genSym(nskLet, "encoded_variant_fields")
+  let encoded_tag = genSym(nskLet, "encoded_variant_tag")
+  let node_type = copyNimTree(node.type_expr)
+  let tag_type = artifact_variant_tag_type(node)
+  var statements = newStmtList()
+  var case_expression: NimNode
+  statements.add quote do:
+    require_artifact_json_fields(`json`, ["tag", "fields"],
+      "artifact variant")
+    require_artifact_json_kind(`json`["tag"], JString, "artifact variant tag")
+    let `encoded_tag` = `json`["tag"].getStr
+    let `encoded_fields` = `json`["fields"]
+    require_artifact_json_kind(`encoded_fields`, JObject,
+      "artifact variant fields")
+
+  let parsed_tag = genSym(nskLet, "decoded_variant_tag")
+  let tag_json = newTree(nnkBracketExpr, copyNimTree(json), newLit("tag"))
+  let decode_tag = newCall(
+    newTree(nnkBracketExpr, ident("artifact_json_decode_inline"),
+      copyNimTree(tag_type)), tag_json)
+  statements.add(newTree(nnkLetSection,
+    newTree(nnkIdentDefs, parsed_tag, copyNimTree(tag_type), decode_tag)))
+  var dispatch = newTree(nnkCaseStmt, copyNimTree(parsed_tag))
+  for branch in node.branches:
+    let expected = artifact_json_object_fields(
+      block:
+        var names: seq[string] = @[]
+        for common in node.fields: names.add(common.name)
+        for branch_field in branch.fields: names.add(branch_field.name)
+        names)
+    var constructor = newTree(nnkObjConstr, copyNimTree(node_type))
+    constructor.add(newTree(nnkExprColonExpr, copyNimTree(node.tag_name),
+      if branch.tags.len > 0: copyNimTree(branch.tags[0]) else:
+        copyNimTree(parsed_tag)))
+    for common in node.fields:
+      let item = newTree(nnkBracketExpr, copyNimTree(encoded_fields),
+        newLit(common.name))
+      constructor.add(newTree(nnkExprColonExpr, copyNimTree(common.selector),
+        artifact_json_decode(common.node, item,
+          copyNimTree(common.declared_type))))
+    for field in branch.fields:
+      let item = newTree(nnkBracketExpr, copyNimTree(encoded_fields),
+        newLit(field.name))
+      constructor.add(newTree(nnkExprColonExpr, copyNimTree(field.selector),
+        artifact_json_decode(field.node, item,
+          copyNimTree(field.declared_type))))
+    var branch_body = newStmtList()
+    branch_body.add(quote do:
+      require_artifact_json_fields(`encoded_fields`, `expected`,
+        "artifact variant fields"))
+    branch_body.add(constructor)
+    if branch.is_else:
+      dispatch.add(newTree(nnkElse, branch_body))
+    else:
+      var of_branch = newNimNode(nnkOfBranch)
+      for tag in branch.tags:
+        of_branch.add(copyNimTree(tag))
+      of_branch.add(branch_body)
+      dispatch.add(of_branch)
+  case_expression = dispatch
+  let final_value = if node.needs_runtime_cast:
+    newTree(nnkCast, copyNimTree(target_type), case_expression)
+  else:
+    case_expression
+  statements.add(final_value)
+  newTree(nnkBlockExpr, newEmptyNode(), statements)
+
+proc artifact_json_encode_variant(node: ArtifactNode; value: NimNode): NimNode =
+  let variant_value = artifact_runtime_value(node, value)
+  let tag_value = artifact_field_value(variant_value, node.tag_name)
+  let encoded_fields = genSym(nskVar, "encoded_variant_fields")
+  let encoded_tag = genSym(nskVar, "encoded_variant_tag")
+  let case_statement = newTree(nnkCaseStmt, copyNimTree(tag_value))
+  for branch in node.branches:
+    var branch_body = newStmtList()
+    let branch_key = newLit(artifact_variant_branch_key(node, branch))
+    branch_body.add(newAssignment(copyNimTree(encoded_tag), branch_key))
+    for field in branch.fields:
+      let fields = copyNimTree(encoded_fields)
+      let name = newLit(field.name)
+      let field_value = artifact_field_value(variant_value, field.selector)
+      let child = artifact_json_encode(field.node, field_value)
+      branch_body.add quote do:
+        `fields`[`name`] = `child`
+    if branch.is_else:
+      case_statement.add(newTree(nnkElse, branch_body))
+    else:
+      var branch_case = newNimNode(nnkOfBranch)
+      for tag in branch.tags:
+        branch_case.add(copyNimTree(tag))
+      branch_case.add(branch_body)
+      case_statement.add(branch_case)
+  var common_body = newStmtList()
+  for field in node.fields:
+    let fields = copyNimTree(encoded_fields)
+    let name = newLit(field.name)
+    let field_value = artifact_field_value(variant_value, field.selector)
+    let child = artifact_json_encode(field.node, field_value)
+    common_body.add quote do:
+      `fields`[`name`] = `child`
+  let encoded = genSym(nskVar, "encoded_variant")
+  quote do:
+    block:
+      var `encoded_tag`: string
+      var `encoded_fields` = newJObject()
+      `common_body`
+      `case_statement`
+      var `encoded` = newJObject()
+      `encoded`["tag"] = newJString(`encoded_tag`)
+      `encoded`["fields"] = `encoded_fields`
+      `encoded`
+
+proc artifact_json_decode(node: ArtifactNode; value, target_type: NimNode): NimNode =
+  case node.kind
+  of ank_inline:
+    let normalized_type = copyNimTree(node.type_expr)
+    let decoded = newCall(
+      newTree(nnkBracketExpr, ident("artifact_json_decode_inline"),
+        normalized_type), copyNimTree(value))
+    if node.needs_runtime_cast:
+      return newTree(nnkCast, copyNimTree(target_type), decoded)
+    return decoded
+  of ank_blob:
+    let json = copyNimTree(value)
+    let name = newLit("filename")
+    let bytes = newLit("bytes")
+    let decoded = quote do:
+      block:
+        require_artifact_json_fields(`json`, ["filename", "bytes"], "Blob")
+        blobFromBytes(artifact_json_decode_bytes(`json`[`bytes`]),
+          `json`[`name`].getStr)
+    if node.needs_runtime_cast:
+      return newTree(nnkCast, copyNimTree(target_type), decoded)
+    return decoded
+  of ank_blob_tree:
+    let json = copyNimTree(value)
+    let filename = genSym(nskLet, "tree_filename")
+    let entries = genSym(nskLet, "tree_json_entries")
+    let item = genSym(nskLet, "tree_json_entry")
+    let path = genSym(nskLet, "tree_entry_path")
+    let kind = genSym(nskLet, "tree_entry_kind")
+    let bytes = newLit("bytes")
+    let tree = genSym(nskVar, "decoded_blob_tree")
+    let body = quote do:
+      require_artifact_json_fields(`json`, ["filename", "entries"], "BlobTree")
+      require_artifact_json_kind(`json`["entries"], JArray, "BlobTree entries")
+      let `filename` = `json`["filename"].getStr
+      let `entries` = `json`["entries"]
+      var `tree` = BlobTree(suggestedFilename: `filename`)
+      for index in 0 ..< `entries`.len:
+        let `item` = `entries`[index]
+        require_artifact_json_kind(`item`, JObject, "BlobTree entry")
+        if not `item`.hasKey("kind") or not `item`.hasKey("path"):
+          raise newException(ValueError, "BlobTree entry missing kind or path")
+        let `path` = `item`["path"].getStr
+        let `kind` = `item`["kind"].getStr
+        case `kind`
+        of "directory":
+          require_artifact_json_fields(`item`, ["path", "kind"],
+            "BlobTree directory entry")
+          `tree`.entries.add(BlobTreeEntry(path: `path`, kind: btekDirectory))
+        of "file":
+          require_artifact_json_fields(`item`, ["path", "kind", "bytes"],
+            "BlobTree file entry")
+          `tree`.entries.add(BlobTreeEntry(path: `path`, kind: btekFile,
+            bytes: artifact_json_decode_bytes(`item`[`bytes`])))
+        else:
+          raise newException(ValueError, "unknown BlobTree entry kind")
+      canonicalBlobTree(`tree`)
+    if node.needs_runtime_cast:
+      return newTree(nnkCast, copyNimTree(target_type), body)
+    return body
+  of ank_object, ank_tuple:
+    let json = copyNimTree(value)
+    let node_type = copyNimTree(node.type_expr)
+    var statements = newStmtList()
+    if node.kind == ank_tuple:
+      let length = newLit(node.fields.len)
+      statements.add quote do:
+        require_artifact_json_kind(`json`, JArray, "artifact tuple")
+        if `json`.len != `length`:
+          raise newException(ValueError, "artifact tuple has wrong length")
+    else:
+      let expected = artifact_json_object_fields(
+        block:
+          var names: seq[string] = @[]
+          for field in node.fields: names.add(field.name)
+          names)
+      statements.add quote do:
+        require_artifact_json_fields(`json`, `expected`, "artifact object")
+    var constructor = if node.kind == ank_tuple:
+      newNimNode(nnkTupleConstr)
+    else:
+      newTree(nnkObjConstr, copyNimTree(node_type))
+    for index, field in node.fields:
+      let item = if node.kind == ank_tuple:
+        newTree(nnkBracketExpr, copyNimTree(json), newLit(index))
+      else:
+        newTree(nnkBracketExpr, copyNimTree(json), newLit(field.name))
+      let decoded = artifact_json_decode(
+        field.node, item, copyNimTree(field.declared_type))
+      if node.kind == ank_tuple:
+        if field.selector.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit,
+            nnkInt32Lit, nnkInt64Lit}:
+          constructor.add(decoded)
+        else:
+          constructor.add(newTree(nnkExprColonExpr,
+            copyNimTree(field.selector), decoded))
+      else:
+        constructor.add(newTree(nnkExprColonExpr,
+          copyNimTree(field.selector), decoded))
+    let final_value = if node.needs_runtime_cast:
+      newTree(nnkCast, copyNimTree(target_type), constructor)
+    else:
+      constructor
+    statements.add(final_value)
+    return newTree(nnkBlockExpr, newEmptyNode(), statements)
+  of ank_variant:
+    return artifact_json_decode_variant(node, value, target_type)
+  of ank_seq:
+    let json = copyNimTree(value)
+    let node_type = copyNimTree(node.type_expr)
+    let child_type = artifact_sequence_element_type(node.type_expr)
+    if node.fixed_array:
+      let length = newLit(node.fixed_length)
+      var values = newNimNode(nnkBracket)
+      for index in 0 ..< node.fixed_length:
+        let child_json = newTree(nnkBracketExpr,
+          copyNimTree(json), newLit(index))
+        values.add(artifact_json_decode(node.element, child_json, child_type))
+      let array_value = newCall(copyNimTree(node_type), values)
+      let statements = quote do:
+        block:
+          require_artifact_json_kind(`json`, JArray, "artifact fixed array")
+          if `json`.len != `length`:
+            raise newException(ValueError,
+              "artifact fixed array has wrong length")
+          `array_value`
+      if node.needs_runtime_cast:
+        return newTree(nnkCast, copyNimTree(target_type), statements)
+      return statements
+    let output = genSym(nskVar, "decoded_sequence")
+    let index = genSym(nskForVar, "artifact_codec_index")
+    let child_json = newTree(nnkBracketExpr, copyNimTree(json), copyNimTree(index))
+    let child = artifact_json_decode(node.element, child_json, child_type)
+    let append = newCall(bindSym("add"), copyNimTree(output), child)
+    let body = quote do:
+      block:
+        require_artifact_json_kind(`json`, JArray, "artifact sequence")
+        var `output`: `node_type`
+        for `index` in 0 ..< `json`.len:
+          `append`
+        `output`
+    if node.needs_runtime_cast:
+      return newTree(nnkCast, copyNimTree(target_type), body)
+    return body
+  of ank_option:
+    let json = copyNimTree(value)
+    let output = genSym(nskLet, "decoded_option")
+    let some_flag = newLit("some")
+    let value_key = newLit("value")
+    let option_element = artifact_option_element_type(node.type_expr)
+    let item = newTree(nnkBracketExpr, copyNimTree(json), copyNimTree(value_key))
+    let child = artifact_json_decode(node.element, item, option_element)
+    let body = quote do:
+      block:
+        require_artifact_json_kind(`json`, JObject, "artifact Option")
+        if not `json`.hasKey(`some_flag`):
+          raise newException(ValueError, "artifact Option is missing some flag")
+        if `json`[`some_flag`].kind != JBool:
+          raise newException(ValueError, "artifact Option some flag is not boolean")
+        let `output` = if `json`[`some_flag`].getBool:
+          block:
+            require_artifact_json_fields(`json`, ["some", "value"],
+              "present artifact Option")
+            some[`option_element`](`child`)
+        else:
+          block:
+            require_artifact_json_fields(`json`, ["some"],
+              "absent artifact Option")
+            none[`option_element`]()
+        `output`
+    if node.needs_runtime_cast:
+      return newTree(nnkCast, copyNimTree(target_type), body)
+    return body
+  of ank_option_none:
+    error("Option none is not a standalone artifact value", value)
+
+proc artifact_json_encode(node: ArtifactNode; value: NimNode): NimNode =
+  case node.kind
+  of ank_inline:
+    let scalar = artifact_runtime_value(node, value)
+    return quote do: artifact_json_inline(`scalar`)
+  of ank_blob:
+    let blob = artifact_runtime_value(node, value)
+    let normalized = genSym(nskLet, "canonical_blob")
+    result = quote do:
+      block:
+        let `normalized` = blobFromBytes(`blob`.bytes,
+          `blob`.suggestedFilename)
+        var encoded = newJObject()
+        encoded["filename"] = newJString(`normalized`.suggestedFilename)
+        encoded["bytes"] = artifact_json_bytes(`normalized`.bytes)
+        encoded
+  of ank_blob_tree:
+    let tree_value = artifact_runtime_value(node, value)
+    let normalized = genSym(nskLet, "canonical_blob_tree")
+    let entries = genSym(nskLet, "blob_tree_entries")
+    let entry = genSym(nskForVar, "blob_tree_entry")
+    let encoded_entries = genSym(nskVar, "encoded_blob_tree_entries")
+    let path_value = genSym(nskLet, "blob_tree_entry_path")
+    let encoded_entry = genSym(nskVar, "encoded_blob_tree_entry")
+    result = quote do:
+      block:
+        let `normalized` = canonicalBlobTree(`tree_value`)
+        let `entries` = `normalized`.entries
+        var `encoded_entries` = newJArray()
+        for `entry` in `entries`:
+          let `path_value` = `entry`.path
+          var `encoded_entry` = newJObject()
+          `encoded_entry`["path"] = newJString(`path_value`)
+          case `entry`.kind
+          of btekDirectory:
+            `encoded_entry`["kind"] = newJString("directory")
+          of btekFile:
+            `encoded_entry`["kind"] = newJString("file")
+            `encoded_entry`["bytes"] = artifact_json_bytes(`entry`.bytes)
+          `encoded_entries`.add(`encoded_entry`)
+        var encoded = newJObject()
+        encoded["filename"] = newJString(`normalized`.suggestedFilename)
+        encoded["entries"] = `encoded_entries`
+        encoded
+  of ank_object:
+    let object_value = artifact_runtime_value(node, value)
+    let encoded = genSym(nskVar, "encoded_object")
+    var statements = newStmtList()
+    for field in node.fields:
+      let json = copyNimTree(encoded)
+      let name = newLit(field.name)
+      let field_value = artifact_field_value(object_value, field.selector)
+      let child = artifact_json_encode(field.node, field_value)
+      statements.add quote do:
+        `json`[`name`] = `child`
+    result = quote do:
+      block:
+        var `encoded` = newJObject()
+        `statements`
+        `encoded`
+  of ank_tuple:
+    let tuple_value = artifact_runtime_value(node, value)
+    let encoded = genSym(nskVar, "encoded_tuple")
+    var statements = newStmtList()
+    for field in node.fields:
+      let json = copyNimTree(encoded)
+      let field_value = artifact_field_value(tuple_value, field.selector)
+      let child = artifact_json_encode(field.node, field_value)
+      statements.add quote do:
+        `json`.add(`child`)
+    result = quote do:
+      block:
+        var `encoded` = newJArray()
+        `statements`
+        `encoded`
+  of ank_variant:
+    return artifact_json_encode_variant(node, value)
+  of ank_seq:
+    let sequence = artifact_runtime_value(node, value)
+    let index = genSym(nskForVar, "artifact_codec_index")
+    let encoded = genSym(nskVar, "encoded_sequence")
+    let item = newTree(nnkBracketExpr, copyNimTree(sequence), copyNimTree(index))
+    let child = artifact_json_encode(node.element, item)
+    result = quote do:
+      block:
+        var `encoded` = newJArray()
+        for `index` in low(`sequence`) .. high(`sequence`):
+          `encoded`.add(`child`)
+        `encoded`
+  of ank_option:
+    let option_value = artifact_runtime_value(node, value)
+    let wrapped = genSym(nskVar, "encoded_option")
+    let some_value = newCall(bindSym("get"), copyNimTree(option_value))
+    let child = artifact_json_encode(node.element, some_value)
+    result = quote do:
+      block:
+        var `wrapped` = newJObject()
+        if isSome(`option_value`):
+          `wrapped`["some"] = newJBool(true)
+          `wrapped`["value"] = `child`
+        else:
+          `wrapped`["some"] = newJBool(false)
+        `wrapped`
+  of ank_option_none:
+    error("Option none is not a standalone artifact value", value)
+
+proc emit_artifact_codec(type_expr, encode_name,
+    decode_name: NimNode): NimNode =
+  ## Generate one versioned, canonical JSON codec for the concrete DSL type.
+  let type_node = copyNimTree(type_expr)
+  let artifact = if artifact_has_discriminator(type_node):
+    artifact_variant_tree(type_node)
+  else:
+    artifact_tree(type_node)
+  let stable_key = newLit(artifact_type_key(type_node))
+  let format = newLit("vecherinka.artifact.v1")
+  let encode_value = genSym(nskParam, "artifact_value")
+  let encoded_json = artifact_json_encode(artifact, encode_value)
+  let decoded_json = genSym(nskLet, "artifact_json")
+  let encoded_payload = genSym(nskParam, "encoded_artifact")
+  let decode_value = artifact_json_decode(artifact,
+    newTree(nnkBracketExpr, copyNimTree(decoded_json), newLit("value")),
+    type_node)
+  result = quote do:
+    import std/json
+
+    proc `encode_name`(`encode_value`: `type_node`): string =
+      var envelope = newJObject()
+      envelope["format"] = newJString(`format`)
+      envelope["type"] = newJString(`stable_key`)
+      envelope["value"] = `encoded_json`
+      $envelope
+
+    proc `decode_name`(`encoded_payload`: string): `type_node` =
+      let `decoded_json` = parseJson(`encoded_payload`)
+      require_artifact_json_fields(`decoded_json`, ["format", "type", "value"],
+        "artifact envelope")
+      if `decoded_json`["format"].kind != JString or
+          `decoded_json`["format"].getStr != `format`:
+        raise newException(ValueError, "unsupported artifact codec format")
+      if `decoded_json`["type"].kind != JString or
+          `decoded_json`["type"].getStr != `stable_key`:
+        raise newException(ValueError, "artifact type key mismatch")
+      `decode_value`
+
+macro declare_artifact_codec*(type_expr: typedesc; encode_name,
+    decode_name: untyped): untyped =
+  emit_artifact_codec(type_expr, encode_name, decode_name)
+
+type
   MaterializeEmitState = object
     instructions: NimNode
     runtime_dir: NimNode
@@ -1268,20 +1815,30 @@ proc materialize_callback(
     quote do:
       `instructions`.add(
         `path_copy` & ": " & `type_name` & " = " & $(`value_copy`) & "\n")
-  of ank_location:
-    let copied_name = genSym(nskLet, "materialized_location_name")
-    let runtime_dir = copyNimTree(state.runtime_dir)
+  of ank_blob:
+    let copied_name = genSym(nskLet, "materialized_blob_name")
     let artifact_dir = copyNimTree(state.artifact_dir)
     let materialized_names = copyNimTree(state.materialized_names)
     let instructions = copyNimTree(state.instructions)
     let path_copy = copyNimTree(path)
-    let location_value = quote do: cast[string](`value`)
+    let blob_value = artifact_runtime_value(node, value)
     quote do:
-      let `copied_name` = copy_location_payload(
-        `runtime_dir`, `artifact_dir`, `location_value`, `materialized_names`)
+      let `copied_name` = materializeBlobUnique(
+        `blob_value`, `artifact_dir`, `materialized_names`)
       `instructions`.add(
-        `path_copy` & ": location = " & `location_value` &
-        " (materialized as " & `copied_name` & ")\n")
+        `path_copy` & ": Blob file materialized as " & `copied_name` & "\n")
+  of ank_blob_tree:
+    let copied_name = genSym(nskLet, "materialized_blob_tree_name")
+    let artifact_dir = copyNimTree(state.artifact_dir)
+    let materialized_names = copyNimTree(state.materialized_names)
+    let instructions = copyNimTree(state.instructions)
+    let path_copy = copyNimTree(path)
+    let blob_value = artifact_runtime_value(node, value)
+    quote do:
+      let `copied_name` = materializeBlobTreeUnique(
+        `blob_value`, `artifact_dir`, `materialized_names`)
+      `instructions`.add(
+        `path_copy` & ": Blob directory materialized as " & `copied_name` & "\n")
   of ank_option_none:
     let instructions = copyNimTree(state.instructions)
     let path_copy = copyNimTree(path)
@@ -1323,9 +1880,6 @@ type
     working_dir: NimNode
     errors: NimNode
 
-  NormalizeLocationsEmitState = object
-    runtime_dir: NimNode
-    working_dir: NimNode
 
 proc verify_locations_callback(
     node: ArtifactNode;
@@ -1335,48 +1889,18 @@ proc verify_locations_callback(
   case node.kind
   of ank_inline, ank_option_none:
     return newStmtList()
-  of ank_location:
+  of ank_blob, ank_blob_tree:
     let verification_error = genSym(nskLet, "location_verification_error")
     let working_dir = copyNimTree(state.working_dir)
     let errors = copyNimTree(state.errors)
     let path_copy = copyNimTree(path)
     let location_value = quote do: cast[string](`value`)
+    let expect_directory = newLit(node.kind == ank_blob_tree)
     quote do:
-      let `verification_error` = verify_location_payload(
-        `working_dir`, `location_value`)
+      let `verification_error` = verifyWorkspaceBlobPath(
+        `working_dir`, `location_value`, `expect_directory`)
       if `verification_error`.len != 0:
         `errors`.add(`path_copy` & ": " & `verification_error` & "\n")
-  else:
-    nil
-
-proc normalize_locations_callback(
-    node: ArtifactNode;
-    value, path: NimNode;
-    state: var NormalizeLocationsEmitState
-): NimNode =
-  case node.kind
-  of ank_inline, ank_option_none:
-    return newStmtList()
-  of ank_option:
-    let option_item = genSym(nskVar, "normalized_option_item")
-    let option_value = copyNimTree(value)
-    let option_body = walk_artifact_tree(
-      node.element, option_item, path, state, normalize_locations_callback)
-    quote do:
-      if isSome(`option_value`):
-        var `option_item` = get(`option_value`)
-        `option_body`
-        `option_value` = some(`option_item`)
-  of ank_location:
-    let normalized = genSym(nskLet, "normalized_location")
-    let runtime_dir = copyNimTree(state.runtime_dir)
-    let working_dir = copyNimTree(state.working_dir)
-    let location_type = copyNimTree(node.type_expr)
-    let location_value = quote do: cast[string](`value`)
-    quote do:
-      let `normalized` = canonicalize_output_location(
-        `runtime_dir`, `working_dir`, `location_value`)
-      `value` = cast[`location_type`](`normalized`)
   else:
     nil
 
@@ -1413,6 +1937,90 @@ proc artifact_contains_fixed(node: ArtifactNode): bool =
         return true
   false
 
+proc artifact_contains_blob(node: ArtifactNode): bool =
+  if node.isNil:
+    return false
+  if node.kind in {ank_blob, ank_blob_tree} or
+      artifact_contains_blob(node.element):
+    return true
+  for field in node.fields:
+    if artifact_contains_blob(field.node):
+      return true
+  for branch in node.branches:
+    for field in branch.fields:
+      if artifact_contains_blob(field.node):
+        return true
+  false
+
+proc artifact_wire_type(node: ArtifactNode): NimNode
+
+proc artifact_field_node(node: ArtifactNode; name: string;
+    branchIndex: int = -1): ArtifactNode =
+  for field in node.fields:
+    if field.name == name:
+      return field.node
+  if branchIndex >= 0 and branchIndex < node.branches.len:
+    for field in node.branches[branchIndex].fields:
+      if field.name == name:
+        return field.node
+  nil
+
+proc wire_record_list(record: NimNode; owner: ArtifactNode;
+    branchIndex: int = -1): NimNode =
+  result = newNimNode(nnkRecList)
+  var activeBranch = branchIndex
+  for field in record:
+    if field.kind == nnkIdentDefs:
+      var names = newNimNode(nnkIdentDefs)
+      for index in 0 ..< field.len - 2:
+        let name = artifact_field_name(field, index)
+        # Keep wire fields unbound: reusing a source Sym lets semantic typing
+        # conflate this generated string field with the original Blob field.
+        names.add(ident(name.strVal))
+      let firstName = artifact_field_name(field, 0).strVal
+      let child = artifact_field_node(owner, firstName, activeBranch)
+      names.add(if child.isNil: copyNimTree(field[^2]) else:
+        artifact_wire_type(child))
+      names.add(newEmptyNode())
+      result.add(names)
+    elif field.kind == nnkRecCase:
+      let tagField = field[0]
+      var tag = newNimNode(nnkIdentDefs)
+      tag.add(ident(artifact_field_name(tagField, 0).strVal))
+      tag.add(copyNimTree(tagField[^2]))
+      tag.add(newEmptyNode())
+      var recCase = newTree(nnkRecCase, tag)
+      for branch in field[1 .. ^1]:
+        case branch.kind
+        of nnkOfBranch:
+          var branchIndex = -1
+          for candidateIndex, candidate in owner.branches:
+            for tagIndex in 0 ..< branch.len - 1:
+              if candidate.tags.len > 0 and
+                  candidate.tags[0].repr == branch[tagIndex].repr:
+                branchIndex = candidateIndex
+                break
+            if branchIndex >= 0:
+              break
+          var caseBranch = newNimNode(nnkOfBranch)
+          for index in 0 ..< branch.len - 1:
+            caseBranch.add(copyNimTree(branch[index]))
+          caseBranch.add(wire_record_list(branch[^1], owner, branchIndex))
+          recCase.add(caseBranch)
+        of nnkElse:
+          var branchIndex = -1
+          for candidateIndex, candidate in owner.branches:
+            if candidate.is_else:
+              branchIndex = candidateIndex
+              break
+          recCase.add(newTree(nnkElse,
+            wire_record_list(branch[0], owner, branchIndex)))
+        else:
+          doAssert false
+      result.add(recCase)
+    else:
+      doAssert false, "wire schema cannot rebuild record field " & field.repr
+
 proc model_output_requires_args_wrapper(node: ArtifactNode): bool =
   ## Dynamic function tools receive direct sequence arguments under `args`.
   ## Keep object-root outputs unchanged.
@@ -1422,12 +2030,14 @@ proc artifact_wire_type(node: ArtifactNode): NimNode =
   ## Schematic has no array extractor. Replace fixed arrays by seqs in a
   ## generated wire type; all other leaves retain their declared type.
   doAssert not node.isNil
-  if not artifact_contains_fixed(node):
+  if not artifact_contains_fixed(node) and not artifact_contains_blob(node):
     return copyNimTree(node.type_expr)
 
   case node.kind
-  of ank_inline, ank_location, ank_option_none:
+  of ank_inline, ank_option_none:
     copyNimTree(node.type_expr)
+  of ank_blob, ank_blob_tree:
+    ident("string")
   of ank_seq:
     newTree(nnkBracketExpr, ident("seq"), artifact_wire_type(node.element))
   of ank_option:
@@ -1444,11 +2054,16 @@ proc artifact_wire_type(node: ArtifactNode): NimNode =
       for name_index in 0 ..< source_field.len - 2:
         let source_name = artifact_field_name(source_field, name_index)
         let wire_name = newTree(nnkPostfix, ident("*"),
-          copyNimTree(source_name))
+          ident(source_name.strVal))
         fields.add(newTree(nnkIdentDefs, wire_name,
           artifact_wire_type(node.fields[field_index].node), newEmptyNode()))
         inc field_index
     newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(), fields)
+  of ank_variant:
+    let shape = node.type_expr.getTypeImpl
+    doAssert shape.kind == nnkObjectTy
+    newTree(nnkObjectTy, copyNimTree(shape[0]), copyNimTree(shape[1]),
+      wire_record_list(shape[2], node))
   of ank_tuple:
     let shape = node.type_expr.getTypeImpl
     doAssert shape.kind in {nnkTupleTy, nnkTupleConstr}
@@ -1458,14 +2073,11 @@ proc artifact_wire_type(node: ArtifactNode): NimNode =
       if source_field.kind == nnkIdentDefs:
         for name_index in 0 ..< source_field.len - 2:
           fields.add(newTree(nnkIdentDefs,
-            copyNimTree(source_field[name_index]),
+            ident(source_field[name_index].strVal),
             artifact_wire_type(field_node), newEmptyNode()))
       else:
         fields.add(artifact_wire_type(field_node))
     fields
-  of ank_variant:
-    error("fixed arrays nested in variant output need a discriminated wire schema",
-      node.type_expr)
 
 proc artifact_option_element_type(type_expr: NimNode): NimNode =
   let shape = artifact_unwrapped_type(type_expr).getTypeImpl
@@ -1482,22 +2094,47 @@ proc artifact_sequence_element_type(type_expr: NimNode): NimNode =
 
 proc emit_wire_conversion(
     node: ArtifactNode;
-    value, target_type: NimNode
+    value, target_type, working_dir: NimNode
 ): NimNode =
   ## Convert the generated wire value back to the declared type. Equal schema
   ## bounds prove every fixed-array assignment below is in range.
-  if not artifact_contains_fixed(node):
+  if node.kind == ank_blob:
+    let source = genSym(nskLet, "blob_output_source")
+    let path = quote do: normalizeRelativePath(cast[string](`value`))
+    let converted_blob = quote do:
+      block:
+        let `source` = `working_dir` / Path(`path`)
+        blobFromFile(`source`)
+    if node.needs_runtime_cast:
+      let target = artifact_type_inst(target_type)
+      return quote do: cast[`target`](`converted_blob`)
+    return converted_blob
+  if node.kind == ank_blob_tree:
+    let source = genSym(nskLet, "blob_tree_output_source")
+    let path = quote do: normalizeRelativePath(cast[string](`value`))
+    let converted_blob_tree = quote do:
+      block:
+        let `source` = `working_dir` / Path(`path`)
+        blobTreeFromDirectory(`source`)
+    if node.needs_runtime_cast:
+      let target = artifact_type_inst(target_type)
+      return quote do: cast[`target`](`converted_blob_tree`)
+    return converted_blob_tree
+  if not artifact_contains_fixed(node) and not artifact_contains_blob(node):
     return copyNimTree(value)
 
   case node.kind
+  of ank_blob, ank_blob_tree:
+    doAssert false, "blob conversion handled above"
   of ank_seq:
     let target_element = artifact_sequence_element_type(target_type)
     let converted = genSym(nskVar, "converted_sequence")
     let index = genSym(nskForVar, "wire_index")
     if node.fixed_array:
       let item = newTree(nnkBracketExpr, copyNimTree(value), copyNimTree(index))
-      let item_value = emit_wire_conversion(node.element, item, target_element)
-      quote do:
+      let item_value = emit_wire_conversion(node.element, item, target_element,
+        working_dir)
+      result = quote do:
         block:
           var `converted`: `target_type`
           for `index` in 0 ..< len(`value`):
@@ -1505,10 +2142,11 @@ proc emit_wire_conversion(
           `converted`
     else:
       let item = genSym(nskForVar, "wire_item")
-      let item_value = emit_wire_conversion(node.element, item, target_element)
+      let item_value = emit_wire_conversion(node.element, item, target_element,
+        working_dir)
       let loop = newTree(nnkForStmt, item, value,
         newCall(bindSym("add"), converted, item_value))
-      quote do:
+      result = quote do:
         block:
           var `converted`: `target_type`
           `loop`
@@ -1517,8 +2155,8 @@ proc emit_wire_conversion(
     let target_element = artifact_option_element_type(target_type)
     let option_value = genSym(nskLet, "wire_option")
     let some_value = emit_wire_conversion(node.element,
-      newCall(bindSym("get"), option_value), target_element)
-    quote do:
+      newCall(bindSym("get"), option_value), target_element, working_dir)
+    result = quote do:
       block:
         let `option_value` = `value`
         if isSome(`option_value`):
@@ -1528,9 +2166,7 @@ proc emit_wire_conversion(
   of ank_object:
     let shape = node.type_expr.getTypeImpl
     doAssert shape.kind == nnkObjectTy
-    let converted = genSym(nskVar, "converted_object")
-    let normalized_type = copyNimTree(node.type_expr)
-    var body = newStmtList()
+    var constructor = newTree(nnkObjConstr, copyNimTree(node.type_expr))
     var field_index = 0
     for source_field in shape[2]:
       doAssert source_field.kind == nnkIdentDefs
@@ -1538,16 +2174,42 @@ proc emit_wire_conversion(
         let field = node.fields[field_index]
         let field_value = artifact_field_value(value, field.selector)
         let target_field_type = copyNimTree(source_field[^2])
-        body.add(newAssignment(
-          artifact_field_value(converted, field.selector),
-          emit_wire_conversion(field.node, field_value, target_field_type)))
+        constructor.add(newTree(nnkExprColonExpr,
+          copyNimTree(field.selector),
+          emit_wire_conversion(field.node, field_value, target_field_type,
+            working_dir)))
         inc field_index
-    let target = copyNimTree(target_type)
-    quote do:
-      block:
-        var `converted`: `normalized_type`
-        `body`
-        cast[`target`](`converted`)
+    if node.needs_runtime_cast:
+      let target = artifact_type_inst(target_type)
+      result = quote do: cast[`target`](`constructor`)
+    else:
+      result = constructor
+  of ank_variant:
+    let tag_name = ident(node.tag_name.strVal)
+    let tag_value = artifact_field_value(value, tag_name)
+    var converted_case = newTree(nnkCaseStmt, tag_value)
+    for branch in node.branches:
+      let tags = if branch.is_else: @[tag_value] else: branch.tags
+      for tag in tags:
+        var constructor = newTree(nnkObjConstr, copyNimTree(node.type_expr))
+        constructor.add(newTree(nnkExprColonExpr,
+          ident(node.tag_name.strVal), copyNimTree(tag)))
+        for field in node.fields:
+          constructor.add(newTree(nnkExprColonExpr, copyNimTree(field.selector),
+            emit_wire_conversion(field.node,
+              artifact_field_value(value, field.selector),
+              field.node.type_expr, working_dir)))
+        for field in branch.fields:
+          constructor.add(newTree(nnkExprColonExpr, copyNimTree(field.selector),
+            emit_wire_conversion(field.node,
+              artifact_field_value(value, field.selector),
+              field.node.type_expr, working_dir)))
+        if branch.is_else:
+          converted_case.add(newTree(nnkElse, constructor))
+        else:
+          converted_case.add(newTree(nnkOfBranch,
+            copyNimTree(tag), constructor))
+    result = converted_case
   of ank_tuple:
     let shape = node.type_expr.getTypeImpl
     doAssert shape.kind in {nnkTupleTy, nnkTupleConstr}
@@ -1563,9 +2225,10 @@ proc emit_wire_conversion(
         copyNimTree(source_field)
       body.add(newAssignment(
         artifact_field_value(converted, field.selector),
-        emit_wire_conversion(field.node, field_value, target_field_type)))
+        emit_wire_conversion(field.node, field_value, target_field_type,
+          working_dir)))
     let target = copyNimTree(target_type)
-    quote do:
+    result = quote do:
       block:
         var `converted`: `normalized_type`
         `body`
@@ -1576,13 +2239,18 @@ proc emit_wire_conversion(
 proc model_output_contract(output_type: NimNode): NimNode =
   let output_tree = artifact_tree(output_type)
   var inner_schema: NimNode
-  if artifact_contains_fixed(output_tree):
+  if artifact_contains_fixed(output_tree) or artifact_contains_blob(output_tree):
     let wire_name = genSym(nskType, "ModelOutputWire")
     let wire_def = newTree(nnkTypeSection,
       newTree(nnkTypeDef, wire_name, newEmptyNode(),
-        artifact_wire_type(output_tree)))
-    var schema = newCall(newTree(nnkBracketExpr,
-      bindSym("output_schema_of"), wire_name))
+    artifact_wire_type(output_tree)))
+    var schema = if output_tree.kind == ank_variant:
+      newCall(newTree(nnkBracketExpr,
+        bindSym"output_discriminated_schema", wire_name),
+        ident(output_tree.tag_name.strVal))
+    else:
+      newCall(newTree(nnkBracketExpr,
+        bindSym("output_schema_of"), wire_name))
     if output_tree.kind == ank_seq and output_tree.fixed_array:
       schema = newCall(bindSym("min"), schema,
         newLit(output_tree.fixed_length))
@@ -1623,11 +2291,13 @@ proc emit_model_materializer(
     newDotExpr(newDotExpr(parsed_output, ident("value")), ident("args"))
   else:
     newDotExpr(parsed_output, ident("value"))
-  let packed_value = if artifact_contains_fixed(output_tree):
-    emit_wire_conversion(output_tree, parsed_value, output_type)
+  let packed_value = if artifact_contains_fixed(output_tree) or
+      artifact_contains_blob(output_tree):
+    emit_wire_conversion(output_tree, parsed_value, output_type,
+      newDotExpr(copyNimTree(materializer_output), ident("working_dir")))
   else:
     copyNimTree(parsed_value)
-  let normalized_value = genSym(nskVar, "model_normalized_output")
+  let normalized_value = genSym(nskLet, "model_output_value")
   let packed_output = registry.emit_artifact_pack(
     output_type, normalized_value)
   let location_errors = genSym(nskVar, "location_errors")
@@ -1648,20 +2318,8 @@ proc emit_model_materializer(
       return ModelMaterialization[`artifact_name`](
         ok: false,
         error: "invalid finish_work locations: " & `location_errors`)
-  var normalize_state = NormalizeLocationsEmitState(
-    runtime_dir: newDotExpr(
-      copyNimTree(materializer_output), ident("runtime_dir")),
-    working_dir: newDotExpr(
-      copyNimTree(materializer_output), ident("working_dir")))
-  let normalize_locations_body = walk_artifact_tree(
-    output_tree,
-    normalized_value,
-    newLit("output"),
-    normalize_state,
-    normalize_locations_callback)
-  let normalize_locations = quote do:
-    var `normalized_value` = `packed_value`
-    `normalize_locations_body`
+  let normalized_value_decl = quote do:
+    let `normalized_value` = `packed_value`
   let output_contract_expr = model_output_contract(output_type)
   let materializer_body = quote do:
     case `materializer_kind`
@@ -1675,7 +2333,7 @@ proc emit_model_materializer(
           error: "invalid finish_work result (" &
             $`parsed_output`.issues.len & " schema issues)")
       `verify_locations`
-      `normalize_locations`
+      `normalized_value_decl`
       return ModelMaterialization[`artifact_name`](
         ok: true,
         value: `packed_output`)
@@ -2207,31 +2865,22 @@ proc make_vecherinka_artifact_type(
     flow_types: seq[NimNode];
     registry: var ArtifactRegistry
 ): NimNode =
-  let kind_name = genSym(nskType, "VecherinkaArtifactKind")
-  let artifact_name = genSym(nskType, "VecherinkaArtifact")
-  registry.kind_name = kind_name
-  registry.artifact_name = artifact_name
-  let kind_type = newTree(nnkEnumTy, newEmptyNode())
-  let variant = newTree(nnkRecCase,
-    newTree(nnkIdentDefs, ident("kind"), kind_name, newEmptyNode()))
-
-  for index, flow_type in flow_types:
-    let kind = ident("vak_" & $index)
-    let value = ident("value_" & $index)
+  registry.artifact_name = bindSym"string"
+  result = newStmtList()
+  for flow_type in flow_types:
+    # Keep these as identifiers, not gensym symbols: the codec macro declares
+    # the procedures after this generated call has been typed.
+    inc artifact_codec_name_counter
+    let encode_name = ident("vecherinka_encode_artifact_" &
+      $artifact_codec_name_counter)
+    let decode_name = ident("vecherinka_decode_artifact_" &
+      $artifact_codec_name_counter)
     registry.types.add ArtifactTypeInfo(
       type_expr: copyNimTree(flow_type),
-      kind_name: kind,
-      value_name: value)
-    kind_type.add(kind)
-    variant.add(newTree(nnkOfBranch, kind,
-      newTree(nnkRecList,
-        newTree(nnkIdentDefs, value, flow_type, newEmptyNode()))))
-
-  newTree(nnkTypeSection,
-    newTree(nnkTypeDef, kind_name, newEmptyNode(), kind_type),
-    newTree(nnkTypeDef, artifact_name, newEmptyNode(),
-      newTree(nnkObjectTy, newEmptyNode(), newEmptyNode(),
-        newTree(nnkRecList, variant))))
+      encode_name: encode_name,
+      decode_name: decode_name)
+    result.add(emit_artifact_codec(copyNimTree(flow_type), encode_name,
+      decode_name))
 
 proc artifact_info(
     registry: ArtifactRegistry;
@@ -2251,27 +2900,16 @@ proc emit_artifact_pack(
     type_expr, value: NimNode
 ): NimNode =
   let info = registry.artifact_info(type_expr)
-  let artifact_name = registry.artifact_name
-  let kind_name = info.kind_name
-  let value_name = info.value_name
   let source = copyNimTree(value)
-  quote do:
-    `artifact_name`(kind: `kind_name`, `value_name`: `source`)
+  newCall(copyNimTree(info.encode_name), source)
 
 proc emit_artifact_unpack(
     registry: ArtifactRegistry;
     type_expr, artifact: NimNode
 ): NimNode =
   let info = registry.artifact_info(type_expr)
-  let checked = genSym(nskLet, "artifact")
   let source = copyNimTree(artifact)
-  let kind_name = info.kind_name
-  let value_name = info.value_name
-  quote do:
-    block:
-      let `checked` = `source`
-      doAssert `checked`.kind == `kind_name`
-      `checked`.`value_name`
+  newCall(copyNimTree(info.decode_name), source)
 
 proc lower_raw_value(
     value_type, value: NimNode;
@@ -2363,10 +3001,9 @@ proc lower_so(
     flow_type, lambda: NimNode;
     context: var FlowWalkContext
 ): NimNode =
-  var parameter, input_type, runtime_dir_parameter, working_dir_parameter,
-      budget_parameter, body: NimNode
+  var parameter, input_type, budget_parameter, body: NimNode
   doAssert so_lambda_parts(lambda, parameter, input_type,
-    runtime_dir_parameter, working_dir_parameter, budget_parameter, body),
+    budget_parameter, body),
     "malformed so callback"
 
   let domain = flow_type[1]
@@ -2375,25 +3012,16 @@ proc lower_so(
 
   let artifact_name = context.artifact_registry.artifact_name
   let artifact_input = genSym(nskParam, "so_artifact")
-  let so_runtime_dir = genSym(nskParam, "so_runtime_dir")
-  let so_working_dir = genSym(nskParam, "so_working_dir")
   let typed_input = genSym(nskLet, "so_input")
   let unpacked = context.artifact_registry.emit_artifact_unpack(
     domain, artifact_input)
   let transformed_body = map_nim_tree(body, context)
   var rebound_body = replace_symbol(transformed_body, parameter, typed_input)
-  if runtime_dir_parameter.kind != nnkEmpty:
-    rebound_body = replace_symbol(
-      rebound_body, runtime_dir_parameter, so_runtime_dir)
-  if working_dir_parameter.kind != nnkEmpty:
-    rebound_body = replace_symbol(
-      rebound_body, working_dir_parameter, so_working_dir)
   let so_budget = genSym(nskParam, "so_budget")
   if budget_parameter.kind != nnkEmpty:
     rebound_body = replace_symbol(rebound_body, budget_parameter, so_budget)
   let expand = quote do:
-    proc (`artifact_input`: `artifact_name`; `so_runtime_dir`,
-        `so_working_dir`: Path;
+    proc (`artifact_input`: `artifact_name`;
         `so_budget`: BudgetContext):
         Flow[`artifact_name`] {.nimcall.} =
       let `typed_input` = `unpacked`
@@ -2775,6 +3403,62 @@ proc pool_weights_literal(pools: seq[PoolWeight]): NimNode =
       newTree(nnkExprColonExpr, ident("weight"), newLit(pool.weight)))
   result = newTree(nnkPrefix, ident("@"), values)
 
+proc assign_generated_flow_keys(node: NimNode;
+    keys: var seq[string]): NimNode =
+  ## Flow keys follow the deterministic preorder of the fully lowered syntax
+  ## tree. They name code locations, never runtime addresses or type ordinals.
+  result = copyNimNode(node)
+  for child in node:
+    result.add(assign_generated_flow_keys(child, keys))
+  if node.kind == nnkObjConstr and node.len > 0 and
+      node[0].kind == nnkCall and node[0].len >= 3 and
+      node[0][1].is_named("Flow"):
+    let key = "flow-" & $(keys.len + 1)
+    keys.add(key)
+    result.add(newTree(nnkExprColonExpr, ident("flow_key"), newLit(key)))
+
+proc workflow_fingerprint(manifest: string): string =
+  ## Stable FNV-1a is an identity checksum, not an authenticity mechanism.
+  var value = 14695981039346656037'u64
+  for character in manifest:
+    value = (value xor uint64(ord(character))) * 1099511628211'u64
+  "fnv1a64:" & $value
+
+proc normalize_workflow_source(source: string): string =
+  ## The typed DSL body contains compiler-generated `flow_<id>` symbol names.
+  ## Strip only long numeric suffixes so equivalent recompiles get one identity.
+  var index = 0
+  while index < source.len:
+    if source[index] == '_' and index + 1 < source.len and
+        source[index + 1] in {'0'..'9'}:
+      var end_index = index + 1
+      while end_index < source.len and source[end_index] in {'0'..'9'}:
+        inc end_index
+      if end_index - index - 1 >= 6:
+        result.add("_generated")
+      else:
+        result.add(source[index ..< end_index])
+      index = end_index
+    else:
+      result.add(source[index])
+      inc index
+
+proc workflow_manifest_json(workflow_id, source: string;
+    flow_keys, artifact_types: openArray[string]): string =
+  var manifest = newJObject()
+  manifest["format"] = newJString("vecherinka.workflow.v1")
+  manifest["workflow_id"] = newJString(workflow_id)
+  manifest["source"] = newJString(source)
+  var keys = newJArray()
+  for key in flow_keys:
+    keys.add(newJString(key))
+  manifest["flow_keys"] = keys
+  var codecs = newJArray()
+  for codec in artifact_types:
+    codecs.add(newJString(codec))
+  manifest["artifact_codecs"] = codecs
+  $manifest
+
 proc lower_vecherinka_runtime(
     body, solve, prompt_templates, pool_names, pool_weights: NimNode
 ): NimNode =
@@ -2819,16 +3503,31 @@ proc lower_vecherinka_runtime(
   let artifact_name = context.artifact_registry.artifact_name
   let data_type = quote do:
     seq[Flow[`artifact_name`]]
-  let input_name = genSym(nskParam, "input")
-  let initial_budget_name = genSym(nskParam, "initial_budget")
-  let prompt_templates_name = genSym(nskParam, "prompt_templates")
-  let transport_name = genSym(nskParam, "transport")
-  let logger_name = genSym(nskParam, "logger")
-  let data_name = genSym(nskLet, "data")
+  let input_name = ident("input")
+  let initial_budget_name = ident("initial_budget")
+  let prompt_templates_name = ident("prompt_templates")
+  let transport_name = ident("transport")
+  let logger_name = ident("logger")
+  let database_path_param = ident("database_path")
+  let workflow_id_name = ident(solve.strVal & "_workflow_id")
+  let workflow_manifest_name = ident(solve.strVal & "_workflow_manifest")
+  let workflow_fingerprint_name = ident(solve.strVal & "_workflow_fingerprint")
+  let build_flows_name = ident("build_" & proc_name.strVal & "_flows")
+  let solve_data_name = genSym(nskLet, "data")
+  let solve_flow_nodes_name = genSym(nskLet, "flow_nodes")
+  let actual_database_path_name = genSym(nskLet, "actual_database_path")
+  let solve_metadata_name = genSym(nskLet, "store_metadata")
+  let resume_data_name = genSym(nskLet, "resume_data")
+  let resume_flow_nodes_name = genSym(nskLet, "resume_flow_nodes")
+  let resume_metadata_name = genSym(nskLet, "resume_store_metadata")
   let input_artifact_name = genSym(nskLet, "input_artifact")
   let input_artifact = context.artifact_registry.emit_artifact_pack(
     entry_domain, input_name)
-  let execute_flows = bindSym"execute_flows"
+  let create_sqlite_run = bindSym"create_sqlite_run"
+  let resume_sqlite_run = bindSym"resume_sqlite_run"
+  let collect_flow_nodes = bindSym"collect_flow_nodes"
+  let default_sqlite_database_path = bindSym"default_sqlite_database_path"
+  let workflow_store_metadata = bindSym"workflow_store_metadata"
   let lookup_artifact = bindSym"lookup_artifact"
   let work_plan_name = genSym(nskLet, "work_plan")
   let final_artifact = quote do:
@@ -2836,10 +3535,29 @@ proc lower_vecherinka_runtime(
       `work_plan_name`.output.get).data
   let returned_value = context.artifact_registry.emit_artifact_unpack(
     entry_codomain, final_artifact)
+  let metadata_expr = newCall(workflow_store_metadata,
+    workflow_id_name, workflow_manifest_name, prompt_templates_name,
+    pool_weights)
+  let resume_work_plan_name = genSym(nskLet, "resume_work_plan")
+  let resume_final_artifact = quote do:
+    `lookup_artifact`(`resume_work_plan_name`.context,
+      `resume_work_plan_name`.output.get).data
+  let resume_returned_value = context.artifact_registry.emit_artifact_unpack(
+    entry_codomain, resume_final_artifact)
+  let generated_flows_proc = quote do:
+    proc `build_flows_name`(): `data_type` =
+      `flow_sequence`
   let proc_body = quote do:
-    let `data_name`: `data_type` = `flow_sequence`
+    let `solve_data_name`: `data_type` = `build_flows_name`()
+    let `solve_flow_nodes_name` = `collect_flow_nodes`(`solve_data_name`)
+    let `actual_database_path_name` = if $`database_path_param` == "":
+      `default_sqlite_database_path`(Path("."))
+    else:
+      `database_path_param`
     let `input_artifact_name` = `input_artifact`
-    let `work_plan_name` = `execute_flows`(`data_name`, `input_artifact_name`,
+    let `solve_metadata_name` = `metadata_expr`
+    let `work_plan_name` = `create_sqlite_run`(`solve_data_name`, `input_artifact_name`,
+      `actual_database_path_name`, `solve_metadata_name`, `solve_flow_nodes_name`,
       initial_budget = `initial_budget_name`,
       prompt_templates = `prompt_templates_name`,
       pool_weights = `pool_weights`,
@@ -2851,17 +3569,61 @@ proc lower_vecherinka_runtime(
       raise newException(ValueError,
         "vecherinka execution completed without output")
     return `returned_value`
+  let resume_proc_body = quote do:
+    let `resume_data_name`: `data_type` = `build_flows_name`()
+    let `resume_flow_nodes_name` = `collect_flow_nodes`(`resume_data_name`)
+    let `resume_metadata_name` = `metadata_expr`
+    let `resume_work_plan_name` = `resume_sqlite_run`(`resume_data_name`,
+      `database_path_param`, `resume_metadata_name`, `resume_flow_nodes_name`,
+      prompt_templates = `prompt_templates_name`,
+      transport = `transport_name`,
+      logger = `logger_name`)
+    if `resume_work_plan_name`.output.isNone:
+      if `resume_work_plan_name`.failure_message.isSome:
+        raise newException(ValueError,
+          `resume_work_plan_name`.failure_message.get)
+      raise newException(ValueError,
+        "vecherinka resume completed without output")
+    return `resume_returned_value`
+  let resume_proc_name = ident("resume_" & proc_name.strVal)
   let generated_proc = quote do:
     proc `proc_name`(`input_name`: `entry_domain`;
         `initial_budget_name`: Budget;
         `prompt_templates_name`: AgentPromptTemplates = `prompt_templates`;
         `transport_name`: LlmTransport[`artifact_name`] = nil;
-        `logger_name`: StructuredLogger = nil): `entry_codomain` =
+        `logger_name`: StructuredLogger = nil;
+        `database_path_param`: Path = Path("")): `entry_codomain` =
       `proc_body`
+  let generated_resume_proc = quote do:
+    proc `resume_proc_name`(`database_path_param`: Path;
+        `prompt_templates_name`: AgentPromptTemplates = `prompt_templates`;
+        `transport_name`: LlmTransport[`artifact_name`] = nil;
+        `logger_name`: StructuredLogger = nil): `entry_codomain` =
+      `resume_proc_body`
   var generated = newStmtList()
-  generated.add(artifact_type)
+  generated.add(generated_flows_proc)
   generated.add(generated_proc)
-  generated
+  generated.add(generated_resume_proc)
+  var flow_keys: seq[string] = @[]
+  let keyed_generated = assign_generated_flow_keys(generated, flow_keys)
+  var artifact_type_keys: seq[string] = @[]
+  for info in context.artifact_registry.types:
+    artifact_type_keys.add(artifact_type_key(info.type_expr))
+  let manifest = workflow_manifest_json(solve.strVal,
+    normalize_workflow_source(body.repr),
+    flow_keys, artifact_type_keys)
+  let fingerprint = workflow_fingerprint(manifest)
+  let workflow_id_value = newLit(solve.strVal)
+  let workflow_manifest_value = newLit(manifest)
+  let workflow_fingerprint_value = newLit(fingerprint)
+  result = newStmtList()
+  result.add(artifact_type)
+  result.add(quote do:
+    const `workflow_id_name`* = `workflow_id_value`
+    const `workflow_manifest_name`* = `workflow_manifest_value`
+    const `workflow_fingerprint_name`* = `workflow_fingerprint_value`)
+  for statement in keyed_generated:
+    result.add(statement)
 
 macro vecherinka_runtime*(solve: untyped; body: typed): untyped =
   lower_vecherinka_runtime(body, solve,

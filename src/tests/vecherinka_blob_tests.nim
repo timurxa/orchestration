@@ -1,4 +1,4 @@
-import std/[os, paths, sequtils, tempfiles, unittest]
+import std/[os, paths, sequtils, strutils, tempfiles, unittest]
 import ../api/vecherinka_blob
 
 suite "Vecherinka Blob values":
@@ -92,3 +92,15 @@ suite "Vecherinka Blob values":
       discard blobTreeFromDirectory(directoryLink)
     expect IOError:
       discard blobTreeFromDirectory(root)
+
+  test "workspace output paths reject traversal and symlink ancestors":
+    let root = Path(createTempDir("vecherinka-blob-workspace-", ""))
+    let outside = Path(createTempDir("vecherinka-blob-outside-", ""))
+    createDir($(root / Path("real")))
+    writeFile($(root / Path("real") / Path("ok.txt")), "ok")
+    createSymlink($outside, $(root / Path("link")))
+    check verifyWorkspaceBlobPath(root, "real/ok.txt", false).len == 0
+    check "parent traversal" in verifyWorkspaceBlobPath(root, "../outside", false)
+    check "symbolic links" in verifyWorkspaceBlobPath(root, "link/secret", false)
+    check "expected a directory" in verifyWorkspaceBlobPath(root,
+      "real/ok.txt", true)

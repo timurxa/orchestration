@@ -1,7 +1,14 @@
-import std/[json, macros, options, os, paths, tempfiles]
+import std/[json, macros, options, os, paths, strutils, tempfiles]
 import ../api/vecherinka
 
-proc `$`(value: Location): string {.borrow.}
+proc fixture_blob(contents, filename: string): Blob =
+  var bytes = newSeq[byte](contents.len)
+  for index, value in contents:
+    bytes[index] = byte(value)
+  blobFromBytes(bytes, filename)
+
+const stage6SourceText = "stage-6-input-payload-83ce\n"
+const stage10SourceText = "stage-10-source-fixture-2af1\n"
 
 type
   BaselineInput = object
@@ -40,10 +47,10 @@ type
   Stage5Output = object
     answer: string
   Stage6Input = object
-    source: Location
+    source: Blob
   Stage6Output = object
     summary: string
-    artifact: Location
+    artifact: Blob
   Stage7Item = object
     marker: string
   Stage7Result = object
@@ -65,7 +72,7 @@ type
     of text_branch:
       text: string
     of file_branch:
-      file: Location
+      file: Blob
   Stage9Fixed = array[3, int]
   Stage9NamedTuple = tuple[first: int, second: string]
   Stage10Kind = enum
@@ -76,15 +83,14 @@ type
     of text_case:
       text: string
     of file_case:
-      file: Location
+      file: Blob
   Stage10Item = object
     marker: string
-    source: Location
+    source: Blob
   StaticWriteInput = object
     marker: string
   StaticWriteOutput = object
-    path: string
-    contents: string
+    artifact: Blob
   Stage10Input = object
     variant: Stage10Variant
     items: seq[Stage10Item]
@@ -97,7 +103,7 @@ const stepping_agent_prompts = AgentPromptTemplates(
   goal: checked_prompt(
     "Complete task. Call `finish_work` exactly once after completion. Put final result in finish_work arguments."),
   turn_prompt: checked_prompt(
-    "$task\n\nComplete task. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
+    "$task\n\nComplete task. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nBlob and BlobTree input content is materialized in $working_dir. For Blob and BlobTree outputs, create required files or directories there and return workspace-relative paths, never absolute paths, input paths, or file contents. Runtime support files are in $runtime_dir.$input",
     "task", "input", "working_dir", "runtime_dir"),
   finish_work_description: checked_prompt(
     "Submit final structured result. Call exactly once when task is complete."))
@@ -163,7 +169,7 @@ expandMacros: vecherinka(solve_stage_5, stepping_agent_prompts):
 expandMacros: vecherinka(solve_stage_6, stepping_agent_prompts):
   > materialise Stage6Input ~> Stage6Output {.entry.}:
     profile[Stage6Input, Stage6Output](
-      "Read the provided input file named source.txt. Create result.txt in the working directory containing exactly the input file text. Return summary equal to the input file text and artifact equal to result.txt. Do not create any other files.")
+      "Read source.txt. Create result.txt in the working directory containing exactly its bytes. Return summary equal to the input text and artifact as the workspace-relative path result.txt. Do not create any other files.")
 
 expandMacros: vecherinka(solve_stage_7, stepping_agent_prompts):
   > map_item Stage7Item ~> Stage7Result:
@@ -211,7 +217,7 @@ expandMacros: vecherinka(solve_stage_9_tuple, stepping_agent_prompts):
 expandMacros: vecherinka(solve_stage_10, stepping_agent_prompts):
   > map_item Stage10Item ~> Stage10Item:
     profile[Stage10Item, Stage10Item](
-      "Read the provided source file. Preserve marker exactly. Return source as source.txt. Do not create any other files.")
+      "Read the provided source file. Preserve marker exactly. Return source as the workspace-relative path source.txt. Do not create any other files.")
   > project_variant Stage10Input ~> Stage10Variant:
     it(Stage10Input)[variant]
   > copy_variant Stage10Variant ~> Stage10Variant:
@@ -226,10 +232,20 @@ expandMacros: vecherinka(solve_stage_10, stepping_agent_prompts):
 
 expandMacros: vecherinka(solve_stage_11, stepping_agent_prompts):
   > static_write StaticWriteInput ~> StaticWriteOutput {.entry.}:
-    so(StaticWriteInput, StaticWriteOutput, input, working_dir) do:
-      let target = working_dir / Path("static-write.txt")
-      writeFile($target, input.marker)
-      pure(StaticWriteOutput(path: $target, contents: input.marker))
+    so(StaticWriteInput, StaticWriteOutput, input) do:
+      pure(StaticWriteOutput(artifact: fixture_blob(input.marker,
+        "static-write.txt")))
+
+static:
+  # Generated workflows now cross the runtime boundary as serialized payloads.
+  doAssert compiles(block:
+    let transport: LlmTransport[string] = nil
+    discard solve_stage_1(Stage1Input(first: "a", second: "b"), 0.0,
+      stepping_agent_prompts, transport = transport))
+  doAssert solve_stage_1_workflow_id == "solve_stage_1"
+  doAssert solve_stage_1_workflow_manifest.contains("\"flow_keys\"")
+  doAssert solve_stage_1_workflow_manifest.contains("flow-1")
+  doAssert solve_stage_1_workflow_fingerprint.startsWith("fnv1a64:")
 
 proc emit_log(line: string) =
   echo line
@@ -310,15 +326,17 @@ elif stage == "stage-5":
 elif stage == "stage-6":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-6")
   let input = Stage6Input(
-    source: Location("stepping_runs/stage-06/trial-00/source.txt"))
+    source: fixture_blob(stage6SourceText, "source.txt"))
   let output = solve_stage_6(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output.summary == "stage-6-input-payload-83ce\n",
     "stage 6 summary mismatch"
-  doAssert $output.artifact == "result.txt",
-    "stage 6 artifact path mismatch"
+  doAssert output.artifact.suggestedFilename == "result.txt",
+    "stage 6 artifact filename mismatch"
+  doAssert output.artifact.bytes == input.source.bytes,
+    "stage 6 artifact bytes mismatch"
   echo "DIRECT_RESULT summary=", output.summary,
-    " artifact=", $output.artifact
-  echo "STAGE_6_ASSERTIONS input_location=true output_location=true exact_file=true no_unrequested_files=manual_review"
+    " artifact=", output.artifact.suggestedFilename
+  echo "STAGE_6_ASSERTIONS input_blob=true output_blob=true exact_bytes=true no_unrequested_files=manual_review"
 elif stage == "stage-7":
   let logger = new_structured_logger(emit_log, run_id = "stepping-stage-7")
   let input = @[
@@ -421,18 +439,22 @@ elif stage == "stage-10":
     items: @[
       Stage10Item(
         marker: "stage-10-item-0-2d8a",
-        source: Location("stepping_runs/stage-10/trial-00/source.txt")),
+        source: fixture_blob(stage10SourceText, "source.txt")),
       Stage10Item(
         marker: "stage-10-item-1-71cf",
-        source: Location("stepping_runs/stage-10/trial-00/source.txt"))])
+        source: fixture_blob(stage10SourceText, "source.txt"))])
   let output = solve_stage_10(input, 100.0, stepping_agent_prompts, logger = logger)
   doAssert output[0].len == input.items.len,
     "stage 10 lifted sequence length mismatch"
   for index in 0 ..< input.items.len:
     doAssert output[0][index].marker == input.items[index].marker,
       "stage 10 lifted marker mismatch at index " & $index
-    doAssert $output[0][index].source == "source.txt",
-      "stage 10 lifted source path mismatch at index " & $index
+    doAssert output[0][index].source.suggestedFilename == "source.txt",
+      "stage 10 lifted source filename mismatch at index " & $index
+    doAssert output[0][index].source.bytes == input.items[index].source.bytes,
+      "stage 10 lifted source bytes mismatch at index " & $index
+    doAssert output[0][index].source.bytes == fixture_blob(stage10SourceText, "source.txt").bytes,
+      "stage 10 lifted source bytes differ from exact fixture at index " & $index
   doAssert output[1].common == input.variant.common,
     "stage 10 variant common mismatch"
   doAssert output[1].kind == text_case,
@@ -442,27 +464,15 @@ elif stage == "stage-10":
   echo "DIRECT_RESULT item0=", output[0][0].marker,
     " item1=", output[0][1].marker,
     " variant=", output[1].text
-  echo "STAGE_10_ASSERTIONS fan=true so=true pure=true sequence_lift=true it=true tuple=true variant=true location=true no_unrequested_files=manual_review"
+  echo "STAGE_10_ASSERTIONS fan=true so=true pure=true sequence_lift=true it=true tuple=true variant=true blob_bytes=true no_unrequested_files=manual_review"
 elif stage == "stage-11":
-  let root = Path(createTempDir("vecherinka-stage-11-", ""))
-  let previous_dir = os.getCurrentDir()
-  try:
-    os.setCurrentDir($root)
-    let logger = new_structured_logger(emit_log, run_id = "stepping-stage-11")
-    let input = StaticWriteInput(marker: "stage-11-static-write-9ac4")
-    let output = solve_stage_11(input, 100.0, stepping_agent_prompts, logger = logger)
-    doAssert output.contents == input.marker,
-      "stage 11 output contents mismatch"
-    doAssert fileExists(output.path),
-      "stage 11 static output file missing"
-    doAssert readFile(output.path) == input.marker,
-      "stage 11 static output file contents mismatch"
-    echo "DIRECT_RESULT path=", output.path,
-      " contents=", output.contents
-    echo "STAGE_11_ASSERTIONS so_working_dir=true static_write=true exact_file=true"
-  finally:
-    os.setCurrentDir(previous_dir)
-    if dirExists($root):
-      removeDir($root)
+  let logger = new_structured_logger(emit_log, run_id = "stepping-stage-11")
+  let input = StaticWriteInput(marker: "stage-11-static-write-9ac4")
+  let output = solve_stage_11(input, 100.0, stepping_agent_prompts, logger = logger)
+  doAssert output.artifact.bytes == fixture_blob(input.marker,
+    "static-write.txt").bytes, "stage 11 blob contents mismatch"
+  echo "DIRECT_RESULT blob=", output.artifact.suggestedFilename,
+    " bytes=", output.artifact.bytes.len
+  echo "STAGE_11_ASSERTIONS so_path_free=true full_blob=true"
 else:
   raise newException(ValueError, "unknown stepping stage: " & stage)

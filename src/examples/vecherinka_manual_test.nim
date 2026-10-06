@@ -5,15 +5,13 @@ import ../api/vecherinka
 
 type
   ImplementationRequest = distinct string
-  Codebase = distinct Location
+  Codebase = distinct BlobTree
   Issues = distinct seq[string]
   Audit = object
     case ok: bool
     of true: discard
     of false: issues: Issues
 
-proc `$`(value: Location): string {.borrow.}
-proc `$`(value: Codebase): string {.borrow.}
 proc `$`(value: Issues): string {.borrow.}
 
 const cheap = luna.medium
@@ -24,7 +22,7 @@ const manual_agent_prompts = AgentPromptTemplates(
   goal: checked_prompt(
     "Complete task. Call `finish_work` exactly once after completion. Put final result in finish_work arguments. Never narrate."),
   turn_prompt: checked_prompt(
-    "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nThe file vecherinka_model_input_materialization.txt in $working_dir contains raw artifact data passed to you. Read it for exact input values.\nLocation values are paths relative to: $runtime_dir\nInput Location values name provided files to read. Output Location values must be required files created inside $working_dir; return their relative filenames, never absolute paths, input paths, or file contents.$input",
+    "$task\n\nComplete task. Never narrate. Call finish_work exactly once when done.\nYou may modify only: $working_dir\nThe file vecherinka_model_input_materialization.txt in $working_dir contains raw artifact data passed to you. Read it for exact input values.\nBlob and BlobTree input content is materialized in $working_dir. For Blob and BlobTree outputs, create required files or directories there and return workspace-relative paths, never absolute paths, input paths, or file contents. Runtime support files are in $runtime_dir.$input",
     "task", "input", "working_dir", "runtime_dir"),
   finish_work_description: checked_prompt(
     "Submit final structured result. Call exactly once when task is complete."))
@@ -57,7 +55,7 @@ vecherinka(solve, manual_agent_prompts):
   #         lift((ImplementationRequest, here))[fix] >>> audit_fix_loop)
 
 let implementation_request = ImplementationRequest("")
-let codebase = Codebase(Location(""))
+let codebase = Codebase(BlobTree(suggestedFilename: "codebase", entries: @[]))
 let issues = Issues(@[""])
 let simple = Simple(number: 4)
 let log_file = new_log_file_sink("manual-test.jsonl")

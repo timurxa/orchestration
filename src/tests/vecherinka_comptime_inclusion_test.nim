@@ -30,7 +30,7 @@
 ##       common: string
 ##       case kind: Kind
 ##       of ka: value: int
-##       of kb: path: Location
+##       of kb: path: Blob
 ##     VariantElse = object
 ##       case kind: Kind
 ##       of ka: value: int
@@ -131,7 +131,7 @@
 ## Formalized artifact-type contract
 ##
 ## These rules are user requirements. Inclusion tests must exercise comptime
-## parsing plus generated materialization and Location-verification code.
+## parsing plus generated materialization and workspace-path validation.
 ##
 ## Allowed:
 ##
@@ -142,8 +142,8 @@
 ##   losing their constraint. Range/Natural/Positive are not blanket rejects.
 ## - Distinct types. Transparent wrapper: recurse through base representation,
 ##   cast generated field access when Nim requires it.
-## - Location as custom artifact leaf. Preserve existing copy and verification
-##   semantics; Location is exception to generic Schematic-only policy.
+## - Blob and BlobTree as content leaves. Inputs materialize into workspaces;
+##   outputs import workspace paths into complete content values.
 ## - Explicit fixed-array handling is second custom exception: general
 ##   Schematic rejection does not override the fixed-array requirement below.
 ##
@@ -152,9 +152,10 @@
 ## - ref objects, including recursive/cyclic object graphs.
 ## - pointers and proc values.
 ## - sets. Diagnostic must recommend `seq`.
-## - JsonNode, Table, char, cstring. Diagnostic must recommend Location or seq.
+## - JsonNode, Table, char, cstring. Diagnostic recommends Blob or seq.
+## - Path-valued Location; use Blob or BlobTree content values instead.
 ## - Anything Schematic cannot schema, serialize, extract, and round-trip,
-##   except custom Location and explicitly custom fixed-array handling.
+##   except custom Blob/BlobTree and fixed-array handling.
 ## - void as any FlowSpec return type. FlowSpec output must never be void.
 ##
 ## Rejection must happen during comptime type parsing, before generated runtime
@@ -167,7 +168,7 @@
 ## 1. artifact_tree classification and child/branch metadata at comptime.
 ## 2. Generated materializer and verifier compile successfully.
 ## 3. Generated code executes with expected instructions, paths, copied
-##    Location payloads, active variant branch, Option some/none, sequence
+##    Blob bytes/trees, active variant branch, Option some/none, sequence
 ##    indices, fixed-array length, and constrained-value round trip.
 ##
 ## Required positive matrix:
@@ -176,9 +177,9 @@
 ## - Direct and aliased seq/Option; nested seq/Option combinations.
 ## - Variant common fields, multi-label branch, else branch, empty branch.
 ## - Variant nested in object, seq, Option, tuple, and fixed array.
-## - Location at root, common field, active variant branch, seq element, and
-##   present Option.
-## - Distinct scalar, object, tuple, variant, seq, Option, and Location.
+## - Blob/BlobTree at root, common field, active variant branch, seq element,
+##   and present Option.
+## - Distinct scalar, object, tuple, variant, seq, Option, Blob, and BlobTree.
 ## - Constrained integer/float types accepted by Schematic.
 ## - Fixed arrays at length zero, one, and full declared length; wrong length
 ##   rejected by generated validation.
@@ -190,7 +191,7 @@
 ## - ref object and recursive/cyclic shape: artifact types forbid refs.
 ## - pointer/proc: unsupported artifact leaf.
 ## - set: use seq.
-## - JsonNode/Table/char/cstring: use Location or seq.
+## - JsonNode/Table/char/cstring: use Blob or seq.
 ## - Schematic-rejected types: reject at comptime with Schematic reason.
 ## - void codomain FlowSpec endpoints: reject across every construction path.
 ##   void domain remains allowed for no-input flows such as pure/model calls.
@@ -205,10 +206,10 @@
 ##   round-trip. Current contract wording assumes full round-trip.
 ## - Custom Schematic schemas: only automatic schemaOf/discriminated accepted,
 ##   or user-supplied custom Schema also valid? Default formalization assumes
-##   automatic Schematic support, plus Location/fixed-array custom exceptions.
+##   automatic Schematic support, plus Blob/fixed-array custom exceptions.
 ## - Diagnostic wording: exact stable strings, or required recommendation
 ##   substrings only. Required guidance currently: sets say “use seq”; JSON
-##   nodes/tables/chars/cstrings say “use Location or seq”.
+##   nodes/tables/chars/cstrings say “use Blob or seq”.
 ## - Cycle error precedence: immediate ref rejection is presumed. Confirm
 ##   whether recursive/cyclic probes should report “ref forbidden” or a distinct
 ##   cycle diagnostic. Both must avoid VM recursion failure.
@@ -226,9 +227,19 @@
 
 {.experimental: "callOperator".}
 
-import std/[os, osproc, strutils, unittest, json, options, paths]
+import std/[os, osproc, strutils, unittest, json, options, paths, sequtils]
 
 include "../api/vecherinka"
+
+proc remove_tree(path: string) =
+  if not dirExists(path):
+    return
+  for kind, child in walkDir(path):
+    if kind == pcDir:
+      remove_tree(child)
+    else:
+      removeFile(child)
+  removeDir(path)
 
 type
   TestKind = enum
@@ -242,30 +253,37 @@ type
     of tkText:
       text: string
     of tkFile:
-      file: Location
+      file: Blob
   TestVariantElse = object
     case kind: TestKind
     of tkText:
       text: string
     else:
       fallback: string
+  TestVariantMultiBlob = object
+    case kind: TestKind
+    of tkText, tkFile:
+      file: Blob
   TestOutput = object
     text: string
     count: int
-  TestLocatedOutput = object
+  TestBlobOutput = object
     note: string
-    artifact: Location
+    artifact: Blob
+  TestBlobTreeOutput = object
+    tree: BlobTree
+  DistinctBlobOutput = distinct Blob
   TestConstrainedOutput = object
     note: string
     count: SmallCount
-  TestTwoLocatedOutput = object
-    first: Location
-    second: Location
+  TestTwoBlobOutput = object
+    first: Blob
+    second: Blob
   NamedTuple = tuple[a: int, b: string]
   PositionalTuple = (int, string)
   Fixed = array[3, int]
   FixedLower = array[-1 .. 1, int]
-  FixedLocation = array[2, Location]
+  FixedBlob = array[2, Blob]
   EmptyFixed = array[0, int]
   BoolFixed = array[bool, int]
   EnumFixed = array[TestKind, int]
@@ -282,7 +300,7 @@ type
   DistinctLeaf = distinct TestLeaf
   DistinctTuple = distinct NamedTuple
   DistinctVariant = distinct TestVariant
-  DistinctLocation = distinct Location
+  DistinctBlob = distinct Blob
   AliasOption = Option[TestLeaf]
   MultiField = object
     left, right: int
@@ -298,9 +316,9 @@ type
       discard
     else:
       fallback: string
-  TwoLocations = object
-    first: Location
-    second: Location
+  TwoBlobs = object
+    first: Blob
+    second: Blob
 
 proc artifact_kind_value(type_node: NimNode): ArtifactNodeKind =
   artifact_tree(type_node).kind
@@ -354,7 +372,7 @@ macro declare_model_materializer(type_node: typedesc; name: untyped): untyped =
 static:
   doAssert artifact_kind(string) == ank_inline
   doAssert artifact_kind(TestKind) == ank_inline
-  doAssert artifact_kind(Location) == ank_location
+  doAssert artifact_kind(Blob) == ank_blob
   doAssert artifact_kind(TestLeaf) == ank_object
   doAssert artifact_kind(TestVariant) == ank_variant
   doAssert artifact_field_count(TestVariant) == 1
@@ -368,7 +386,7 @@ static:
   doAssert artifact_kind(NamedTuple) == ank_tuple
   doAssert artifact_kind(Fixed) == ank_seq
   doAssert artifact_kind(FixedLower) == ank_seq
-  doAssert artifact_kind(FixedLocation) == ank_seq
+  doAssert artifact_kind(FixedBlob) == ank_seq
   doAssert artifact_kind(EmptyFixed) == ank_seq
   doAssert artifact_kind(BoolFixed) == ank_seq
   doAssert artifact_kind(EnumFixed) == ank_seq
@@ -383,7 +401,7 @@ static:
   doAssert artifact_kind(DistinctLeaf) == ank_object
   doAssert artifact_kind(DistinctTuple) == ank_tuple
   doAssert artifact_kind(DistinctVariant) == ank_variant
-  doAssert artifact_kind(DistinctLocation) == ank_location
+  doAssert artifact_kind(DistinctBlob) == ank_blob
   doAssert artifact_kind(VariantMulti) == ank_variant
   # Walker expands each label into one case branch; both labels retain fields.
   doAssert artifact_branch_count(VariantMulti) == 2
@@ -394,21 +412,25 @@ static:
   doAssert artifact_field_count(ObjectWithFixed) == 1
 
 declare_model_materializer(TestOutput, test_output_materializer)
-declare_model_materializer(TestLocatedOutput, test_located_output_materializer)
+declare_model_materializer(TestBlobOutput, test_blob_output_materializer)
+declare_model_materializer(TestBlobTreeOutput, test_blob_tree_output_materializer)
+declare_model_materializer(DistinctBlobOutput, test_distinct_blob_output_materializer)
 declare_model_materializer(TestConstrainedOutput, test_constrained_output_materializer)
 declare_model_materializer(TestVariant, test_variant_output_materializer)
+declare_model_materializer(TestVariantMultiBlob,
+  test_variant_multi_blob_output_materializer)
 declare_model_materializer(Fixed, test_fixed_output_materializer)
 declare_model_materializer(PlainSeq, test_plain_seq_output_materializer)
 declare_model_materializer(FixedLower, test_fixed_lower_output_materializer)
-declare_model_materializer(FixedLocation, test_fixed_location_output_materializer)
+declare_model_materializer(FixedBlob, test_fixed_blob_output_materializer)
 declare_model_materializer(EmptyFixed, test_empty_fixed_output_materializer)
 declare_model_materializer(NamedTuple, test_named_tuple_output_materializer)
 declare_model_materializer(OptionOutput, test_option_output_materializer)
 declare_model_materializer(DistinctOutput, test_distinct_output_materializer)
-declare_model_materializer(TestTwoLocatedOutput, test_two_located_output_materializer)
+declare_model_materializer(TestTwoBlobOutput, test_two_blob_output_materializer)
 
 suite "artifact_tree generated input walkers":
-  test "nested object, sequence, option, variant, Location":
+  test "nested object, sequence, option, variant, Blob":
     let root = getTempDir() / "vecherinka-artifact-tree-input-test"
     let runtime_dir = root / "runtime"
     let artifact_dir = root / "artifact"
@@ -425,11 +447,11 @@ suite "artifact_tree generated input walkers":
     createDir(artifact_dir)
     writeFile(runtime_dir / "payload.txt", "payload")
     let value = TestVariant(common: "common", kind: tkFile,
-      file: Location("payload.txt"))
+      file: blobFromFile(Path(runtime_dir / "payload.txt")))
     let instructions = input_materializer(TestVariant)(value,
       Path(runtime_dir), Path(artifact_dir), "")
     check "input.common: string = common\n" in instructions
-    check "input.file: location = payload.txt" in instructions
+    check "input.file: Blob file materialized as payload.txt" in instructions
     check fileExists(artifact_dir / "payload.txt")
 
   test "absent Option emits none; present sequence uses one-based paths":
@@ -453,6 +475,7 @@ suite "artifact_tree generated input walkers":
 
   test "variant tags select only active fields":
     let root = getTempDir() / "vecherinka-artifact-tree-variant-test"
+    remove_tree(root)
     let runtime_dir = root / "runtime"
     let artifact_dir = root / "artifact"
     createDir(runtime_dir)
@@ -464,8 +487,9 @@ suite "artifact_tree generated input walkers":
     check "input.text: string = hello\n" in text
     check "input.file" notin text
     let file = materialize(TestVariant(common: "c", kind: tkFile,
-      file: Location("payload.txt")), Path(runtime_dir), Path(artifact_dir), "")
-    check "input.file: location = payload.txt" in file
+      file: blobFromFile(Path(runtime_dir / "payload.txt"))),
+      Path(runtime_dir), Path(artifact_dir), "")
+    check "input.file: Blob file materialized as payload.txt" in file
     check "input.text" notin file
 
   test "else branch, named tuple, fixed array, distinct, constrained":
@@ -540,6 +564,7 @@ suite "artifact_tree generated input walkers":
 
   test "nested containers preserve branch paths":
     let root = getTempDir() / "vecherinka-artifact-tree-nested-test"
+    remove_tree(root)
     let runtime_dir = root / "runtime"
     let artifact_dir = root / "artifact"
     createDir(runtime_dir)
@@ -548,31 +573,34 @@ suite "artifact_tree generated input walkers":
     let value = NestedContainer(items: @[
       some(TestVariant(common: "a", kind: tkText, text: "one")),
       none(TestVariant),
-      some(TestVariant(common: "b", kind: tkFile, file: Location("nested.txt")))])
+      some(TestVariant(common: "b", kind: tkFile,
+        file: blobFromFile(Path(runtime_dir / "nested.txt"))))])
     let instructions = input_materializer(NestedContainer)(value,
       Path(runtime_dir), Path(artifact_dir), "")
     check "input.items[1].text: string = one\n" in instructions
     check "input.items[2]: Option:none\n" in instructions
-    check "input.items[3].file: location = nested.txt" in instructions
+    check "input.items[3].file: Blob file materialized as nested.txt" in instructions
 
-  test "fixed-array Location elements and distinct Location are walked":
+  test "fixed-array Blob elements and distinct Blob are walked":
     let root = getTempDir() / "vecherinka-artifact-tree-fixed-location-test"
+    remove_tree(root)
     let runtime_dir = root / "runtime"
     let artifact_dir = root / "artifact"
     createDir(runtime_dir)
     createDir(artifact_dir)
     writeFile(runtime_dir / "payload.txt", "payload")
-    let fixed_text = input_materializer(FixedLocation)(
-      [Location("payload.txt"), Location("payload.txt")], Path(runtime_dir),
+    let fixed_text = input_materializer(FixedBlob)(
+      [blobFromFile(Path(runtime_dir / "payload.txt")),
+       blobFromFile(Path(runtime_dir / "payload.txt"))], Path(runtime_dir),
       Path(artifact_dir), "")
-    check "input[1]: location = payload.txt" in fixed_text
-    check "input[2]: location = payload.txt" in fixed_text
-    let distinct_text = input_materializer(DistinctLocation)(
-      DistinctLocation(Location("payload.txt")), Path(runtime_dir),
+    check "input[1]: Blob file materialized as payload.txt" in fixed_text
+    check "input[2]: Blob file materialized as payload-1.txt" in fixed_text
+    let distinct_text = input_materializer(DistinctBlob)(
+      DistinctBlob(blobFromFile(Path(runtime_dir / "payload.txt"))), Path(runtime_dir),
       Path(artifact_dir), "")
-    check "input: location = payload.txt" in distinct_text
+    check "input: Blob file materialized as payload-2.txt" in distinct_text
 
-  test "Location materialization disambiguates repeated basenames":
+  test "Blob materialization disambiguates repeated basenames":
     let root = getTempDir() / "vecherinka-artifact-tree-location-collision-test"
     let runtime_dir = root / "runtime"
     let artifact_dir = root / "artifact"
@@ -585,14 +613,30 @@ suite "artifact_tree generated input walkers":
     createDir(artifact_dir)
     writeFile(runtime_dir / "left" / "payload.txt", "left")
     writeFile(runtime_dir / "right" / "payload.txt", "right")
-    let instructions = input_materializer(TwoLocations)(TwoLocations(
-      first: Location("left/payload.txt"),
-      second: Location("right/payload.txt")), Path(runtime_dir),
+    let instructions = input_materializer(TwoBlobs)(TwoBlobs(
+      first: blobFromFile(Path(runtime_dir / "left" / "payload.txt")),
+      second: blobFromFile(Path(runtime_dir / "right" / "payload.txt"))), Path(runtime_dir),
       Path(artifact_dir), "")
     check "materialized as payload.txt" in instructions
     check "materialized as payload-1.txt" in instructions
     check fileExists(artifact_dir / "payload.txt")
     check fileExists(artifact_dir / "payload-1.txt")
+
+  test "BlobTree input materializes full tree and empty directories":
+    let root = getTempDir() / "vecherinka-artifact-tree-input-tree-test"
+    remove_tree(root)
+    let source = root / "source" / "bundle"
+    let artifact_dir = root / "artifact"
+    createDir(source / "empty")
+    createDir(source / "nested")
+    createDir(artifact_dir)
+    writeFile(source / "nested" / "payload.bin", "tree-bytes")
+    let instructions = input_materializer(BlobTree)(
+      blobTreeFromDirectory(Path(source)), Path(root), Path(artifact_dir), "")
+    check "Blob directory materialized as bundle" in instructions
+    check dirExists(artifact_dir / "bundle" / "empty")
+    check readFile(artifact_dir / "bundle" / "nested" / "payload.bin") ==
+      "tree-bytes"
 
 proc compile_reject(source, expected: string): bool =
   let probe = getTempDir() / "vecherinka_artifact_tree_negative_probe.nim"
@@ -619,6 +663,8 @@ macro force_artifact_tree(T: typedesc): untyped =
 
 suite "artifact_tree rejection contract":
   test "forbidden shapes reject with recommendation":
+    let location_probe = negative_probe_prefix & "\ntype Bad = Location\n"
+    check compile_reject(location_probe, "path-valued Location")
     check compile_reject(negative_probe_prefix & """
 type Bad = ref object
   value: int
@@ -635,17 +681,17 @@ type Bad = set[char]
     check compile_reject(negative_probe_prefix & """
 import std/json
 type Bad = JsonNode
-""", "use Location or seq")
+""", "use Blob or seq")
     check compile_reject(negative_probe_prefix & """
 import std/tables
 type Bad = Table[string, int]
-""", "use Location or seq")
+""", "use Blob or seq")
     check compile_reject(negative_probe_prefix & """
 type Bad = char
-""", "use Location or seq")
+""", "use Blob or seq")
     check compile_reject(negative_probe_prefix & """
 type Bad = cstring
-""", "use Location or seq")
+""", "use Blob or seq")
 
   test "recursive refs reject cleanly":
     check compile_reject(negative_probe_prefix & """
@@ -785,31 +831,55 @@ suite "artifact_tree generated output verifier":
     check "unexpected model output kind" in test_output_materializer(99,
       LlmOutput(arguments: parseJson("{}"), working_dir: Path(getTempDir()))).error
 
-  test "verifier accepts in-tree Location and reports invalid locations":
+  test "output imports workspace Blob paths and rejects invalid paths":
     let root = getTempDir() / "vecherinka-artifact-tree-output-test"
     createDir(root)
     writeFile(root / "present.txt", "payload")
-    let valid = test_located_output_materializer(0, LlmOutput(
+    let valid = test_blob_output_materializer(0, LlmOutput(
       arguments: parseJson("{\"note\":\"ok\",\"artifact\":\"present.txt\"}"),
       runtime_dir: Path(root),
       working_dir: Path(root)))
     check valid.ok
-    let invalid = test_located_output_materializer(0, LlmOutput(
+    let invalid = test_blob_output_materializer(0, LlmOutput(
       arguments: parseJson("{\"note\":\"bad\",\"artifact\":\"missing.txt\"}"),
       working_dir: Path(root)))
     check not invalid.ok
     check "output.artifact" in invalid.error
-    check "does not exist" in invalid.error
 
-  test "verifier aggregates invalid Location paths":
+  test "output verifier aggregates invalid Blob file paths":
     let root = getTempDir() / "vecherinka-artifact-tree-multiple-location-output-test"
     createDir(root)
-    let invalid = test_two_located_output_materializer(0, LlmOutput(
+    let invalid = test_two_blob_output_materializer(0, LlmOutput(
       arguments: parseJson("{\"first\":\"a.txt\",\"second\":\"b.txt\"}"),
       working_dir: Path(root)))
     check not invalid.ok
     check "output.first" in invalid.error
     check "output.second" in invalid.error
+
+  test "generated output imports BlobTree contents and empty directories":
+    let root = getTempDir() / "vecherinka-artifact-tree-output-tree-test"
+    remove_tree(root)
+    createDir(root / "bundle" / "empty")
+    createDir(root / "bundle" / "nested")
+    writeFile(root / "bundle" / "nested" / "payload.txt", "payload")
+    let result = test_blob_tree_output_materializer(0, LlmOutput(
+      arguments: parseJson("{\"tree\":\"bundle\"}"),
+      working_dir: Path(root)))
+    check result.ok
+    check result.value.tree.suggestedFilename == "bundle"
+    check result.value.tree.entries.mapIt(it.path) ==
+      @["empty", "nested", "nested/payload.txt"]
+
+  test "generated output retains distinct Blob wrappers":
+    let root = getTempDir() / "vecherinka-artifact-tree-distinct-blob-test"
+    remove_tree(root)
+    createDir(root)
+    writeFile(root / "payload.bin", "bytes")
+    let result = test_distinct_blob_output_materializer(0, LlmOutput(
+      arguments: parseJson("\"payload.bin\""), working_dir: Path(root)))
+    check result.ok
+    check Blob(result.value).bytes == @[byte('b'), byte('y'), byte('t'),
+      byte('e'), byte('s')]
 
   test "fixed output keeps declared cardinality":
     let valid = test_fixed_output_materializer(0, LlmOutput(
@@ -833,7 +903,7 @@ suite "artifact_tree generated output verifier":
     check sequence.ok
     check sequence.value == @[7, 8, 9]
 
-  test "fixed lower bounds and Location elements preserve type and paths":
+  test "fixed lower bounds and Blob elements preserve type and bytes":
     let lower = test_fixed_lower_output_materializer(0, LlmOutput(
       arguments: parseJson("{\"args\":[4,5,6]}"), working_dir: Path(getTempDir())))
     check lower.ok
@@ -845,14 +915,16 @@ suite "artifact_tree generated output verifier":
     createDir(root)
     writeFile(root / "first.txt", "first")
     writeFile(root / "second.txt", "second")
-    let locations = test_fixed_location_output_materializer(0, LlmOutput(
+    let locations = test_fixed_blob_output_materializer(0, LlmOutput(
       arguments: parseJson("{\"args\":[\"first.txt\",\"second.txt\"]}"),
       runtime_dir: Path(root),
       working_dir: Path(root)))
     check locations.ok
-    check cast[string](locations.value[0]) == "first.txt"
-    check cast[string](locations.value[1]) == "second.txt"
-    let missing = test_fixed_location_output_materializer(0, LlmOutput(
+    check locations.value[0].bytes == @[byte('f'), byte('i'), byte('r'),
+      byte('s'), byte('t')]
+    check locations.value[1].bytes == @[byte('s'), byte('e'), byte('c'),
+      byte('o'), byte('n'), byte('d')]
+    let missing = test_fixed_blob_output_materializer(0, LlmOutput(
       arguments: parseJson("{\"args\":[\"first.txt\",\"missing.txt\"]}"),
       working_dir: Path(root)))
     check not missing.ok
@@ -897,6 +969,18 @@ suite "artifact_tree generated output verifier":
     check variant.ok
     check variant.value.kind == tkText
     check variant.value.text == "v"
+
+  test "multi-tag Blob output preserves the submitted discriminator":
+    let root = getTempDir() / "vecherinka-artifact-tree-multitag-output-test"
+    remove_tree(root)
+    createDir(root)
+    writeFile(root / "payload.txt", "payload")
+    let result = test_variant_multi_blob_output_materializer(0, LlmOutput(
+      arguments: parseJson("""{"kind":"tkFile","file":"payload.txt"}"""),
+      working_dir: Path(root)))
+    check result.ok
+    check result.value.kind == tkFile
+    check result.value.file.bytes.len == 7
 
 suite "runtime failure containment":
   proc turn_state(): RuntimeState =

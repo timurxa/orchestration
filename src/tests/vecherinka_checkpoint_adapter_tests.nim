@@ -1,7 +1,6 @@
 import std/[options, paths, tables, unittest]
 import ../api/vecherinka_runtime
 import ../api/vecherinka_checkpoint
-import ../api/vecherinka_checkpoint_adapter
 
 proc int_identity(value: int): int = value
 
