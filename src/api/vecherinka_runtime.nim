@@ -8,7 +8,6 @@ import std/[algorithm, json, options, tables, sets, posix, strutils, os, math,
 import ./codex_json
 import ./codex_runtime
 import ./structured_log
-import ./vecherinka_provenance
 import ./vecherinka_store
 import ./vecherinka_checkpoint
 
@@ -332,11 +331,9 @@ type
     submitter*: ModelSubmitter[A]
     transport*: LlmTransport[A]
     next_request_id*: int64
-    ## Common base for runtime-relative Location values. This is the program
-    ## working directory, not an individual artifact directory.
+    ## Program root used to resolve workspace-local operations.
     runtime_dir*: Path
     run_dir*: Path
-    provenance_store*: ProvenanceStore
     next_artifact_id*: ArtifactID
     codex_runtime*: ptr CodexRuntime
     pending_agent_starts*: Table[string, PendingAgentStart[A]]
@@ -1030,7 +1027,6 @@ proc new_runtime_context*[A](
   result.next_request_id = 0
   result.runtime_dir = if $runtime_dir == "": run_dir else: runtime_dir
   result.run_dir = run_dir
-  result.provenance_store = nil
   result.next_artifact_id = 0
   result.codex_runtime = nil
   result.pending_agent_starts = initTable[string, PendingAgentStart[A]]()
@@ -1188,16 +1184,11 @@ proc register_artifact*[A](
     raise newException(ValueError, "cannot register artifact without context")
   if context.artifacts.hasKey(meta.id):
     raise newException(ValueError, "artifact ID already registered: " & $meta.id)
-  var predecessor_dirs: seq[Path] = @[]
-  for predecessor_id in meta.predecessor_ids:
-    predecessor_dirs.add(lookup_artifact(context, predecessor_id).meta.artifact_dir)
   context.artifacts[meta.id] = ArtifactRecord[A](data: data, meta: meta)
   if not context.store.isNil:
     let store_metadata = context.store.metadata()
     context.pending_store_artifacts.add(to_stored_artifact(
       data, meta, store_metadata.codec_version))
-  if not context.provenance_store.isNil:
-    context.provenance_store.record_artifact(meta.artifact_dir, predecessor_dirs)
   result = meta.id
   ## One bounded commit event is canonical provenance input. Consumers can
   ## reconstruct the graph from these records without a final giant snapshot.
@@ -1336,91 +1327,6 @@ proc register_generated_artifact[A](
   let meta = reserve_artifact_meta(
     context, predecessor_ids, operation, flow_kind, request_id)
   register_artifact(context, data, meta)
-
-proc materialized_name_used(names: seq[string]; name: string): bool =
-  for used_name in names:
-    if used_name == name:
-      return true
-  false
-
-proc copy_location_payload*(
-    runtime_dir, artifact_dir: Path;
-    location: string;
-    materialized_names: var seq[string]
-): string =
-  ## Destination is flat by design. The containment check also prevents a
-  ## Location naming a parent of the destination from recursive self-copy.
-  if location.len == 0:
-    raise newException(IOError, "materialize Location is empty")
-
-  let source = runtime_dir / Path(location)
-  if not source.isRelativeTo(runtime_dir):
-    raise newException(IOError,
-      "materialize Location is outside runtime directory: " & $source)
-
-  let source_is_file = fileExists($source)
-  let source_is_dir = dirExists($source)
-  if not source_is_file and not source_is_dir:
-    raise newException(IOError,
-      "materialize Location source does not exist: " & $source)
-  if source_is_dir and artifact_dir.isRelativeTo(source):
-    raise newException(IOError,
-      "materialize Location source contains destination: " & $source)
-
-  createDir($artifact_dir)
-  let parts = splitFile(source)
-  let stem = $parts.name
-  if stem.len == 0:
-    raise newException(IOError,
-      "materialize Location has no file name: " & $source)
-
-  var suffix = 0
-  while true:
-    let candidate = stem & (if suffix == 0: "" else: "-" & $suffix) &
-      parts.ext
-    let destination = artifact_dir / Path(candidate)
-    if not materialized_name_used(materialized_names, candidate) and
-        not fileExists($destination) and not dirExists($destination):
-      if source_is_file:
-        ## Check immediately before the file copy, not only during path setup.
-        if not source.isRelativeTo(runtime_dir):
-          raise newException(IOError,
-            "materialize Location is outside runtime directory: " & $source)
-        copyFile($source, $destination)
-      else:
-        if not source.isRelativeTo(runtime_dir):
-          raise newException(IOError,
-            "materialize Location is outside runtime directory: " & $source)
-        copyDir($source, $destination)
-      materialized_names.add(candidate)
-      return candidate
-    inc suffix
-
-proc verify_location_payload*(working_dir: Path; location: string): string =
-  ## A valid output Location names an existing payload inside this model call.
-  if location.len == 0:
-    return "Location is empty"
-
-  let source = working_dir / Path(location)
-  if not source.isRelativeTo(working_dir):
-    return "Location is outside working directory: " & $source
-  if not fileExists($source) and not dirExists($source):
-    return "Location source does not exist: " & $source
-  ""
-
-proc canonicalize_output_location*(
-    runtime_dir, working_dir: Path; location: string
-): string =
-  ## Validate an output Location in its producer directory, then return the
-  ## stable runtime-relative spelling used by later flow consumers.
-  let error = verify_location_payload(working_dir, location)
-  if error.len != 0:
-    raise newException(IOError, error)
-  let source = working_dir / Path(location)
-  if not source.isRelativeTo(runtime_dir):
-    raise newException(IOError,
-      "Location source is outside runtime directory: " & $source)
-  $relativePath(source, runtime_dir)
 
 proc allocate_request_id[A](context: RuntimeContext[A]): RequestId =
   result = RequestId(kind: rid_integer,

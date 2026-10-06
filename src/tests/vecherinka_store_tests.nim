@@ -12,10 +12,10 @@ proc test_metadata(): StoreMetadata =
     checkpoint_version: checkpoint_format_version)
 
 proc stored(id: uint64; payload: string;
-    predecessors: seq[uint64] = @[]; files: seq[StoreFile] = @[];
+    predecessors: seq[uint64] = @[];
     operation = ""; flow_kind = ""; request_id = ""): StoredArtifact =
   StoredArtifact(id: id, codec_id: "test", codec_version: 1,
-    payload_text: payload, predecessor_ids: predecessors, files: files,
+    payload_text: payload, predecessor_ids: predecessors,
     operation: operation, flow_kind: flow_kind, request_id: request_id)
 
 proc checkpoint(sequence: int64; payload: string): StoreCheckpoint =
@@ -24,7 +24,7 @@ proc checkpoint(sequence: int64; payload: string): StoreCheckpoint =
     payload_text: payload)
 
 suite "Vecherinka SQLite value store":
-  test "reopens payload, raw bytes, ordered predecessors, and checkpoint":
+  test "reopens serialized payload, ordered predecessors, and checkpoint":
     let root = Path(createTempDir("vecherinka-store-", ""))
     let database = root / Path("run.sqlite3")
     let metadata = test_metadata()
@@ -35,9 +35,7 @@ suite "Vecherinka SQLite value store":
         stored(2, "second root"),
         stored(3, "third root"),
         stored(7, "payload α\n" & repeat("detail", 1000),
-          @[3'u64, 2'u64, 3'u64], @[
-            StoreFile(name: "binary.dat", bytes: @[0'u8, 1, 127, 128, 255]),
-            StoreFile(name: "empty.bin", bytes: @[])],
+          @[3'u64, 2'u64, 3'u64],
           operation = "model", flow_kind = "fk_model", request_id = "request-1")],
       checkpoint(0, "{\"ready\":[7]}"),
       attempts = [StoreAttempt(request_id: "request-1", state: sasPrepared,
@@ -61,11 +59,6 @@ suite "Vecherinka SQLite value store":
     check artifact.get.flow_kind == "fk_model"
     check artifact.get.request_id == "request-1"
     check reopened.artifact_for_request("request-1").get.id == 7
-    check artifact.get.files.len == 2
-    check artifact.get.files[0].name == "binary.dat"
-    check artifact.get.files[0].bytes == @[0'u8, 1, 127, 128, 255]
-    check artifact.get.files[1].name == "empty.bin"
-    check artifact.get.files[1].bytes.len == 0
     let saved = reopened.checkpoint()
     check saved.isSome
     check saved.get.sequence == 0
@@ -142,24 +135,32 @@ suite "Vecherinka SQLite value store":
       discard open_vecherinka_store(database, test_metadata())
     check not fileExists($database)
 
-  test "unsafe or colliding file entries roll back the whole transition":
-    let root = Path(createTempDir("vecherinka-store-unsafe-", ""))
+  test "upgrades schema 5 without deleting its unused file table":
+    let root = Path(createTempDir("vecherinka-store-upgrade-", ""))
     let database = root / Path("run.sqlite3")
-    let store = create_vecherinka_store(database, test_metadata())
-    expect ValueError:
-      store.commit_transition(-1,
-        [stored(1, "unsafe", files = @[
-          StoreFile(name: "../outside", bytes: @[1'u8])])],
-        checkpoint(0, "not committed"))
-    expect ValueError:
-      store.commit_transition(-1,
-        [stored(1, "collision", files = @[
-          StoreFile(name: "bundle", bytes: @[1'u8]),
-          StoreFile(name: "bundle/member", bytes: @[2'u8])])],
-        checkpoint(0, "not committed"))
-    check store.artifact(1).isNone
-    check store.checkpoint().isNone
+    let metadata = test_metadata()
+    let store = create_vecherinka_store(database, metadata)
+    store.commit_transition(-1, [stored(1, "payload")], checkpoint(0, "saved"))
     store.close()
+
+    let legacy = open($database, "", "", "")
+    legacy.exec(SqlQuery("""CREATE TABLE artifact_file (
+      artifact_id INTEGER NOT NULL REFERENCES artifact(artifact_id),
+      name TEXT NOT NULL,
+      bytes BLOB NOT NULL,
+      PRIMARY KEY (artifact_id, name))"""))
+    legacy.exec(sql"INSERT INTO artifact_file VALUES(?, ?, ?)",
+      1, "legacy.bin", @[0'u8, 255'u8])
+    legacy.exec(SqlQuery("PRAGMA user_version = 5"))
+    legacy.close()
+
+    let reopened = open_vecherinka_store(database, metadata)
+    check reopened.artifact(1).get.payload_text == "payload"
+    reopened.close()
+    let verify = open($database, "", "", "")
+    check verify.getValue(SqlQuery("PRAGMA user_version")) == "6"
+    check verify.getValue(sql"SELECT COUNT(*) FROM artifact_file") == "1"
+    verify.close()
 
   test "terminal run status cannot be reopened as active":
     let root = Path(createTempDir("vecherinka-store-terminal-", ""))

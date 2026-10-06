@@ -29,6 +29,11 @@ This copy may contain authentication data. It is ignored by Git; do not commit
 or expose it. A symlink to the external state directory is insufficient in a
 restricted task sandbox.
 
+The Luna profile maps to `gpt-6-luna`. The supplied state snapshot's model
+catalog exposes only GPT-5.6 Luna, and its app-server rejected GPT-6 Luna with
+HTTP 400. Verify that the account/model catalog supports GPT-6 Luna before
+claiming a live workflow run.
+
 ## Runtime limits
 
 - Generated Codex agents use `approval_policy=never` and

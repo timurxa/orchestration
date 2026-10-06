@@ -1,5 +1,6 @@
-import std/[json, options, strutils, unittest]
+import std/[json, options, os, paths, strutils, tempfiles, unittest]
 import ../api/vecherinka
+import ../api/vecherinka_store
 
 type
   CodecCount = range[1..3]
@@ -31,6 +32,8 @@ declare_artifact_codec(CodecRoot, encodeCodecRoot, decodeCodecRoot)
 declare_artifact_codec(Blob, encodeBlob, decodeBlob)
 declare_artifact_codec(CodecIndex, encodeCodecIndex, decodeCodecIndex)
 declare_artifact_codec(int64, encodeCodecInt, decodeCodecInt)
+
+proc pass_serialized(value: string): string {.nimcall.} = value
 
 suite "generated artifact JSON codec":
   test "round trips nested values and deterministic BlobTree bytes":
@@ -111,3 +114,26 @@ suite "generated artifact JSON codec":
     check distinct_json["type"].getStr != base_json["type"].getStr
     check int64(decodeCodecIndex($distinct_json)) == 5
     check decodeCodecInt($base_json) == 5
+
+  test "Blob payload survives a SQLite workflow close and reopen":
+    let root = createTempDir("vecherinka-blob-store-", "", getTempDir())
+    defer: removeDir(root)
+    let database = Path(root / "run.sqlite3")
+    let metadata = StoreMetadata(run_id: "blob-run", workflow_id: "blob-test",
+      workflow_fingerprint: "blob-test-v1", workflow_manifest_json: "{}",
+      codec_version: 1, checkpoint_version: checkpoint_format_version)
+    let blob = blobFromBytes(@[0'u8, 1, 127, 128, 255], "payload.bin")
+    let entry = Flow[string](flow_key: "entry", kind: fk_it,
+      projector: pass_serialized)
+    let top = Flow[string](flow_key: "top", kind: fk_top,
+      root: "blob", entry: true, body: entry)
+    let run = create_sqlite_run(@[top], encodeBlob(blob), database, metadata,
+      @[top, entry])
+    check run.finished
+    check run.output.isSome
+
+    let reopened = open_vecherinka_store(database, metadata)
+    let decoded = decodeBlob(reopened.artifact(run.output.get).get.payload_text)
+    check decoded.suggestedFilename == "payload.bin"
+    check decoded.bytes == blob.bytes
+    reopened.close()

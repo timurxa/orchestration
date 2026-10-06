@@ -50,6 +50,9 @@ An empty `database_path` creates `run-*/vecherinka.sqlite3` under the current
 directory. Pass a path to retain and resume a specific run. `solve` raises
 `ValueError` if execution fails or returns no output; `resume_solve` raises if
 the database is missing, incompatible, or already terminal.
+Generated wrappers encode typed artifacts as serialized strings for the
+low-level SQLite runtime. Direct `create_sqlite_run` and `resume_sqlite_run`
+calls currently accept only those serialized-string artifacts.
 
 ## Composition and data
 
@@ -147,26 +150,29 @@ wait indefinitely. Invalid `finish_work` data is rejected and returned to the
 agent as a tool error, so it may correct the result in the same turn. If the
 turn ends without a valid `finish_work`, the plan fails.
 
-## Provenance and inspection
+## Durable storage and inspection
 
-Every run stores `vecherinka_provenance.sqlite3` and `artifact-*` directories
-under `run-*`. SQLite stores artifact paths and predecessor edges, not
-payloads, hashes, model responses, or full operation history; JSONL logs are
-diagnostic. Keep SQLite WAL/SHM files with the database while it is open.
-Run status ends `finished`, `failed`, or `aborted`. Do not reopen a prior DB as
-a continuation run; initialization resets its metadata.
+The per-run `vecherinka.sqlite3` database is the canonical record of the run.
+It stores versioned serialized artifact values (including complete Blob and
+BlobTree bytes), predecessor edges, model-attempt state, and scheduler
+checkpoints. A default database is placed at
+`run-*/vecherinka.sqlite3`; pass `database_path` to choose a stable path for
+later resumption. Keep the SQLite WAL/SHM files with the database while it is
+open.
 
-For the provenance smoke test (separate from the research example):
+Artifact values are materialized in a temporary model-call workspace only
+while an agent is working. The runtime reads submitted file bytes back into
+the typed output before committing the artifact and checkpoint. Optional
+JSONL logs and `tools/artifact_graph.py` are diagnostic views; they are not
+required to resume and do not contain the artifact payloads. Legacy path-based
+provenance APIs and the `vecherinka_provenance_poc_runner` are separate from
+the SQLite execution path and do not describe the current storage contract.
 
-```bash
-CODEX_HOME="$PWD/.codex-task-state" \
-CODEX_SQLITE_HOME="$PWD/.codex-task-state" \
-nim c -r --panics:on --threads:on --path:src/api \
-  src/tests/vecherinka_provenance_poc_runner.nim
-```
-
-The test checks a fixed two-artifact graph, not general workflow correctness.
-Implementation map: lowering in `src/api/vecherinka_comptime.nim`, runtime in
-`src/api/vecherinka_runtime.nim`, projection/lift grammars in
-`src/api/it_projection.nim` and `src/api/lift_pattern_typed.nim`, and
-provenance in `src/api/vecherinka_provenance.nim`.
+Implementation map: lowering and generated codecs are in
+`src/api/vecherinka_comptime.nim`; artifact persistence, model boundaries, and
+execution are in `src/api/vecherinka_runtime.nim`; the schema and transactional
+store operations are in `src/api/vecherinka_store.nim`; checkpoint format and
+restore are in `src/api/vecherinka_checkpoint.nim` and
+`src/api/vecherinka_checkpoint_adapter_impl.nim`. Projection and lift grammars
+are in `src/api/it_projection.nim` and
+`src/api/lift_pattern_typed.nim`.

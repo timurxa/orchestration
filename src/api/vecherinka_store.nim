@@ -7,17 +7,12 @@ import std/algorithm
 {.warning[UnusedImport]: on.}
 import std/[options, os, paths, strutils]
 import db_connector/db_sqlite
-import ./vecherinka_blob
 
 type
   VecherinkaStore* = ref object
     database_path*: Path
     db: DbConn
     closed: bool
-
-  StoreFile* = object
-    name*: string
-    bytes*: seq[byte]
 
   StoredArtifact* = object
     id*: uint64
@@ -28,7 +23,6 @@ type
     operation*: string
     flow_kind*: string
     request_id*: string
-    files*: seq[StoreFile]
 
   StoreMetadata* = object
     run_id*: string
@@ -58,7 +52,8 @@ type
     payload_text*: string
 
 const
-  store_schema_version* = 5
+  store_schema_version* = 6
+  legacy_store_schema_version = 5
   checkpoint_format_version* = 2
 
 proc exec_sql(db: DbConn; statement: string) =
@@ -141,12 +136,6 @@ proc initialize_schema(store: VecherinkaStore; metadata: StoreMetadata) =
     exec_sql(store.db, """CREATE UNIQUE INDEX artifact_request_unique_idx
       ON artifact(request_id) WHERE request_id <> ''""")
     exec_sql(store.db, "CREATE INDEX predecessor_lookup_idx ON predecessor(predecessor_id)")
-    exec_sql(store.db, """CREATE TABLE artifact_file (
-      artifact_id INTEGER NOT NULL REFERENCES artifact(artifact_id),
-      name TEXT NOT NULL,
-      bytes BLOB NOT NULL,
-      PRIMARY KEY (artifact_id, name)
-    )""")
     exec_sql(store.db, """CREATE TABLE checkpoint (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       sequence INTEGER NOT NULL,
@@ -166,7 +155,7 @@ proc initialize_schema(store: VecherinkaStore; metadata: StoreMetadata) =
       metadata.run_id, metadata.workflow_id, metadata.workflow_fingerprint,
       metadata.workflow_manifest_json,
       metadata.codec_version, metadata.checkpoint_version)
-    exec_sql(store.db, "PRAGMA user_version = 5")
+    exec_sql(store.db, "PRAGMA user_version = " & $store_schema_version)
     exec_sql(store.db, "COMMIT")
     committed = true
   finally:
@@ -191,8 +180,9 @@ proc open_vecherinka_store*(database_path: Path;
     raise newException(IOError, "store does not exist: " & $database_path)
   result = open_database(database_path)
   try:
-    let version = result.db.getValue(sql"PRAGMA user_version")
-    if version.len == 0 or parseInt(version) != store_schema_version:
+    let version_text = result.db.getValue(sql"PRAGMA user_version")
+    let version = if version_text.len == 0: 0 else: parseInt(version_text)
+    if version notin {legacy_store_schema_version, store_schema_version}:
       raise newException(ValueError, "unsupported Vecherinka store schema")
     let row = result.db.getRow(sql"""SELECT run_id, workflow_id,
         workflow_fingerprint, workflow_manifest_json, codec_version,
@@ -209,6 +199,18 @@ proc open_vecherinka_store*(database_path: Path;
         parseInt(row[5]) != requested.checkpoint_version:
       raise newException(ValueError,
         "store workflow or codec version does not match this program")
+    if version == legacy_store_schema_version:
+      ## Schema 5's legacy artifact_file table was never used by generated
+      ## runtime artifacts. Retain any old rows but stop treating it as a
+      ## second artifact representation.
+      exec_sql(result.db, "BEGIN IMMEDIATE")
+      try:
+        exec_sql(result.db, "PRAGMA user_version = " & $store_schema_version)
+        exec_sql(result.db, "COMMIT")
+      except CatchableError:
+        try: exec_sql(result.db, "ROLLBACK")
+        except CatchableError: discard
+        raise
   except CatchableError:
     result.close()
     raise
@@ -267,22 +269,6 @@ proc close*(store: VecherinkaStore) =
   store.db = nil
   store.closed = true
 
-proc bind_file(db: DbConn; artifact_id: int64; file: StoreFile) =
-  if file.name.len == 0:
-    raise newException(ValueError, "artifact file name cannot be empty")
-  let normalized_name = normalizeRelativePath(file.name)
-  if file.bytes.len == 0:
-    db.exec(sql"INSERT INTO artifact_file(artifact_id, name, bytes) VALUES(?, ?, zeroblob(0))",
-      artifact_id, normalized_name)
-  else:
-    var statement = db.prepare(
-      "INSERT INTO artifact_file(artifact_id, name, bytes) VALUES(?, ?, ?)")
-    try:
-      statement.bindParams(artifact_id, normalized_name, file.bytes)
-      if not db.tryExec(statement): dbError(db)
-    finally:
-      finalize(statement)
-
 proc insert_artifact(db: DbConn; artifact: StoredArtifact) =
   let artifact_id = as_sql_id(artifact.id)
   if artifact.codec_id.len == 0 or artifact.codec_version <= 0:
@@ -297,21 +283,6 @@ proc insert_artifact(db: DbConn; artifact: StoredArtifact) =
   for position, predecessor_id in artifact.predecessor_ids:
     db.exec(sql"INSERT INTO predecessor(artifact_id, position, predecessor_id) VALUES(?, ?, ?)",
       artifact_id, position, as_sql_id(predecessor_id))
-
-  var file_names: seq[string] = @[]
-  for file in artifact.files:
-    let normalized_name = normalizeRelativePath(file.name)
-    if normalized_name in file_names:
-      raise newException(ValueError, "duplicate artifact file name: " & file.name)
-    file_names.add(normalized_name)
-  for index, name in file_names:
-    for other_index, other in file_names:
-      if index != other_index and other.startsWith(name & "/"):
-        raise newException(ValueError,
-          "artifact file is also used as a directory: " & name)
-  for index, file in artifact.files:
-    bind_file(db, artifact_id,
-      StoreFile(name: file_names[index], bytes: file.bytes))
 
 proc allowed_attempt_transition(previous, next: StoreAttemptState): bool =
   if previous == next:
@@ -363,7 +334,7 @@ proc commit_transition*(store: VecherinkaStore;
     artifacts: openArray[StoredArtifact]; checkpoint: StoreCheckpoint;
     attempts: openArray[StoreAttempt] = []) =
   ## All values and this checkpoint are one SQLite commit. A duplicate ID,
-  ## duplicate file, or stale writer rolls back every row in the batch.
+  ## duplicate ID, or stale writer rolls back every row in the batch.
   require_open(store)
   if expected_previous_sequence < -1 or
       checkpoint.sequence != expected_previous_sequence + 1:
@@ -415,13 +386,6 @@ proc artifact*(store: VecherinkaStore; id: uint64): Option[StoredArtifact] =
   for row in store.db.getAllRows(sql"SELECT predecessor_id FROM predecessor WHERE artifact_id = ? ORDER BY position",
       artifact_id):
     result.get.predecessor_ids.add(as_artifact_id(row[0]))
-  for row in store.db.getAllRows(sql"SELECT name, bytes FROM artifact_file WHERE artifact_id = ? ORDER BY name",
-      artifact_id):
-    var bytes = newSeq[byte](row[1].len)
-    for index, value in row[1]:
-      bytes[index] = byte(value)
-    result.get.files.add(StoreFile(name: row[0], bytes: bytes))
-
 proc artifact_for_request*(store: VecherinkaStore;
     request_id: string): Option[StoredArtifact] =
   require_open(store)

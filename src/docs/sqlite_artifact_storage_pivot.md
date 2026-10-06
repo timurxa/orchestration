@@ -406,6 +406,17 @@ querying becomes a required product feature.
   Official SQLite WAL and DuckDB concurrency documentation were spot-checked
   against the report's source claims; the example itself has no web-search tool,
   so the remaining report citations were not independently re-fetched.
+- After this successful GPT-5.6 Luna verification, the runtime Luna profile was
+  updated to `gpt-6-luna`. The supplied Codex ChatGPT account's app-server
+  rejected that model with HTTP 400 before its first model turn (`gpt-6-luna`
+  is unsupported with this account), so the end-to-end run has not yet been
+  repeated under the updated model mapping. Focused compile-time prompt tests
+  confirm the generated request now names `gpt-6-luna`.
+- Simplified the new artifact format to one canonical serialized payload. Blob
+  and BlobTree bytes already round-trip inside that payload, so schema 6 no
+  longer creates or reads the unused `artifact_file` side table. Opening a
+  schema-5 run advances its schema marker while retaining any legacy table and
+  rows; those rows were not part of generated workflow storage.
 
 Potential reversal: callback replay relies on the documented purity contract,
 which Nim cannot enforce for arbitrary callback bodies. If users need
