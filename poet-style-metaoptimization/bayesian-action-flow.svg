@@ -1,0 +1,141 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="6.2in" height="3.9in" viewBox="0 0 1240 780" role="img" aria-labelledby="title desc">
+  <title id="title">Bayesian action flow for program optimization</title>
+  <desc id="desc">Interpretations and action features inform learned predictions and budgeted lookahead. One alpha, beta, or gamma action then executes, pays actual cost, and updates persistent state. Predicted paths do not alter state.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#536579"/></marker>
+    <marker id="arrowTeal" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#167d78"/></marker>
+    <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L10,5 L0,10 z" fill="#7964a6"/></marker>
+    <style>
+      text { font-family: Arial, Helvetica, sans-serif; fill: #263746; }
+      .title { font-size: 27px; font-weight: 700; letter-spacing: .1px; }
+      .kicker { font-size: 15px; font-weight: 700; letter-spacing: 1px; fill: #647687; }
+      .head { font-size: 18px; font-weight: 700; }
+      .body { font-size: 20px; }
+      .small { font-size: 16px; }
+      .tiny { font-size: 13px; }
+      .white { fill: #fff; }
+      .muted { fill: #647687; }
+      .card { fill: #fff; stroke: #cad4dc; stroke-width: 1.6; }
+      .line { fill: none; stroke: #536579; stroke-width: 2.2; marker-end: url(#arrow); }
+      .predictLine { fill: none; stroke: #7964a6; stroke-width: 2.2; stroke-dasharray: 7 6; marker-end: url(#arrowPurple); }
+      .actualLine { fill: none; stroke: #167d78; stroke-width: 2.5; marker-end: url(#arrowTeal); }
+    </style>
+  </defs>
+  <rect width="1240" height="780" fill="#fbfcfd"/>
+  <text x="38" y="42" class="title">Bayesian action flow</text>
+  <text x="1195" y="40" text-anchor="end" class="kicker">PERSISTENCE · PREDICTION · EXECUTION</text>
+
+  <!-- Persistent state -->
+  <rect x="36" y="91" width="242" height="508" rx="15" fill="#edf3f5" stroke="#bdcbd3" stroke-width="1.6"/>
+  <path d="M51 91h212a15 15 0 0 1 15 15v45H36v-45a15 15 0 0 1 15-15z" fill="#dce8ec"/>
+  <text x="56" y="119" class="kicker">PERSISTENT STATE</text>
+  <text x="56" y="177" class="head">Full history kept</text>
+  <circle cx="59" cy="211" r="4" fill="#167d78"/><text x="72" y="216" class="body">Raw evaluation data</text>
+  <circle cx="59" cy="247" r="4" fill="#167d78"/><text x="72" y="252" class="body">Execution/action traces</text>
+  <circle cx="59" cy="283" r="4" fill="#167d78"/><text x="72" y="288" class="body">Programs + lineage</text>
+  <circle cx="59" cy="319" r="4" fill="#167d78"/><text x="72" y="324" class="body">Problem catalog</text>
+  <circle cx="59" cy="355" r="4" fill="#167d78"/><text x="72" y="360" class="body">Posteriors + state</text>
+  <path d="M55 389h204" stroke="#c4d1d8" stroke-width="1.4"/>
+  <rect x="54" y="410" width="205" height="92" rx="10" fill="#fff" stroke="#cbd6dd"/>
+  <text x="70" y="438" class="head" font-size="16">Target set P fixed</text>
+  <text x="70" y="463" class="small">γ adds catalog entry;</text>
+  <text x="70" y="482" class="small">P stays fixed.</text>
+  <text x="56" y="547" class="small muted">Archive and evidence persist</text>
+  <text x="56" y="567" class="small muted">across actual actions.</text>
+
+  <!-- Prediction path -->
+  <text x="310" y="87" class="kicker" fill="#7964a6">SIMULATED OUTCOMES · PRE-ACTION</text>
+  <rect x="310" y="103" width="191" height="168" rx="13" fill="#f4f0fa" stroke="#c9bfdd" stroke-width="1.5"/>
+  <text x="328" y="132" class="head">Interpretations</text>
+  <text x="328" y="158" class="body">Action features</text>
+  <text x="328" y="188" class="small">ψ(S, a) → x</text>
+  <text x="328" y="210" class="small">from state + action context.</text>
+  <text x="328" y="243" class="tiny muted">Feature / model forms tentative</text>
+  <path d="M278 186H302" class="line"/>
+
+  <rect x="527" y="103" width="195" height="168" rx="13" fill="#f4f0fa" stroke="#c9bfdd" stroke-width="1.5"/>
+  <text x="545" y="132" class="head">Action models</text>
+  <text x="545" y="160" class="small">α: Beta score model</text>
+  <text x="545" y="180" class="small">β: lineage transition</text>
+  <text x="545" y="203" class="small">γ: problem model</text>
+  <text x="545" y="228" class="small">PATA from scored pairs.</text>
+  <text x="545" y="248" class="tiny">Signature inferred from</text>
+  <text x="545" y="265" class="tiny">evaluations.</text>
+  <path d="M501 187H519" class="predictLine"/>
+
+  <rect x="748" y="103" width="174" height="168" rx="13" fill="#f4f0fa" stroke="#c9bfdd" stroke-width="1.5"/>
+  <text x="766" y="132" class="head">Budgeted</text>
+  <text x="766" y="154" class="head">lookahead</text>
+  <text x="766" y="184" class="small">Sample; apply T</text>
+  <text x="766" y="204" class="small">update; recurse.</text>
+  <text x="766" y="229" class="small">E[HV] on fixed P</text>
+  <text x="766" y="251" class="tiny muted">No state writes</text>
+  <path d="M722 187H740" class="predictLine"/>
+
+  <rect x="948" y="103" width="246" height="168" rx="13" fill="#e7f2f1" stroke="#9fc8c3" stroke-width="1.7"/>
+  <text x="969" y="133" class="kicker" fill="#167d78">DECISION</text>
+  <text x="969" y="164" class="head">Choose one actual action</text>
+  <text x="969" y="195" class="body">α evaluate · β refine</text>
+  <text x="969" y="219" class="body">γ generate problem</text>
+  <text x="969" y="249" class="small muted">Debit selected action cost</text>
+  <path d="M922 187H940" class="predictLine"/>
+
+  <!-- dispatch -->
+  <path d="M1071 271v35H752" class="actualLine"/>
+  <rect x="657" y="291" width="190" height="31" rx="15" fill="#167d78"/>
+  <text x="752" y="312" text-anchor="middle" class="small white" font-weight="700">EXECUTE ONE ACTION</text>
+  <path d="M752 322v20M438 342h592" fill="none" stroke="#167d78" stroke-width="2.2"/>
+  <path d="M438 342v18" class="actualLine"/>
+  <path d="M720 342v18" class="actualLine"/>
+  <path d="M1030 342v18" class="actualLine"/>
+
+  <text x="310" y="376" class="kicker" fill="#167d78">ACTUAL EXECUTION · ONE ACTION PER STEP · PAY cₐ ONLY HERE</text>
+  <!-- alpha -->
+  <rect x="310" y="390" width="258" height="205" rx="13" class="card"/>
+  <rect x="310" y="390" width="258" height="42" rx="13" fill="#dcefeb"/>
+  <path d="M310 419v13h258v-13" fill="#dcefeb"/>
+  <text x="330" y="419" class="head" fill="#126c68">α · Evaluate (o, p)</text>
+  <text x="330" y="459" class="body">Stochastic solution</text>
+  <text x="330" y="483" class="body">Deterministic score</text>
+  <text x="330" y="505" class="small">Jₚ ∈ (0,1)</text>
+  <text x="330" y="526" class="small">Score + execution trace;</text>
+  <text x="330" y="545" class="small">updates score posterior.</text>
+  <rect x="330" y="559" width="218" height="25" rx="12" fill="#edf3f5"/>
+  <text x="439" y="577" text-anchor="middle" class="small" font-weight="700">cost cα &gt; 0 · constant</text>
+
+  <!-- beta -->
+  <rect x="590" y="390" width="258" height="205" rx="13" class="card"/>
+  <rect x="590" y="390" width="258" height="42" rx="13" fill="#e9e4f3"/>
+  <path d="M590 419v13h258v-13" fill="#e9e4f3"/>
+  <text x="610" y="419" class="head" fill="#64518e">β · Refine (o, p)</text>
+  <text x="610" y="459" class="body">Next version o′</text>
+  <text x="610" y="483" class="body">Shared lineage belief</text>
+  <text x="610" y="514" class="small">Lineage + trace; no score</text>
+  <text x="610" y="535" class="small">or new problem.</text>
+  <rect x="610" y="553" width="218" height="25" rx="12" fill="#f3f0f8"/>
+  <text x="719" y="571" text-anchor="middle" class="small" font-weight="700">cost cβ &gt; 0 · constant</text>
+
+  <!-- gamma -->
+  <rect x="870" y="390" width="324" height="205" rx="13" class="card"/>
+  <rect x="870" y="390" width="324" height="42" rx="13" fill="#e8eef4"/>
+  <path d="M870 419v13h324v-13" fill="#e8eef4"/>
+  <text x="890" y="419" class="head" fill="#415c76">γ · Generate problem</text>
+  <text x="890" y="459" class="body">Creates candidate p′</text>
+  <text x="890" y="483" class="body">Action trace; no score.</text>
+  <text x="890" y="514" class="small">Catalog grows; target set P fixed.</text>
+  <text x="890" y="535" class="small">Signature inferred from evaluations.</text>
+  <rect x="890" y="553" width="284" height="25" rx="12" fill="#edf3f5"/>
+  <text x="1032" y="571" text-anchor="middle" class="small" font-weight="700">cost cγ unspecified</text>
+
+  <!-- Actual outcomes update persistent state -->
+  <path d="M439 595v26h312M719 595v26M1032 595v26H751" fill="none" stroke="#167d78" stroke-width="2.2"/>
+  <path d="M751 621v8" class="actualLine"/>
+  <rect x="310" y="640" width="884" height="91" rx="13" fill="#e7f2f1" stroke="#9fc8c3" stroke-width="1.7"/>
+  <text x="332" y="671" class="head" fill="#126c68">True event + paid cost cₐ</text>
+  <text x="332" y="698" class="small">Record outcome; budget B − cₐ; refresh catalogs + features.</text>
+  <text x="332" y="720" class="small">α updates score belief; β/γ update catalogs + priors.</text>
+
+  <!-- State feedback loop -->
+  <path d="M310 689H294V576H278" class="actualLine"/>
+  <text x="302" y="613" class="tiny" fill="#167d78" transform="rotate(-90 302 613)">persist and reuse next step</text>
+</svg>
