@@ -132,6 +132,7 @@ pointers, procedures, sets, `JsonNode`, `Table`, `char`, and `cstring`.
 From the repo root, after following the state setup in [AGENTS.md](../../AGENTS.md):
 
 ```bash
+PATH="/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS:$PATH" \
 CODEX_HOME="$PWD/.codex-task-state" \
 CODEX_SQLITE_HOME="$PWD/.codex-task-state" \
 nim c -r --panics:on --threads:on --path:src/api \
@@ -139,10 +140,12 @@ nim c -r --panics:on --threads:on --path:src/api \
 ```
 
 It prints a recommendation, rationale, sources, and caveats. The current
-directory receives `parallel-research.jsonl` and a `run-*` directory. Run
-from an isolated disposable checkout. Child threads use Codex's
-`workspace-write` sandbox with their per-call workspace as cwd. Source lookup
-is not configured by this workflow; current-source research requires
+directory receives `parallel-research.jsonl` and a `run-*` directory containing
+the SQLite database. Model-call workspaces are created separately under the
+system temporary directory, used only for staging, and removed when the
+runtime call exits. Run from an isolated disposable checkout. Child threads use
+Codex's `workspace-write` sandbox with their per-call workspace as cwd. Source
+lookup is not configured by this workflow; current-source research requires
 search-capable tools in the child app-server environment.
 
 The public solve API has no timeout or cancellation. A stalled request can
