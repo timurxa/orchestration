@@ -1,19 +1,16 @@
-# Vecherinka DSL: concise guide
+# Vecherinka DSL guide
 
-This guide describes the DSL implemented in this repository. Source and
-passing tests are authoritative. Each feature is labelled:
+Vecherinka is a typed Nim DSL that lowers workflow declarations into a
+`solve` procedure. Read this with the [budgeting contract](vecherinka_budgeting_spec.md)
+and [run instructions](../../AGENTS.md). Source is authoritative; composite
+surface workflows are not all covered by end-to-end tests.
 
-- **Proven**: active end-to-end or focused tests cover it.
-- **Implementation-backed**: lowering/runtime support exists, but no complete
-  active surface test covers the full feature.
-- **Inference**: behavior follows generated code but is not pinned by a test.
-
-## 1. Smallest useful flow
+## Smallest workflow
 
 ```nim
 {.experimental: "callOperator".}
 import std/[macros, paths]
-import vecherinka  # compile with --path:src/api
+import vecherinka # compile with --path:src/api
 
 type
   Input = object
@@ -25,326 +22,134 @@ const model = "gpt-5.6-luna".medium
 
 expandMacros: vecherinka(solve):
   > answer Input ~> Output {.entry.}:
-    model[Input, Output]("Answer the request. Put answer in response.")
+    model[Input, Output]("Answer the request. Put the answer in response.")
 
-let result = solve(Input(request: "Say hello"))
+let result = solve(Input(request: "Say hello"), 100.0)
 ```
 
-`expandMacros:` is Nim's macro-expansion directive, not Vecherinka syntax.
-The flow header is:
+`expandMacros:` is Nim syntax. A flow has the form `> name A ~> B {.entry.}:`;
+exactly one non-`void` entry is required. Model endpoints must match exactly.
+The generated signature is:
 
 ```nim
-> flow_name Domain ~> Codomain {.entry.}:
-  flow_expression
+solve(input, initial_budget,
+  prompt_templates = default_agent_prompt_templates,
+  transport = nil, logger = nil)
 ```
 
-Rules:
+`initial_budget` is required. The defaults apply to all arguments after it.
+`solve` raises `ValueError` if execution fails or returns no output.
 
-- Importing `vecherinka` supplies compile-time and runtime layers.
-- Exactly one `.entry.` flow is required; marker follows the codomain.
-- Entry domain must be non-`void`.
-- `A ~> B` means `FlowSpec[A, B]`; every codomain must be non-`void`.
-- Model syntax is `profile[A, B]("prompt")`; endpoints match exactly.
-- Generated solve is effectively `solve(input, transport = nil, logger = nil)`.
+## Composition and data
 
-Evidence: `src/api/vecherinka.nim`, `src/api/vecherinka_comptime.nim`,
-`src/examples/vecherinka_manual_test.nim`.
+`first >>> second` composes `A ~> B` with `B ~> C`; `value >>> flow` seeds a
+flow with a raw `A`. Use `pure(value)` for a zero-cost local value. There are no
+implicit conversions, field matching, tuple flattening, or automatic
+projection.
 
-## 2. Composition
+- `fan(flow1, flow2, ...)` runs same-domain branches on the same input and
+  returns a tuple in source order. Use `fan`, not internal `fanout`.
+- `so(A, B, input) do: ...` runs local routing and returns
+  `FlowSpec[void, B]`; return `pure(value)` for a direct result. Path forms
+  expose `runtime_dir` and `working_dir`; budget forms expose a snapshot.
+- `it(Tuple)[[0, 1]]` projects selected tuple items;
+  `it(Object)[[field]]` projects fields. Use nested selector groups for nested
+  projections. Index and field selectors cannot mix in one group; a range
+  must be the only selector and stay in bounds.
+- `lift(here)[flow]`, `lift(seq[here])[flow]`, and
+  `lift(Option[here])[flow]` apply a flow while preserving the outer shape.
+  Supported wrapper forms are deliberately restricted; do not assume
+  `lift(Box[here])` works. `here` is a placeholder; `_` is not.
 
-```nim
-first >>> second       # A ~> B, B ~> C gives A ~> C
-value >>> next_flow    # seed next_flow with raw A
-pure(value)            # void ~> typeof(value), no model request
-```
+These composite surface forms have implementation support, but a combined
+`fan`/`so`/`it`/`lift` workflow is not yet covered end-to-end. The research
+example demonstrates `so` plus `lift`; treat it as illustrative until that
+exact path is exercised.
 
-Composition is typed. No implicit conversion, mapping, tuple flattening,
-field matching, bind, or automatic projection exists.
+## Profiles, prompts, and output contracts
 
-### Parallel branches: `fan`
+Use `"model".none`, `.low`, `.medium`, `.high`, `.xhigh`, or `.max` to choose
+reasoning effort (`minimal` aliases `none`). Supported profiles and budget
+estimates are in the budgeting contract.
 
-```nim
-fan(
-  model[A, B]("Extract B"),
-  model[A, C]("Extract C")) # A ~> (B, C)
-```
+`AgentPromptTemplates` customizes developer instructions, goal, turn prompt,
+and finish description. `checked_prompt(text, "name", ...)` validates literal
+templates. Supported substitutions are `$task`, `$input`, `$working_dir`,
+`$runtime_dir`, `$model`, and `$effort`; `$$` escapes `$`. The finish
+description is passed through without substitution.
 
-Branches need the same domain. Runtime runs them with the same input and
-returns outputs in source order. `fanout` is an internal lowering form; use
-`fan`, not `fanout`.
+Model output is parsed against the declared output type via `finish_work`.
+Prefer named object fields. Supported round-trip shapes include scalars,
+enums, plain objects, named tuples, sequences, options, locations, supported
+variants, distinct values, and constrained integers. Some variant/array cases
+and positional-tuple round trips are not established; Schematic support alone
+does not prove Vecherinka support.
 
-Status: **Implementation-backed**. Lowering and runtime fork/join exist; a
-complete active surface flow is not currently tested.
+## Files and `Location`
 
-### Local logic: `so`
+`Location("relative/path")` is a runtime-relative artifact path. Typed input
+is also written to `vecherinka_model_input_materialization.txt` in the call's
+artifact directory; read it for exact values. Prompt text and JSON schema are
+control data, not workflow input or output.
 
-```nim
-so(Domain, Codomain, input) do:
-  if should_use_fast_path(input):
-    pure(local_value)
-  else:
-    input_for_next_step >>> next_flow
-```
+Input locations resolve under `runtime_dir` and are copied into the consumer
+artifact directory. Output locations must name an existing file or directory
+inside the producer's `working_dir`; Vecherinka validates and canonicalizes
+them relative to `runtime_dir` for downstream use. Empty, missing, or outside
+paths fail. Repeated basenames get `-1`, `-2`, etc. Input and output roots are
+different; a raw output filename is not itself a cross-call path.
 
-Context form also exposes the current artifact directory:
+Use `string` for inline content and `Location` for file transfer. For example,
+an output field `patch_text: string` must contain patch text; a
+`report_file: Location` must name a file created in the current working
+directory. Do not put file contents in a `Location` or return a filename in a
+string field when file transfer is intended. Artifact leaves reject refs,
+pointers, procedures, sets, `JsonNode`, `Table`, `char`, and `cstring`.
 
-```nim
-so(Domain, Codomain, input, working_dir) do:
-  writeFile($(working_dir / Path("result.txt")), "done")
-  pure(Output(file: Location("result.txt")))
-```
+## Running the research example
 
-Callback input type must exactly equal `Domain`; callback result must be
-`FlowSpec[void, Codomain]`. Use a simple identifier for callback input.
-`so` does not allocate an output artifact; seed it with `pure(...)` when
-needed.
-
-Status: **Implementation-backed**.
-
-## 3. Selecting and lifting data
-
-### `it` projection
-
-```nim
-it(Tuple)[[0]]             # one tuple item
-it(Object)[[field]]        # one field
-it(Tuple)[[0, 1]]          # tuple of items
-it(Nested)[[0], [field]]   # apply next group to each selected item
-it(Tuple)[[0 .. 2]]        # tuple range
-```
-
-Use nested selector groups. `it(T)[0]` is invalid. Numeric and field
-selectors cannot mix within one group. Ranges must be the only selector in a
-group, with nondecreasing, in-bounds values checked during typed elaboration.
-
-Status: **Implementation-backed**. Parser and typed projection behavior are
-tested; a complete generated surface flow is not active-tested.
-
-### `lift`
-
-```nim
-lift(here)[flow]                    # X ~> Y
-lift(seq[here])[flow]               # seq[X] ~> seq[Y]
-lift(Option[here])[flow]            # Option[X] ~> Option[Y]
-lift((FixedType, here))[flow]
-lift((left: here, right: FixedType))[flow]
-```
-
-`here` is the only placeholder. Plain `_` and acc-quoted ``here`` are
-not placeholders. Runtime invokes inner flow once per `here`, per sequence
-element, and per present option; it restores the original outer shape.
-
-Status: **Implementation-backed**. Do not assume `lift(Box[here])` works;
-wrapper patterns use the restricted grammar above.
-
-## 4. Profiles, prompts, and contracts
-
-Profile constructors:
-
-```nim
-"model".none       "model".low       "model".medium
-"model".high       "model".xhigh     "model".max
-```
-
-`minimal` aliases `none`. Effort is sent during thread creation and the
-turn.
-
-Custom templates use `AgentPromptTemplates` and `checked_prompt`:
-
-```nim
-const templates = AgentPromptTemplates(
-  developer_instructions: checked_prompt("Developer rules"),
-  goal: checked_prompt("Task: $task", "task"),
-  turn_prompt: checked_prompt("$task\n$input\nDir: $working_dir",
-                              "task", "input", "working_dir"))
-
-vecherinka(solve, templates):
-  ...
-```
-
-Allowed placeholders: `$task`, `$input`, `$working_dir`,
-`$runtime_dir`, `$model`, `$effort`. `$$` escapes a dollar. Unknown
-placeholders, malformed names, nonliteral template text, and missing required
-placeholders fail at compile time. `finish_work_description` is passed
-through without runtime placeholder formatting.
-
-Model output is a generated structured contract. Use named object fields for
-readability. Proven output shapes include scalars, enums, plain objects,
-named tuples, sequences, options, locations, supported variants, distinct
-values, and constrained integers. Artifact walking supports more shapes than
-model-output round-tripping.
-
-Known output limits: variant `else` branches, nested structural variants,
-some fixed-array-in-variant shapes, and positional-tuple round trips are not
-proven. Do not infer Vecherinka support from Schematic support alone.
-
-## 5. Artifacts and `Location`
-
-```nim
-type Report = object
-  summary: string
-  output_file: Location
-
-Location("relative/path.txt")
-```
-
-`Location` names a relative runtime artifact path, not an arbitrary host
-path or file handle.
-
-- Input locations resolve under `runtime_dir` and are copied into the model
-  call's artifact directory.
-- Output locations resolve under that model call's `working_dir`.
-- Output paths must be nonempty, existing, and inside `working_dir`.
-- Repeated basenames receive `-1`, `-2`, ... suffixes.
-- Missing, outside-root, empty, or source-containing paths fail verification.
-
-Important: `runtime_dir` and per-call `working_dir` are different roots.
-Cross-call `Location` handoff is not proven; do not assume one model's output
-location automatically resolves as the next model's input location.
-
-Rejected artifact leaves include refs, pointers, proc values, sets, `JsonNode`,
-`Table`, `char`, and `cstring`. Prefer `seq`, objects, or `Location`
-where appropriate.
-
-## 6. Effective-use recipe
-
-1. Start with one entry model flow and named input/output objects.
-2. Keep every intermediate endpoint explicit and exactly matching.
-3. Use `pure` for deterministic local values; `so` for deterministic routing.
-4. Use `fan` only for independent same-input work.
-5. Use `it` to reduce data before another flow.
-6. Use `lift` for per-item work while preserving outer structure.
-7. Add `Location` only when file/directory transfer is needed.
-8. Test each construct alone before combining constructs.
-9. Inspect typed result, payload directories, JSONL events, and SQLite graph.
-
-Runtime needs a working Codex app-server unless a custom `LlmTransport`
-produces expected completion events. Invalid model tool output, schema
-failure, missing output, unexpected tool names, and runtime failures terminate
-the plan.
-
-## 7. Provenance DB: what exists after a run
-
-Each run creates:
-
-```text
-run-*/
-  vecherinka_provenance.sqlite3
-  artifact-*/       # payload directories/files
-```
-
-Live SQLite may also have `vecherinka_provenance.sqlite3-wal` and `-shm`;
-keep them with the database while a writer is open.
-
-SQLite is canonical provenance storage. Structured JSONL remains diagnostic.
-The database stores graph identity and relationships, not payload contents.
-
-Tables:
-
-- `run`: schema version, run directory, status, timestamps, last commit seq.
-- `artifact`: path, monotonic `commit_seq`, commit timestamp.
-- `edge`: direct predecessor edges and ordered `position`.
-
-Paths inside `run_dir` are stored relative and resolved by the reader. Inputs
-outside `run_dir` remain absolute. Children are derived from predecessor
-edges. Duplicate predecessors remain distinct because edge position is
-preserved. Artifact plus edges become visible atomically at commit. The runtime
-coordinator is the SQLite writer; readers use separate connections.
-
-Reader API:
-
-```nim
-let reader = openProvenance(Path(database_path))
-try:
-  let info = reader.runInfo()
-  for item in reader.artifacts():
-    echo item.path, " <- ", item.predecessors
-  echo reader.roots()
-  echo reader.leaves()
-  echo reader.artifactsAfter(last_commit_seq)
-finally:
-  reader.close()
-```
-
-`artifactsAfter(n)` returns artifacts with `commit_seq > n`, ordered by
-commit sequence. `runInfo().status` ends as `finished`, `failed`, or
-`aborted`.
-
-Do not claim provenance captures payload hashes, model responses, semantic
-operation metadata, or complete execution history. Operation/flow/request
-fields belong to diagnostic `artifact.commit` JSONL, not this SQLite schema.
-
-## 8. Runner POC and direct inspection
-
-Run source, not a possibly stale binary:
+From the repo root, after following the state setup in [AGENTS.md](../../AGENTS.md):
 
 ```bash
-cd /Users/alex/areas/productive/orchestration
-CODEX_HOME="/Users/alex/areas/productive/orchestration/.codex-task-state" \
-CODEX_SQLITE_HOME="/Users/alex/areas/productive/orchestration/.codex-task-state" \
+CODEX_HOME="$PWD/.codex-task-state" \
+CODEX_SQLITE_HOME="$PWD/.codex-task-state" \
+nim c -r --panics:on --threads:on --path:src/api \
+  src/examples/vecherinka_parallel_research.nim
+```
+
+It prints a recommendation, rationale, sources, and caveats. The current
+directory receives `parallel-research.jsonl` and a `run-*` directory
+containing the provenance database and artifact directories. Run from an
+isolated disposable checkout: the child agent currently has full filesystem
+access despite prompt instructions restricting writes to its working
+directory. Source lookup is not configured by this workflow; current-source
+research requires search-capable tools in the child app-server environment.
+
+The public solve API has no timeout or cancellation. A stalled request can
+wait indefinitely. Invalid `finish_work` data is rejected and returned to the
+agent as a tool error, so it may correct the result in the same turn. If the
+turn ends without a valid `finish_work`, the plan fails.
+
+## Provenance and inspection
+
+Every run stores `vecherinka_provenance.sqlite3` and `artifact-*` directories
+under `run-*`. SQLite stores artifact paths and predecessor edges, not
+payloads, hashes, model responses, or full operation history; JSONL logs are
+diagnostic. Keep SQLite WAL/SHM files with the database while it is open.
+Run status ends `finished`, `failed`, or `aborted`. Do not reopen a prior DB as
+a continuation run; initialization resets its metadata.
+
+For the provenance smoke test (separate from the research example):
+
+```bash
+CODEX_HOME="$PWD/.codex-task-state" \
+CODEX_SQLITE_HOME="$PWD/.codex-task-state" \
 nim c -r --panics:on --threads:on --path:src/api \
   src/tests/vecherinka_provenance_poc_runner.nim
 ```
 
-The runner creates a temporary child workspace, compiles and runs
-`vecherinka_provenance_poc_test.nim`, finds exactly one child
-`run-*/vecherinka_provenance.sqlite3`, reads it through the DSL, and validates
-one root plus one leaf. Required app-server auth/state and outbound network
-must work.
-
-Expected important output:
-
-```text
-child-response: provenance-poc-ok
-status: finished
-last-commit-seq: 2
-artifact-count: 2
-root-count: 1
-leaf-count: 1
-valid: true
-```
-
-The POC validates metadata and edges, not payload contents. Its exact
-two-artifact assumptions make it a smoke test, not a general graph inspector.
-Capture the printed `provenance-database` path; the parent inspection run
-creates a different run/database. Full output also includes `run-dir`,
-`leaf-path`, and `leaf-predecessors`.
-
-For direct inspection, replace `RUN_DIR` with that captured run directory:
-
-```bash
-ls -la RUN_DIR
-sqlite3 RUN_DIR/vecherinka_provenance.sqlite3 '.tables'
-sqlite3 RUN_DIR/vecherinka_provenance.sqlite3 \
-  'SELECT key,value FROM run ORDER BY key;'
-sqlite3 -header -column RUN_DIR/vecherinka_provenance.sqlite3 \
-  'SELECT * FROM artifact ORDER BY commit_seq;
-   SELECT * FROM edge ORDER BY child_path,position;'
-```
-
-Use `src/tests/vecherinka_provenance_tests.nim` for linear, duplicate-edge,
-root, leaf, delta-polling, and external-input examples. Use
-`src/tests/artifact_provenance_logging_tests.nim` for `artifact.commit` JSONL
-reconstruction. Commit order reflects registration order, not necessarily
-artifact ID or visual completion order.
-
-Do not reopen an existing database as a continuation run: store initialization
-resets run metadata, and commit sequencing is process-local. Moving a complete
-run directory is supported by relative internal paths; moving only the DB is
-not.
-
-## 9. Evidence and source map
-
-- DSL lowering and type rules: `src/api/vecherinka_comptime.nim`.
-- Runtime scheduling, artifacts, model calls: `src/api/vecherinka_runtime.nim`.
-- Projection grammar: `src/api/it_projection.nim` and its tests.
-- Lift grammar: `src/api/lift_pattern_typed.nim` and its tests.
-- Provenance store/reader: `src/api/vecherinka_provenance.nim`.
-- SQLite design and planned coverage: `vecherinka_provenance_sqlite_plan.md`.
-- Current POC: `src/tests/vecherinka_provenance_poc_runner.nim` and
-  `src/tests/vecherinka_provenance_poc_test.nim`.
-
-The active suite proves the basic model flow, artifact materialization,
-structured output boundaries, projection/lift parsers, and provenance reader
-pieces. It does not yet prove a complete surface `fan`/`so`/`it`/`lift`
-graph, all SQLite plan cases, or cross-call location handoff.
+The test checks a fixed two-artifact graph, not general workflow correctness.
+Implementation map: lowering in `src/api/vecherinka_comptime.nim`, runtime in
+`src/api/vecherinka_runtime.nim`, projection/lift grammars in
+`src/api/it_projection.nim` and `src/api/lift_pattern_typed.nim`, and
+provenance in `src/api/vecherinka_provenance.nim`.

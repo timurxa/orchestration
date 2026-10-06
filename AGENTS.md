@@ -1,45 +1,48 @@
-# Running the Nim Codex integration
+# Running Vecherinka workflows
 
-This project starts a child `codex app-server`, which must be able to write
-Codex state and reach the Codex service.
-
-## Codex task sandbox
-
-The Codex task sandbox can write inside this repository but may not be allowed
-to write to the normal macOS state directory under `~/Library/Application
-Support`. Keep a physical, task-local copy of the state at
-`.codex-task-state/`; a symlink to the external directory is not sufficient.
-
-Create or refresh the copy from a normal Terminal while Codex and other
-`codex` processes are closed:
+Run from the repository root. The example below writes `parallel-research.jsonl`
+and a `run-*` directory under the current working directory.
 
 ```bash
 cd /Users/alex/areas/productive/orchestration
+CODEX_HOME="$PWD/.codex-task-state" \
+CODEX_SQLITE_HOME="$PWD/.codex-task-state" \
+nim c -r --panics:on --threads:on --path:src/api \
+  src/examples/vecherinka_parallel_research.nim
+```
+
+The child `codex app-server` needs writable Codex state, valid authentication,
+and outbound access to the Codex service. If `.codex-task-state/` is missing or
+stale, create or refresh this physical copy from a normal Terminal while Codex
+and other `codex` processes are closed:
+
+```bash
 mkdir -p .codex-task-state
 chmod 700 .codex-task-state
 ditto "/Users/alex/Library/Application Support/CodexState/." \
-  "/Users/alex/areas/productive/orchestration/.codex-task-state/"
+  "$PWD/.codex-task-state/"
 ```
 
-The copied state can contain authentication data. Never commit it or expose
-it; `.codex-task-state/` is ignored by `.gitignore`.
+This copy may contain authentication data. It is ignored by Git; do not commit
+or expose it. A symlink to the external state directory is insufficient in a
+restricted task sandbox.
 
-Run the build with both state variables pointed at the existing local copy:
+## Runtime limits
 
-```bash
-CODEX_HOME="/Users/alex/areas/productive/orchestration/.codex-task-state" \
-CODEX_SQLITE_HOME="/Users/alex/areas/productive/orchestration/.codex-task-state" \
-nim c -r --panics:on --threads:on -d:debug src/main.nim
-```
+- The generated agent uses `approval_policy=never` and
+  `sandbox=danger-full-access`. The prompt's working-directory limit is not an
+  OS-enforced boundary. Run only trusted workflows in an isolated disposable
+  checkout or worktree.
+- The research example requests current sources, but Vecherinka configures no
+  search/retrieval tool. Source access depends on tools available to the child
+  app-server; a prompt cannot provide browsing by itself. Verify sources in
+  the resulting report.
+- The run loop has no deadline or cancellation API. A request that stalls
+  while the app-server remains alive can leave the caller waiting indefinitely.
+- `initial_budget` is a fixed admission estimate, not measured provider spend.
+  Retries and protocol turns are not charged; see
+  [the budgeting contract](src/docs/vecherinka_budgeting_spec.md).
 
-To run an already-built binary, use the same environment variables:
-
-```bash
-CODEX_HOME="/Users/alex/areas/productive/orchestration/.codex-task-state" \
-CODEX_SQLITE_HOME="/Users/alex/areas/productive/orchestration/.codex-task-state" \
-./src/main
-```
-
-The network permission is separate from the filesystem fix: the child
-app-server needs outbound access to complete an end-to-end run. Without it,
-startup may succeed but requests will fail or retry.
+The repo has no `src/main.nim`; compile a specific example as above. The
+workflow language and supported shapes are documented in the
+[DSL guide](src/docs/vecherinka_dsl_guide.md).
