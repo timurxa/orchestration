@@ -6,6 +6,12 @@ app-bundled Codex CLI 0.160. Remaining limits are listed below. Historical
 design notes and progress entries are labeled as such; the implemented model
 and the DSL guide define the current contract.
 
+Current filesystem policy, updated 2026-10-08: generated Codex agents use
+`danger-full-access`, and Blob/BlobTree output paths may resolve outside the
+per-call staging directory. Earlier progress entries below that describe
+`workspace-write` and workspace-only Blob paths record the policy at the time;
+they are not the current runtime contract.
+
 ## Intention
 
 Make a per-run SQLite database the canonical record of artifacts and as much
@@ -41,10 +47,12 @@ are materialized and submitted files are read back before committing the
 output.
 
 The database stores workflow metadata, artifacts and ordered predecessor IDs,
-model-attempt state, and a versioned scheduler checkpoint. Schema 7 also stores
-the static and activated work graph, execution generations, worker sessions,
-and app-server JSON conversation events. `codex_runtime` has one optional
-observer hook at its common JSON write boundary; `codex_json` is unchanged.
+model-attempt state, and a versioned scheduler checkpoint. Schema 8 also stores
+the actual runtime work DAG, execution generations, worker sessions, and
+app-server JSON conversation events. `codex_runtime` has one optional observer
+hook at its common JSON write boundary; `codex_json` is unchanged. Reusable
+workflow topology remains auxiliary metadata for validating `so` replay; it is
+not the execution DAG shown by the TUI.
 Generated flow keys and a source manifest identify static code. Checkpoints store stable flow keys,
 budget state, ready work, joins, model invocations, counters, outputs, and
 dynamic `so` expansion recipes. Resume replays those path-free callbacks from
@@ -54,7 +62,7 @@ side-effect-free contract. Model submission remains at-least-once across an
 uncertain interruption; a committed result is stored with its checkpoint
 before the tool success response is sent.
 
-The current store schema is version 7, the generated artifact codec is version
+The current store schema is version 8, the generated artifact codec is version
 1, and the scheduler checkpoint format is version 2. Opening a compatible
 schema-5 or schema-6 store advances its schema marker and leaves its existing
 artifact/checkpoint rows intact. It does not reconstruct typed values or
@@ -69,12 +77,11 @@ outgoing serialized messages. `codex_json` remains unchanged.
 
 ## Inspectability design decisions
 
-- Keep current scheduler checkpoints as resume authority instead of
-  event-sourcing every scheduling decision. Store the topology separately so
-  users can inspect graph structure without decoding a checkpoint.
-- Store static nodes and typed edges by stable flow key. Store each activated
-  `so` graph under its checkpointed expansion ID and compare a canonical graph
-  signature during replay.
+- Keep scheduler checkpoints as resume authority and store a compact appendable
+  occurrence DAG beside them. The TUI reads that DAG directly and does not
+  reconstruct work from a checkpoint or reusable flow definitions.
+- Keep static flow topology only as auxiliary validation data for `so` replay;
+  each runtime occurrence receives a unique work ID and explicit causal edges.
 - Keep `model_attempt` as the logical request identity. Record each restarted
   Codex worker as a new `worker_session` generation; process-local agent and
   JSON-RPC IDs are scoped to one `run_execution`.
@@ -83,7 +90,7 @@ outgoing serialized messages. `codex_json` remains unchanged.
   local write result. This is not an acknowledgement from the app-server.
 - Remove both the JSONL `StructuredLogger` and the separate path-based
   provenance POC/API. Keep inspection on the run's canonical SQLite store;
-  queryable tables and the graph renderer replace those parallel surfaces.
+  the TUI's occurrence DAG and queryable records replace those parallel surfaces.
 - Expose a query-only live reader over WAL for checkpoint snapshots and
   event-ID pages. Other graph and conversation queries remain ordinary SQL.
 - Use a 30-second execution heartbeat lease to reject a competing resume.
@@ -144,12 +151,11 @@ state:
    may be staged as unpublished rows/chunks first; the transaction marks them
    visible by committing the artifact manifest.
 
-A minimal conceptual schema is therefore `run`, `workflow_node`/`workflow_edge`,
-`artifact`, `blob` plus an artifact-to-Blob reference table (and a tree manifest
-if needed), `artifact_edge`, `execution_checkpoint`, and `model_attempt`. Use a
-serialized checkpoint row instead of normalizing every queue/join field: it is
-the smaller first design and can be split into queryable tables if real
-inspection needs justify it.
+A minimal conceptual schema is therefore `run`, `work_occurrence`/`work_edge`,
+`artifact` and ordered artifact predecessors, `execution_checkpoint`, and
+`model_attempt`. Use a serialized checkpoint row instead of normalizing every
+queue/join field; the queryable occurrence tables provide the live DAG without
+duplicating the full scheduler state.
 
 ### `Blob` and directory payloads
 
@@ -278,7 +284,7 @@ described in the implemented model above and the DSL guide.
 | `so` and context | `so` gets input plus optional `Path`s and/or a `BudgetContext`; `working_dir` is the input artifact's directory. There is no `ctx` identifier or artifact access facade. | Keep `so` as a pure typed transformation/routing callback. It receives complete Blob bytes through its input and never gets a filesystem path or storage handle. Keep the read-only `BudgetContext` separate. File staging belongs only at the LLM boundary. Require replay-safe local behavior because an uncommitted callback can run again after interruption. |
 | Run/Artifact store | `RuntimeContext` combines in-memory artifacts, paths, provenance store, transport, and protocol state. Registration mutates memory before recording lineage. | Make SQLite authoritative; make memory cache disposable. Commit data, Blob/tree rows, lineage, checkpoint, and attempt status together. Keep cleanup exception-safe. Version/open/create DB modes explicitly. |
 | Provenance and logging | Provenance rows key artifacts by path; JSONL carries artifact IDs and `artifact_dir`; logging is optional and non-fatal. | Use stable IDs and ordered predecessor IDs in SQLite. Keep JSONL diagnostic/export only. Preserve duplicate predecessor edges. Update or replace path-dependent event consumers. |
-| Consumers and tools | Workflows read `Location` with `readFile`; metaoptimizer scans nested run DBs; graph renderer parses JSONL `artifact.commit` with `artifact_dir`. | Use store reads or deliberate workspace exports. Update metaoptimizer/inspector, provenance POC, `tools/artifact_graph.py`, and event tests to use stable IDs/database queries or a versioned graph export. |
+| Consumers and tools | Workflows read `Location` with `readFile`; metaoptimizer scans nested run DBs; early graph renderer parses JSONL `artifact.commit` with `artifact_dir`. | Use store reads or deliberate workspace exports. Update metaoptimizer/inspector and event tests to use stable IDs/database queries. The old mixed flow/artifact graph renderer has been removed; the TUI reads the runtime occurrence DAG. |
 | Compatibility and docs | Old run DBs contain path lineage but no typed values, serialized work graph, or checkpoints. Docs describe folders as payload store and DB as provenance only. | Treat old DBs as legacy read-only provenance. They cannot be fully resumed or reconstructed. Rewrite DSL/run docs, `Location`/Blob contract, model prompts, API examples, and migration instructions with the implementation. |
 
 ## Original migration sequence (historical)

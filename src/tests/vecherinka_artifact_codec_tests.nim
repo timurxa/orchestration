@@ -9,6 +9,8 @@ type
     ckPrimary,
     ckSecondary
   CodecIndex = distinct int64
+  CodecAliasInt = int
+  CodecAliasSeq = seq[int]
   CodecLeaf = object
     count: CodecCount
     index: CodecIndex
@@ -32,6 +34,10 @@ declare_artifact_codec(CodecRoot, encodeCodecRoot, decodeCodecRoot)
 declare_artifact_codec(Blob, encodeBlob, decodeBlob)
 declare_artifact_codec(CodecIndex, encodeCodecIndex, decodeCodecIndex)
 declare_artifact_codec(int64, encodeCodecInt, decodeCodecInt)
+declare_artifact_codec(CodecAliasInt, encodeCodecAliasInt, decodeCodecAliasInt)
+declare_artifact_codec(int, encodeCodecIntBase, decodeCodecIntBase)
+declare_artifact_codec(CodecAliasSeq, encodeCodecAliasSeq, decodeCodecAliasSeq)
+declare_artifact_codec(seq[int], encodeCodecSeqBase, decodeCodecSeqBase)
 
 proc pass_serialized(value: string): string {.nimcall.} = value
 
@@ -92,8 +98,14 @@ suite "generated artifact JSON codec":
       choice: CodecChoice(kind: ckPrimary, note: "", primaryRank: 1,
         primary: (name: "n", payload: blobFromBytes(@[], "x.bin")))))
     let wrong_key = encoded.replace("CodecRoot|", "OtherRoot|")
-    expect ValueError:
+    var key_error = ""
+    try:
       discard decodeCodecRoot(wrong_key)
+    except ValueError as error:
+      key_error = error.msg
+    check "artifact type key mismatch" in key_error
+    check "expected " in key_error
+    check "observed " in key_error
 
     var malformed = parseJson(encoded)
     var malformed_value = malformed["value"]
@@ -114,6 +126,18 @@ suite "generated artifact JSON codec":
     check distinct_json["type"].getStr != base_json["type"].getStr
     check int64(decodeCodecIndex($distinct_json)) == 5
     check decodeCodecInt($base_json) == 5
+
+  test "transparent aliases retain v1 keys and round-trip":
+    let alias_json = parseJson(encodeCodecAliasInt(CodecAliasInt(12)))
+    let base_json = parseJson(encodeCodecIntBase(12))
+    check alias_json["type"].getStr.contains("CodecAliasInt|")
+    check decodeCodecAliasInt($alias_json) == 12
+    check decodeCodecIntBase($base_json) == 12
+    let alias_seq = parseJson(encodeCodecAliasSeq(@[2, 3, 5]))
+    let base_seq = parseJson(encodeCodecSeqBase(@[2, 3, 5]))
+    check alias_seq["type"].getStr.contains("CodecAliasSeq|")
+    check decodeCodecAliasSeq($alias_seq) == @[2, 3, 5]
+    check decodeCodecSeqBase($base_seq) == @[2, 3, 5]
 
   test "Blob payload survives a SQLite workflow close and reopen":
     let root = createTempDir("vecherinka-blob-store-", "", getTempDir())

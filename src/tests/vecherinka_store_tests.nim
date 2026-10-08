@@ -285,7 +285,7 @@ suite "Vecherinka SQLite value store":
     check reopened.attempt("i:9").get.effort == "low"
     reopened.close()
     let verify = open($database, "", "", "")
-    check verify.getValue(SqlQuery("PRAGMA user_version")) == "7"
+    check verify.getValue(SqlQuery("PRAGMA user_version")) == "8"
     check verify.getValue(sql"SELECT COUNT(*) FROM artifact_file") == "1"
     verify.close()
 

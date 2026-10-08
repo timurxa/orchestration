@@ -38,7 +38,7 @@ type
     request_id*: string
 
   CheckpointDestinationFrameKind* = enum
-    cdfContinue, cdfJoin, cdfFinished
+    cdfContinue, cdfJoin, cdfFinished, cdfComplete
 
   CheckpointDestinationFrame* = object
     kind*: CheckpointDestinationFrameKind
@@ -48,10 +48,15 @@ type
     has_return_pool*: bool
     return_pool*: int
     return_pool_stack*: seq[int]
+    completion_work_id*: uint64
 
   CheckpointInvocation* = object
     flow_key*: string
     input_artifact_id*: uint64
+    work_id*: uint64
+    cause_work_id*: uint64
+    cause_relation*: string
+    cause_position*: int
     pool_id*: int
     pool_stack*: seq[int]
     output*: CheckpointOutputMeta
@@ -65,7 +70,7 @@ type
     id*: uint64
     kind*: string
     remaining*: int
-    slots*: seq[tuple[present: bool, artifact_id: uint64]]
+    slots*: seq[tuple[present: bool, artifact_id, work_id: uint64]]
 
   CheckpointJoinInvocation* = object
     join_id*: uint64
@@ -93,6 +98,7 @@ type
     next_ready_id*: uint64
     next_join_id*: uint64
     next_so_expansion_id*: uint64
+    next_work_id*: uint64
     entry_flow_key*: string
     so_expansions*: seq[CheckpointSoExpansion]
 
@@ -147,6 +153,10 @@ proc float_field(node: JsonNode; name: string): float64 =
 proc uint_field(node: JsonNode; name: string): uint64 =
   as_uint(field(node, name), name)
 
+proc optional_uint_field(node: JsonNode; name: string): uint64 =
+  if node.kind == JObject and node.hasKey(name): uint_field(node, name)
+  else: 0
+
 proc uint_array(values: openArray[uint64]): JsonNode =
   result = newJArray()
   for value in values: result.add juint(value)
@@ -168,6 +178,12 @@ proc ints(node: JsonNode; label: string): seq[int] =
 proc validate_invocation(inv: CheckpointInvocation) =
   if inv.flow_key.len == 0: raise newException(ValueError, "empty flow key")
   if inv.pool_id < 0: raise newException(ValueError, "negative pool id")
+  if inv.cause_relation.len == 0 and inv.cause_work_id != 0:
+    raise newException(ValueError, "work cause has no relation")
+  if inv.cause_relation.len > 0 and inv.cause_work_id == 0:
+    raise newException(ValueError, "work relation has no cause")
+  if inv.cause_position < 0:
+    raise newException(ValueError, "negative work cause position")
   for id in inv.pool_stack:
     if id < 0: raise newException(ValueError, "negative pool stack id")
   if not inv.output.present and inv.output.id != 0:
@@ -185,10 +201,20 @@ proc validate_invocation(inv: CheckpointInvocation) =
     of cdfFinished:
       if index != inv.destination.high:
         raise newException(ValueError, "finished destination must be terminal")
+    of cdfComplete:
+      if index == inv.destination.high or frame.completion_work_id == 0:
+        raise newException(ValueError, "completion frame needs a work id and next frame")
     if frame.has_return_pool and frame.return_pool < 0:
       raise newException(ValueError, "negative return pool")
     for id in frame.return_pool_stack:
       if id < 0: raise newException(ValueError, "negative return pool stack id")
+
+proc validate_work_ids(inv: CheckpointInvocation; next_work_id: uint64) =
+  if inv.work_id >= next_work_id or inv.cause_work_id >= next_work_id:
+    raise newException(ValueError, "invocation work id is outside allocated range")
+  for frame in inv.destination:
+    if frame.completion_work_id >= next_work_id:
+      raise newException(ValueError, "completion work id is outside allocated range")
 
 proc validatePoolReferences(inv: CheckpointInvocation; poolCount: int) =
   for pool in inv.pool_stack:
@@ -230,6 +256,7 @@ proc validateCheckpoint(checkpoint: WorkPlanCheckpoint) =
 
   if checkpoint.next_request_id < 0:
     raise newException(ValueError, "negative next request id")
+  let nextWorkId = max(1'u64, checkpoint.next_work_id)
 
   if checkpoint.has_output:
     if not checkpoint.finished or checkpoint.failed:
@@ -249,6 +276,7 @@ proc validateCheckpoint(checkpoint: WorkPlanCheckpoint) =
     if index > 0 and readyItems[index - 1].ready_id == ready.ready_id:
       raise newException(ValueError, "duplicate ready id")
     validate_invocation(ready.invocation)
+    validate_work_ids(ready.invocation, nextWorkId)
     validatePoolReferences(ready.invocation, checkpoint.budget.pools.len)
     if ready.invocation.pool_id >= checkpoint.budget.pools.len:
       raise newException(ValueError, "invocation pool id is out of range")
@@ -274,9 +302,11 @@ proc validateCheckpoint(checkpoint: WorkPlanCheckpoint) =
     for slot in join.slots:
       if slot.present:
         greatestArtifact = max(greatestArtifact, slot.artifact_id)
+        if slot.work_id >= nextWorkId:
+          raise newException(ValueError, "join work id is outside allocated range")
       else:
         inc unfilled
-        if slot.artifact_id != 0:
+        if slot.artifact_id != 0 or slot.work_id != 0:
           raise newException(ValueError, "unfilled join slot has an artifact id")
     if join.remaining != unfilled:
       raise newException(ValueError, "join remaining count does not match slots")
@@ -290,6 +320,7 @@ proc validateCheckpoint(checkpoint: WorkPlanCheckpoint) =
     if item.join_id != joinItems[index].id:
       raise newException(ValueError, "join and join invocation sets differ")
     validate_invocation(item.invocation)
+    validate_work_ids(item.invocation, nextWorkId)
     validatePoolReferences(item.invocation, checkpoint.budget.pools.len)
     if item.invocation.pool_id >= checkpoint.budget.pools.len:
       raise newException(ValueError, "join invocation pool id is out of range")
@@ -308,6 +339,7 @@ proc validateCheckpoint(checkpoint: WorkPlanCheckpoint) =
     if index > 0 and requestItems[index - 1].request_id == item.request_id:
       raise newException(ValueError, "duplicate model request id")
     validate_invocation(item.invocation)
+    validate_work_ids(item.invocation, nextWorkId)
     validatePoolReferences(item.invocation, checkpoint.budget.pools.len)
     if not item.invocation.output.present or
         item.invocation.output.request_id != item.request_id:
@@ -364,6 +396,10 @@ proc to_json(inv: CheckpointInvocation): JsonNode =
   result = %*{
     "flow_key": inv.flow_key,
     "input_artifact_id": juint(inv.input_artifact_id),
+    "work_id": juint(inv.work_id),
+    "cause_work_id": juint(inv.cause_work_id),
+    "cause_relation": inv.cause_relation,
+    "cause_position": inv.cause_position,
     "pool_id": inv.pool_id,
     "pool_stack": int_array(inv.pool_stack),
     "output": {
@@ -381,6 +417,7 @@ proc to_json(inv: CheckpointInvocation): JsonNode =
       of cdfContinue: "continue"
       of cdfJoin: "join"
       of cdfFinished: "finished"
+      of cdfComplete: "complete"
     result["destination"].add %*{
       "kind": kind,
       "flow_key": frame.flow_key,
@@ -388,12 +425,19 @@ proc to_json(inv: CheckpointInvocation): JsonNode =
       "slot": frame.slot,
       "has_return_pool": frame.has_return_pool,
       "return_pool": frame.return_pool,
-      "return_pool_stack": int_array(frame.return_pool_stack)
+      "return_pool_stack": int_array(frame.return_pool_stack),
+      "completion_work_id": juint(frame.completion_work_id)
     }
 
 proc parse_invocation(node: JsonNode): CheckpointInvocation =
   result.flow_key = string_field(node, "flow_key")
   result.input_artifact_id = uint_field(node, "input_artifact_id")
+  result.work_id = optional_uint_field(node, "work_id")
+  result.cause_work_id = optional_uint_field(node, "cause_work_id")
+  result.cause_relation = if node.hasKey("cause_relation"):
+    string_field(node, "cause_relation") else: ""
+  result.cause_position = if node.hasKey("cause_position"):
+    int_field(node, "cause_position") else: 0
   result.pool_id = int_field(node, "pool_id")
   result.pool_stack = ints(field(node, "pool_stack"), "pool_stack")
   let output = field(node, "output")
@@ -412,6 +456,7 @@ proc parse_invocation(node: JsonNode): CheckpointInvocation =
     of "continue": frame.kind = cdfContinue
     of "join": frame.kind = cdfJoin
     of "finished": frame.kind = cdfFinished
+    of "complete": frame.kind = cdfComplete
     else: raise newException(ValueError, "unknown destination frame kind: " & kind)
     frame.flow_key = string_field(item, "flow_key")
     frame.join_id = uint_field(item, "join_id")
@@ -419,6 +464,7 @@ proc parse_invocation(node: JsonNode): CheckpointInvocation =
     frame.has_return_pool = bool_field(item, "has_return_pool")
     frame.return_pool = int_field(item, "return_pool")
     frame.return_pool_stack = ints(field(item, "return_pool_stack"), "return_pool_stack")
+    frame.completion_work_id = optional_uint_field(item, "completion_work_id")
     result.destination.add frame
   validate_invocation(result)
 
@@ -446,6 +492,7 @@ proc to_json*(checkpoint: WorkPlanCheckpoint): JsonNode =
     "next_ready_id": juint(checkpoint.next_ready_id),
     "next_join_id": juint(checkpoint.next_join_id),
     "next_so_expansion_id": juint(checkpoint.next_so_expansion_id),
+    "next_work_id": juint(max(1'u64, checkpoint.next_work_id)),
     "entry_flow_key": checkpoint.entry_flow_key
   }
   result["so_expansions"] = newJArray()
@@ -485,7 +532,8 @@ proc to_json*(checkpoint: WorkPlanCheckpoint): JsonNode =
       raise newException(ValueError, "negative join remaining count")
     var slots = newJArray()
     for slot in join.slots:
-      slots.add %*{"present": slot.present, "artifact_id": juint(slot.artifact_id)}
+      slots.add %*{"present": slot.present, "artifact_id": juint(slot.artifact_id),
+        "work_id": juint(slot.work_id)}
     result["joins"].add %*{"id": juint(join.id), "kind": join.kind,
       "remaining": join.remaining, "slots": slots}
   var join_invocation_items = checkpoint.join_invocations
@@ -531,7 +579,8 @@ proc parse_checkpoint*(node: JsonNode): WorkPlanCheckpoint =
     require_kind(slots, JArray, "slots")
     for slot in slots:
       join.slots.add (present: bool_field(slot, "present"),
-        artifact_id: uint_field(slot, "artifact_id"))
+        artifact_id: uint_field(slot, "artifact_id"),
+        work_id: optional_uint_field(slot, "work_id"))
     result.joins.add join
   for item in field(node, "join_invocations"):
     result.join_invocations.add CheckpointJoinInvocation(
@@ -552,6 +601,8 @@ proc parse_checkpoint*(node: JsonNode): WorkPlanCheckpoint =
   result.next_ready_id = uint_field(node, "next_ready_id")
   result.next_join_id = uint_field(node, "next_join_id")
   result.next_so_expansion_id = uint_field(node, "next_so_expansion_id")
+  result.next_work_id = if node.hasKey("next_work_id"):
+    uint_field(node, "next_work_id") else: 1
   result.entry_flow_key = string_field(node, "entry_flow_key")
   for item in field(node, "so_expansions"):
     let budget = field(item, "budget")

@@ -2,8 +2,8 @@ import std/[json, os, random, tables, unittest]
 import ../api/codex_json
 import ../api/codex_runtime
 
-suite "Codex workspace sandbox":
-  test "thread start serializes workspace-write":
+suite "Codex worker filesystem access":
+  test "thread start serializes danger-full-access":
     let message = Message(
       kind: mk_request,
       request: Request(
@@ -14,13 +14,13 @@ suite "Codex workspace sandbox":
           thread_start: ThreadStartParams(
             sandbox: NullableOption[SandboxMode](
               state: nos_value,
-              value: sm_workspace_write)))))
+              value: sm_danger_full_access)))))
 
     let encoded = serialize_message(message)
     check encoded["method"].getStr == "thread/start"
-    check encoded["params"]["sandbox"].getStr == "workspace-write"
+    check encoded["params"]["sandbox"].getStr == "danger-full-access"
 
-  test "runtime gives each agent the workspace-write sandbox":
+  test "runtime gives each agent danger-full-access":
     randomize()
     let root = getTempDir() / ("codex-sandbox-test-" & $rand(high(int)))
     createDir(root)
@@ -38,7 +38,7 @@ suite "Codex workspace sandbox":
       let requestId = create_agent(runtime, "sandbox-test-agent", "")
       let request = runtime.state.requests[request_id_key(requestId)]
       check request.request.params.thread_start.sandbox.state == nos_value
-      check request.request.params.thread_start.sandbox.value == sm_workspace_write
+      check request.request.params.thread_start.sandbox.value == sm_danger_full_access
       check request.request.params.thread_start.cwd.value == expandFilename(root)
     finally:
       if not runtime.isNil:

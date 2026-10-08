@@ -64,7 +64,7 @@ let request = InformationRequest(
   decision_context: "Compare concurrency, deployment and operational burden, analytical capability, cloud migration, ecosystem maturity, and total cost. Recommend a default and explain when the alternatives win.")
 
 let report = solve_parallel_research(request, 100.0,
-  default_agent_prompt_templates)
+  default_agent_prompt_templates, finish_work_retry_limit = 4)
 echo "RECOMMENDATION: ", report.recommendation
 for rationale in report.rationale:
   echo "RATIONALE: ", rationale

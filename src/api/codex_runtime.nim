@@ -939,7 +939,7 @@ proc create_agent*(runtime: ptr CodexRuntime; agent_id: AgentId;
     developer_instructions: NullableOption[string](state: nos_none),
     sandbox: NullableOption[SandboxMode](
       state: nos_value,
-      value: sm_workspace_write
+      value: sm_danger_full_access
     ),
     ephemeral: NullableOption[bool](state: nos_none),
     model_provider: NullableOption[string](state: nos_none),

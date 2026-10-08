@@ -1,0 +1,124 @@
+WORKFLOW formalizer
+MODEL = gpt-6-luna
+BUDGET = 17.5
+MAX_INVENTORY_ITEMS = 8
+
+INPUT FormalizerInput {
+  proposal: Blob
+  required_changes: Blob
+  intention: Blob
+}
+
+OUTPUT FormalizerOutput {
+  formalization: Blob("formalization.typ")
+  audit: Blob("formalization-audit.typ")
+}
+
+INTERNAL Finding {
+  kind: enum { obligation, clause, conflict, gap, mismatch, defect }
+  action: enum { formalize, repair, report }
+  source_ref: String
+  text: String <= 240 characters
+}
+
+INTERNAL Inventory {
+  items: seq[Finding]
+  complete: Boolean
+}
+
+INTERNAL Candidate {
+  formalization: Blob
+}
+
+INTERNAL Review {
+  findings: seq[Finding] <= 4
+  complete: Boolean
+}
+
+INTERNAL ReviewState {
+  inventory: Inventory
+  candidate: Candidate
+  findings: seq[Finding]
+  review_complete: Boolean
+}
+
+inventory: FormalizerInput -> Inventory @ luna.medium
+  Extract every actionable obligation, conflict, and gap with source_ref.
+  Group only compatible obligations. If all items cannot fit in the cap,
+  set complete=false; never silently omit requirements.
+
+formalize_one: Finding -> Finding @ luna.medium
+  Formalize only this obligation as one concise Typst clause. Preserve its
+  source_ref. Explain the intuition behind large equations.
+
+formalize_item: Finding -> Finding
+  so(item.action == formalize,
+     item >>> formalize_one,
+     pure(item))
+
+formalize_items: seq[Finding] -> seq[Finding]
+  lift(seq[here])[formalize_item]
+
+assemble: (FormalizerInput, seq[Finding]) -> Candidate @ luna.high
+  Write one standalone Typst specification. Apply unambiguous changes,
+  preserve compatible proposal content and intention, define all terms,
+  prefer rigorous notation to prose, and retain unresolved decisions.
+  Target at most 3000 words unless the inputs require more.
+
+audit_coverage: (FormalizerInput, Inventory, Candidate) -> Review @ luna.high
+  Compare the complete source files with the inventory and candidate.
+  Check inventory completeness, required-change coverage, and traceability.
+
+audit_intention: (Inventory, Candidate) -> Review @ luna.high
+  Check intention alignment and identify unresolved mismatches and gaps.
+
+audit_rigor: (Inventory, Candidate) -> Review @ luna.xhigh
+  Check definitions, assumptions, quantifiers, notation, derivations, edge
+  cases, and equation intuition.
+
+audit_typst: (Inventory, Candidate) -> Review @ luna.medium
+  Check obvious Typst structure problems; do not claim compiler validation.
+
+review: (FormalizerInput, Inventory, Candidate) -> ReviewState
+  fan(
+    preserve (FormalizerInput, Inventory, Candidate),
+    audit_coverage,
+    audit_intention after project(Inventory, Candidate),
+    audit_rigor after project(Inventory, Candidate),
+    audit_typst after project(Inventory, Candidate))
+  Merge findings; complete iff all four reviews are complete.
+
+repair: (FormalizerInput, ReviewState) -> Candidate @ luna.xhigh
+  Address only action=repair findings, once. Add no external facts.
+
+write_audit: ReviewState -> Blob @ luna.medium
+  Write a standalone Typst audit with intention mismatches, specification
+  gaps, unresolved changes, source-to-section traceability, and review limits.
+
+ENTRY formalize(input: FormalizerInput) -> FormalizerOutput:
+  inventory = inventory(input)
+  if not inventory.complete or len(inventory.items) > MAX_INVENTORY_ITEMS:
+    return bounded_typst_notice_and_audit(input, inventory) @ luna.medium
+
+  clauses = lift(seq[here])[formalize_item](inventory.items)
+  candidate = assemble(input, clauses)
+  state = review(input, inventory, candidate)
+
+  final_state = so(state.findings.any(action == repair),
+                   review(input, inventory, repair(input, state)),
+                   pure(state))
+
+  return FormalizerOutput(
+    formalization = pure(final_state.candidate.formalization),
+    audit = write_audit(final_state))
+
+CONSTRAINTS:
+  every model call uses gpt-6-luna and the declared effort
+  inventory is limited to 8 items; each audit returns at most 4 findings
+  each mapped call receives one Finding, not the original files
+  inventory, synthesis, source coverage, repair, and final reporting receive
+    original files where needed; other audits receive compact inventory and
+    candidate
+  audit branches run independently; no branch sees peer findings
+  no network, delegation, or external facts
+  unresolved findings remain visible; there is at most one repair pass

@@ -1,0 +1,21 @@
+version: 1
+
+scope:
+  include:
+    - "src/api/**"
+  context:
+    - "callers and tests needed to preserve API behavior"
+  exclude:
+    - "generated binaries"
+
+hardening:
+  correctness: exhaustive
+  invariants: exhaustive
+  simplification: substantial
+  compatibility: preserve existing behavior unless a required correction says otherwise
+
+requirements:
+  - "Ground every behavior claim and proposed change in source references."
+  - "Prefer the smallest change that satisfies this specification."
+  - "Do not infer requirements where evidence is ambiguous; recommend and explain instead."
+  - "Do not claim compilation, tests, or formal proof unless actually performed."

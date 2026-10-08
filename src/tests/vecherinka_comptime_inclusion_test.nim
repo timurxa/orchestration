@@ -657,6 +657,18 @@ proc compile_reject(source, expected: string): bool =
   if fileExists(binary): removeFile(binary)
   code != 0 and expected in output
 
+proc compile_accept(source: string): bool =
+  let probe = getTempDir() / "vecherinka_artifact_tree_positive_probe.nim"
+  let binary = getTempDir() / "vecherinka-artifact-tree-positive-probe"
+  writeFile(probe, source)
+  let command = "nim c --hints:off --warnings:off --path:" &
+    quoteShell(os.getCurrentDir() / "src" / "api") & " -o:" & quoteShell(binary) &
+    " " & quoteShell(probe)
+  let (_, code) = execCmdEx(command)
+  if fileExists(probe): removeFile(probe)
+  if fileExists(binary): removeFile(binary)
+  code == 0
+
 const negative_probe_prefix = """
 import std/macros
 include vecherinka
@@ -665,6 +677,86 @@ macro force_artifact_tree(T: typedesc): untyped =
 """
 
 suite "artifact_tree rejection contract":
+  test "transparent aliases compose and fan through one artifact codec":
+    check compile_accept("""
+{.experimental: "callOperator".}
+import std/[json, macros]
+include vecherinka
+type
+  AliasInt = int
+  LeftResult = object
+  RightResult = object
+vecherinka(alias_probe, default_agent_prompt_templates):
+  > left AliasInt ~> LeftResult:
+    so(AliasInt, LeftResult, input) do:
+      pure(LeftResult())
+  > right int ~> RightResult:
+    so(int, RightResult, input) do:
+      pure(RightResult())
+  > entry AliasInt ~> (LeftResult, RightResult) {.entry.}:
+    fan(left, right)
+static:
+  doAssert parseJson(alias_probe_workflow_manifest)["artifact_codecs"].len == 4
+""")
+
+  test "tuple labels cannot cross a serialized composition edge":
+    check compile_reject("""
+{.experimental: "callOperator".}
+import std/macros
+include vecherinka
+type
+  Input = object
+    n: int
+  Named = tuple[x: int, y: string]
+  Positional = (int, string)
+vecherinka(tuple_bad, default_agent_prompt_templates):
+  > make_pair Input ~> Positional:
+    so(Input, Positional, input) do:
+      pure((input.n, "value"))
+  > read_named Named ~> string:
+    so(Named, string, value) do:
+      pure($value.x)
+  > entry Input ~> string {.entry.}:
+    make_pair >>> read_named
+""", "producer type Positional does not match consumer type Named")
+
+  test "tuple labels cannot cross a raw value seed edge":
+    check compile_reject("""
+{.experimental: "callOperator".}
+import std/macros
+include vecherinka
+type
+  Input = object
+    n: int
+  Named = tuple[x: int, y: string]
+vecherinka(seed_bad, default_agent_prompt_templates):
+  > read_named Named ~> string:
+    so(Named, string, value) do:
+      pure($value.x)
+  > entry Input ~> string {.entry.}:
+    so(Input, string, input) do:
+      (input.n, "value") >>> read_named
+""", "producer type (int, string) does not match consumer type Named")
+
+  test "distinct and nominal endpoints cannot cross a typed edge":
+    check compile_reject("""
+{.experimental: "callOperator".}
+import std/macros
+include vecherinka
+type
+  Input = object
+    n: int
+  One = distinct int
+  Other = distinct int
+vecherinka(distinct_bad, default_agent_prompt_templates):
+  > read_other Other ~> string:
+    so(Other, string, value) do:
+      pure($int(value))
+  > entry Input ~> string {.entry.}:
+    so(Input, string, input) do:
+      pure(One(input.n)) >>> read_other
+""", "type mismatch")
+
   test "forbidden shapes reject with recommendation":
     let location_probe = negative_probe_prefix & "\ntype Bad = Location\n"
     check compile_reject(location_probe, "path-valued Location")
@@ -788,13 +880,15 @@ suite "artifact_tree generated output verifier":
   test "default prompts make finish_work the required result submission":
     let templates = default_agent_prompt_templates
     check templates.developer_instructions.contains(
-      "workflow accepts your result only through the `finish_work` tool")
+      "Submit through `finish_work` using the provided schema")
     check templates.goal.contains(
-      "workflow receives the tool arguments, not a prose response")
+      "You may read and modify files outside the call working directory")
     check templates.turn_prompt.contains(
       "A normal assistant message")
     check templates.turn_prompt.contains(
-      "For a root Blob or BlobTree, `args` must be the output file or directory's relative path")
+      "For a root Blob or BlobTree, `args` must be the output file or directory path")
+    check templates.turn_prompt.contains(
+      "relative paths may include parent traversal")
     check templates.finish_work_description.contains(
       "This tool is the only way to submit the result")
 

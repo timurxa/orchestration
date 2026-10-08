@@ -38,7 +38,8 @@ proc snapshot_destination[A](
       has_return_pool: current.return_pool.isSome,
       return_pool: if current.return_pool.isSome: current.return_pool.get else: 0,
       return_pool_stack: if current.return_pool_stack.isSome:
-        current.return_pool_stack.get else: @[])
+        current.return_pool_stack.get else: @[],
+      completion_work_id: current.completion_work_id)
     case current.kind
     of dk_continue:
       frame.kind = cdfContinue
@@ -57,6 +58,12 @@ proc snapshot_destination[A](
       frame.kind = cdfFinished
       result.add frame
       break
+    of dk_complete:
+      frame.kind = cdfComplete
+      result.add frame
+      current = current.after
+      if current.isNil:
+        raise newException(ValueError, "completion destination has no next frame")
 
 proc restore_destination[A](
     frames: openArray[CheckpointDestinationFrame];
@@ -89,6 +96,12 @@ proc restore_destination[A](
         raise newException(ValueError, "finished destination must be terminal")
       tail = Destination[A](kind: dk_finished,
         return_pool: return_pool, return_pool_stack: return_stack)
+    of cdfComplete:
+      if index == frames.high:
+        raise newException(ValueError, "completion frame has no next frame")
+      tail = Destination[A](kind: dk_complete,
+        completion_work_id: frame.completion_work_id, after: tail,
+        return_pool: return_pool, return_pool_stack: return_stack)
   tail
 
 proc snapshot_invocation[A](invocation: Invocation[A]): CheckpointInvocation =
@@ -96,6 +109,10 @@ proc snapshot_invocation[A](invocation: Invocation[A]): CheckpointInvocation =
     raise newException(ValueError, "cannot checkpoint a nil invocation")
   result.flow_key = require_flow_key(invocation.flow)
   result.input_artifact_id = invocation.input_id
+  result.work_id = invocation.work_id
+  result.cause_work_id = invocation.cause_work_id
+  result.cause_relation = invocation.cause_relation
+  result.cause_position = invocation.cause_position
   result.pool_id = invocation.pool_id
   result.pool_stack = invocation.pool_stack
   result.destination = snapshot_destination(invocation.destination)
@@ -111,6 +128,9 @@ proc restore_invocation[A](invocation: CheckpointInvocation;
     input_id: invocation.input_artifact_id,
     destination: restore_destination(invocation.destination, flows),
     pool_id: invocation.pool_id, pool_stack: invocation.pool_stack,
+    work_id: invocation.work_id, cause_work_id: invocation.cause_work_id,
+    cause_relation: invocation.cause_relation,
+    cause_position: invocation.cause_position,
     output_meta: none(ArtifactMeta))
   if invocation.output.present:
     # Artifact directories are transient model workspaces. Restored execution
@@ -165,6 +185,7 @@ proc snapshot_work_plan*[A](plan: WorkPlan[A]): WorkPlanCheckpoint =
     next_ready_id: plan.next_ready_id + 1,
     next_join_id: plan.next_join_id,
     next_so_expansion_id: plan.context.next_so_expansion_id,
+    next_work_id: plan.next_work_id,
     entry_flow_key: require_flow_key(plan.entry))
   for expansion in plan.context.so_expansions:
     result.so_expansions.add CheckpointSoExpansion(
@@ -180,9 +201,10 @@ proc snapshot_work_plan*[A](plan: WorkPlan[A]): WorkPlanCheckpoint =
     var item = CheckpointJoin(id: id,
       kind: if join.kind == jk_fanout: "fanout" else: "lift",
       remaining: join.remaining)
-    for slot in join.slots:
+    for index, slot in join.slots:
       item.slots.add (present: slot.isSome,
-        artifact_id: if slot.isSome: slot.get else: 0)
+        artifact_id: if slot.isSome: slot.get else: 0,
+        work_id: join.work_slots[index])
     result.joins.add item
   for id, invocation in plan.join_invocations.pairs:
     result.join_invocations.add CheckpointJoinInvocation(join_id: id,
@@ -229,6 +251,7 @@ proc restore_work_plan*[A](
     for slot in item.slots:
       state.slots.add(if slot.present: some(slot.artifact_id)
         else: none(ArtifactID))
+      state.work_slots.add(slot.work_id)
     result.joins[item.id] = state
   result.join_invocations.clear()
   for item in checkpoint.join_invocations:
@@ -246,6 +269,7 @@ proc restore_work_plan*[A](
     some(checkpoint.failure_message) else: none(string)
   result.next_ready_id = checkpoint.next_ready_id - 1
   result.next_join_id = checkpoint.next_join_id
+  result.next_work_id = checkpoint.next_work_id
   context.next_request_id = checkpoint.next_request_id
   context.next_artifact_id = checkpoint.next_artifact_id - 1
   context.next_so_expansion_id = checkpoint.next_so_expansion_id

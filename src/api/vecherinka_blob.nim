@@ -145,6 +145,8 @@ proc blobTreeFromDirectory*(source: Path): BlobTree =
 
 proc verifyWorkspaceBlobPath*(workingDir: Path; relativePath: string;
     expectDirectory: bool): string =
+  ## Optional confinement helper. Default worker Blob outputs use the
+  ## unrestricted resolve/verify helpers below instead.
   try:
     let canonical = normalizeRelativePath(relativePath)
     var source = workingDir
@@ -164,6 +166,32 @@ proc verifyWorkspaceBlobPath*(workingDir: Path; relativePath: string;
         return "expected a directory: " & relativePath
     elif info.kind != pcFile or info.isSpecial:
       return "expected a regular file: " & relativePath
+    ""
+  except CatchableError as error:
+    error.msg
+
+proc resolveBlobOutputPath*(workingDir: Path; outputPath: string): Path =
+  ## Blob outputs may come from anywhere the worker process can access.
+  if outputPath.len == 0 or '\0' in outputPath:
+    raise newException(ValueError, "output path is empty or contains NUL")
+  let candidate = if isAbsolute(outputPath):
+    Path(outputPath)
+  else:
+    workingDir / Path(outputPath)
+  Path(absolutePath($candidate))
+
+proc verifyBlobOutputPath*(workingDir: Path; outputPath: string;
+    expectDirectory: bool): string =
+  try:
+    let source = resolveBlobOutputPath(workingDir, outputPath)
+    let info = getFileInfo($source, followSymlink = false)
+    if info.kind in {pcLinkToFile, pcLinkToDir}:
+      return "symbolic links are not supported: " & outputPath
+    if expectDirectory:
+      if info.kind != pcDir:
+        return "expected a directory: " & outputPath
+    elif info.kind != pcFile or info.isSpecial:
+      return "expected a regular file: " & outputPath
     ""
   except CatchableError as error:
     error.msg

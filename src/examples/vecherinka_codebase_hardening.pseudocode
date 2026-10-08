@@ -1,0 +1,45 @@
+WORKFLOW codebase_hardening
+INPUT HardeningInput {
+  codebase: BlobTree
+  specification: Blob
+}
+OUTPUT HardeningOutput {
+  candidate: BlobTree
+  report: Blob
+}
+
+1. Formalize current behavior
+   Read the hardening spec. For each in-scope system, trace implementation
+   behavior bottom up and record actions, preconditions, state changes,
+   postconditions, failures, invariants, source references, and gaps.
+
+2. Reconcile and assimilate
+   Compare the formalization with the spec and surrounding code. Consolidate
+   duplicate findings while retaining distinct evidence, consequences, and
+   uncertainty.
+
+3. Propose changes
+   Plan the smallest changes that meet the requested hardening degree. Mark
+   changes apply only when intent and acceptance conditions are clear;
+   recommend uncertain decisions.
+
+4. Rewrite and review in a bounded loop
+   Apply supported changes to a candidate tree and review it against the
+   original behavior, findings, and acceptance conditions.
+
+   While a review has rejected checks and fewer than two repair passes have
+   run, repair only those rejected checks and review the candidate again.
+   Stop when no checks are rejected or after two repair passes. Keep unknown
+   checks unresolved; they do not authorize a repair. Report unchecked claims
+   as unknown.
+
+5. Report
+   Save the evidence, decisions, final candidate review, repair-pass count,
+   and coverage limits.
+   The source tree remains the input; the candidate is a separate output.
+
+MODEL TASK CONTRACT
+  Each model call performs one bounded structured task. No browsing,
+  delegation, code execution, or unsupported proof claims.
+  The hardening spec controls scope and degree; source paths are relative to
+  the canonical `codebase` root, independent of launch directory.

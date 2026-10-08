@@ -28,7 +28,7 @@ proc fixture(): tuple[plan: WorkPlan[int], nodes: seq[Flow[int]]] =
     pool_id: 1, pool_stack: @[0])
   result.plan.next_ready_id = 3
   result.plan.joins[4'u64] = JoinState(id: 4, kind: jk_fanout, remaining: 1,
-    slots: @[some(2'u64), none(ArtifactID)])
+    slots: @[some(2'u64), none(ArtifactID)], work_slots: @[0'u64, 0'u64])
   result.plan.next_join_id = 5
   result.plan.join_invocations[4'u64] = Invocation[int](flow: join,
     input_id: 2, destination: Destination[int](kind: dk_continue,

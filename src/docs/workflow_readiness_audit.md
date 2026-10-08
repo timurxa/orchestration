@@ -59,11 +59,12 @@ shape, not a broad reliability guarantee.
 
 ## Remaining implementation limits
 
-- **Filesystem boundary:** agents use `approval_policy=never` and
-  `sandbox=workspace-write` ([codex_runtime.nim](../api/codex_runtime.nim#L886))
-  with a temporary per-call workspace as cwd. The successful workflow run did
-  not test attempts to write outside that workspace; treat isolation as an
-  execution boundary that still needs dedicated verification.
+- **Filesystem access:** the runs recorded in this audit used the earlier
+  `workspace-write` setting. The current runtime uses
+  `approval_policy=never` and `sandbox=danger-full-access`, with a temporary
+  per-call workspace as cwd; workers can access any files allowed to the OS
+  user. See [codex_runtime.nim](../api/codex_runtime.nim) and the current
+  [DSL guide](vecherinka_dsl_guide.md).
 - **Research retrieval:** the research example requests current sources, but
   the workflow registers only its `finish_work` dynamic tool
   ([vecherinka_comptime.nim](../api/vecherinka_comptime.nim#L1774)). Search

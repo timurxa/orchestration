@@ -12,6 +12,7 @@ proc sample(): WorkPlanCheckpoint =
     next_artifact_id: 55,
     next_ready_id: 9,
     next_join_id: 4,
+    next_work_id: 10,
     entry_flow_key: "entry",
     has_output: false,
     output_artifact_id: 0,
@@ -22,6 +23,10 @@ proc sample(): WorkPlanCheckpoint =
   let inv = CheckpointInvocation(
     flow_key: "entry/body/branch-1",
     input_artifact_id: 0,
+    work_id: 5,
+    cause_work_id: 2,
+    cause_relation: "branch",
+    cause_position: 1,
     pool_id: 1,
     pool_stack: @[0, 1],
     output: CheckpointOutputMeta(present: true, id: 50,
@@ -30,11 +35,15 @@ proc sample(): WorkPlanCheckpoint =
     destination: @[
       CheckpointDestinationFrame(kind: cdfContinue,
         flow_key: "entry/body/after-ref", has_return_pool: true,
-        return_pool: 0, return_pool_stack: @[0]),
+        return_pool: 0, return_pool_stack: @[0],
+        completion_work_id: 1),
+      CheckpointDestinationFrame(kind: cdfComplete,
+        completion_work_id: 4),
       CheckpointDestinationFrame(kind: cdfJoin, join_id: 3, slot: 1)])
   result.ready = @[CheckpointReady(ready_id: 8, invocation: inv)]
   result.joins = @[CheckpointJoin(id: 3, kind: "fanout", remaining: 1,
-    slots: @[(present: true, artifact_id: 0), (present: false, artifact_id: 0)])]
+    slots: @[(present: true, artifact_id: 0, work_id: 6),
+      (present: false, artifact_id: 0, work_id: 0)])]
   result.join_invocations = @[CheckpointJoinInvocation(join_id: 3,
     invocation: CheckpointInvocation(flow_key: "join/3", input_artifact_id: 50,
       pool_id: 0, destination: @[
@@ -52,6 +61,9 @@ suite "WorkPlan checkpoint DTO":
     check decoded.ready[0].invocation.output.predecessor_ids[0] == 0
     check decoded.joins[0].slots[0].present
     check decoded.joins[0].slots[0].artifact_id == 0'u64
+    check decoded.ready[0].invocation.work_id == 5'u64
+    check decoded.ready[0].invocation.destination[1].kind == cdfComplete
+    check decoded.joins[0].slots[0].work_id == 6'u64
     check encode_checkpoint(decoded) == encoded
 
   test "map-backed collections serialize in key order":

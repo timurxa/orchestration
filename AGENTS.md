@@ -16,11 +16,12 @@ nim c -r --panics:on --threads:on --path:src/api \
 
 The child `codex app-server` needs writable Codex state, valid authentication,
 and outbound access to the Codex service. GPT-6 Luna requires a CLI/model
-catalog that includes `gpt-6-luna`; the system Homebrew CLI 0.146 rejected it,
-while the app-bundled CLI 0.160 succeeded. `codex_runtime` resolves `codex` via
-`PATH`, so put a compatible executable first. If `.codex-task-state/` is
-missing or stale, create or refresh this physical copy from a normal Terminal
-while Codex and other `codex` processes are closed:
+catalog that includes `gpt-6-luna`. Homebrew Codex CLI 0.146 rejected it; the
+installed Homebrew CLI is now 0.160.1 and a ChatGPT-authenticated Luna call
+was verified. The app-bundled CLI 0.160 also works. `codex_runtime` resolves
+`codex` via `PATH`, so use either compatible executable first. If
+`.codex-task-state/` is missing or stale, create or refresh this physical copy
+from a normal Terminal while Codex and other `codex` processes are closed:
 
 ```bash
 mkdir -p .codex-task-state
@@ -39,9 +40,10 @@ database reaches `finished` before treating a live workflow run as successful.
 ## Runtime limits
 
 - Generated Codex agents use `approval_policy=never` and
-  `sandbox=workspace-write`, with each model call's working directory as its
-  cwd. The child can write its workspace, so run workflows only in an
-  isolated disposable checkout or worktree.
+  `sandbox=danger-full-access`, with each model call's working directory as
+  its cwd. Workers can read and modify any files available to the OS user;
+  their access is not confined to the call workspace. A disposable checkout
+  protects repository state only, not files elsewhere on the host.
 - The research example requests current sources, but Vecherinka configures no
   search/retrieval tool. Source access depends on tools available to the child
   app-server; a prompt cannot provide browsing by itself. Verify sources in
@@ -61,3 +63,25 @@ database path selected by the caller, or locate it under `run-*/`, to resume
 after interruption.
 Dynamic `so` callbacks must be deterministic and side-effect free because
 resume rebuilds their returned graph from the saved input and budget snapshot.
+
+## Inspecting a run
+
+Build the read-only SQLite TUI from the repository root and open a specific
+run database:
+
+```sh
+cc -std=gnu11 -D_DEFAULT_SOURCE -Wall -Wextra -Wpedantic \
+  -Itools/vendor tools/vecherinka_tui.c \
+  -lsqlite3 -o tools/vecherinka-tui
+tools/vecherinka-tui path/to/vecherinka.sqlite3
+```
+
+The viewer requires an interactive terminal and reads schema-8 occurrence DAGs.
+Schema-7 databases remain readable but predate occurrence capture, so their DAG
+is reported as unavailable. It also shows artifacts, attempts, worker
+conversations, run events, failures, and available application tables. It opens
+SQLite read-only; for a live WAL database, keep its readable `-wal` and `-shm`
+sidecars beside it. Use `?` for controls, [the TUI guide](src/docs/vecherinka_tui_guide.md)
+to follow records, [the DAG specification](src/docs/vecherinka_tui_dag_spec.md)
+for edge semantics, and [the viewer specification](src/docs/vecherinka_tui_spec.md)
+for conversation and data-link rules.

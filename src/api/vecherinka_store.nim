@@ -29,6 +29,25 @@ type
     flow_kind*: string
     request_id*: string
 
+  WorkOccurrence* = object
+    work_id*: int64
+    flow_key*: string
+    kind*: string
+    state*: string
+    input_artifact_id*: int64
+    output_artifact_id*: Option[int64]
+    request_id*: string
+    expansion_id*: int64
+    join_id*: int64
+    root_name*: string
+    slot*: int
+
+  WorkEdge* = object
+    source_work_id*: int64
+    target_work_id*: int64
+    relation*: string
+    position*: int
+
   StoreMetadata* = object
     run_id*: string
     workflow_id*: string
@@ -125,9 +144,10 @@ type
     payload_text*: string
 
 const
-  store_schema_version* = 7
+  store_schema_version* = 8
   legacy_store_schema_version = 5
   previous_store_schema_version = 6
+  inspectability_store_schema_version = 7
   checkpoint_format_version* = 2
   execution_lease_timeout_ns = 30_000_000_000'i64
 
@@ -228,6 +248,34 @@ proc create_inspectability_tables(db: DbConn) =
     root_flow_key TEXT NOT NULL,
     graph_signature TEXT NOT NULL
   )""")
+
+proc create_work_dag_tables(db: DbConn) =
+  exec_sql(db, """CREATE TABLE work_occurrence (
+    work_id INTEGER PRIMARY KEY CHECK(work_id > 0),
+    flow_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN
+      ('queued', 'running', 'waiting', 'completed', 'failed')),
+    input_artifact_id INTEGER NOT NULL,
+    output_artifact_id INTEGER,
+    request_id TEXT NOT NULL DEFAULT '',
+    expansion_id INTEGER NOT NULL DEFAULT 0,
+    join_id INTEGER NOT NULL DEFAULT 0,
+    root_name TEXT NOT NULL DEFAULT '',
+    slot INTEGER NOT NULL DEFAULT -1
+  )""")
+  exec_sql(db, "CREATE INDEX work_occurrence_request_idx ON work_occurrence(request_id)")
+  exec_sql(db, "CREATE INDEX work_occurrence_output_idx ON work_occurrence(output_artifact_id)")
+  exec_sql(db, """CREATE TABLE work_edge (
+    source_work_id INTEGER NOT NULL REFERENCES work_occurrence(work_id),
+    target_work_id INTEGER NOT NULL REFERENCES work_occurrence(work_id),
+    relation TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0,
+    CHECK(source_work_id < target_work_id),
+    PRIMARY KEY(source_work_id, target_work_id, relation, position)
+  )""")
+  exec_sql(db, "CREATE INDEX work_edge_target_idx ON work_edge(target_work_id)")
+  exec_sql(db, "CREATE UNIQUE INDEX work_edge_slot_idx ON work_edge(source_work_id, relation, position)")
 
 proc json_id(node: JsonNode; key: string): Option[int64] =
   if node.kind != JObject or not node.hasKey(key):
@@ -356,6 +404,7 @@ proc initialize_schema(store: VecherinkaStore; metadata: StoreMetadata) =
       effort TEXT NOT NULL DEFAULT ''
     )""")
     create_inspectability_tables(store.db)
+    create_work_dag_tables(store.db)
     store.db.exec(sql"""INSERT INTO run_metadata(
         singleton, run_id, workflow_id, workflow_fingerprint,
         workflow_manifest_json, codec_version, checkpoint_version, status,
@@ -390,9 +439,10 @@ proc open_vecherinka_store*(database_path: Path;
   result = open_database(database_path)
   try:
     let version_text = result.db.getValue(sql"PRAGMA user_version")
-    let version = if version_text.len == 0: 0 else: parseInt(version_text)
+    var version = if version_text.len == 0: 0 else: parseInt(version_text)
     if version notin {legacy_store_schema_version,
-        previous_store_schema_version, store_schema_version}:
+        previous_store_schema_version, inspectability_store_schema_version,
+        store_schema_version}:
       raise newException(ValueError, "unsupported Vecherinka store schema")
     let row = result.db.getRow(sql"""SELECT run_id, workflow_id,
         workflow_fingerprint, workflow_manifest_json, codec_version,
@@ -410,27 +460,31 @@ proc open_vecherinka_store*(database_path: Path;
       raise newException(ValueError,
         "store workflow or codec version does not match this program")
     if version < store_schema_version:
-      ## Migrations only add inspectability metadata. Existing artifact and
-      ## checkpoint rows remain authoritative; no historical messages exist
-      ## to backfill from any earlier diagnostic output.
       exec_sql(result.db, "BEGIN IMMEDIATE")
       try:
-        if version == legacy_store_schema_version:
-          ## Schema 5's legacy artifact_file table remains unused.
-          exec_sql(result.db, "PRAGMA user_version = " &
-            $previous_store_schema_version)
-        exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN flow_key TEXT NOT NULL DEFAULT ''")
-        exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN input_artifact_id INTEGER")
-        exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN reserved_output_artifact_id INTEGER")
-        exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN output_artifact_id INTEGER")
-        exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN model TEXT NOT NULL DEFAULT ''")
-        exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
-        exec_sql(result.db, "ALTER TABLE run_metadata ADD COLUMN active_execution_id INTEGER")
-        exec_sql(result.db, "ALTER TABLE run_metadata ADD COLUMN history_started_at_ns INTEGER NOT NULL DEFAULT 0")
-        result.db.exec(sql"UPDATE run_metadata SET history_started_at_ns = ? WHERE singleton = 1",
-          timestamp_ns())
-        create_inspectability_tables(result.db)
-        migrate_model_attempt_metadata(result.db)
+        if version < inspectability_store_schema_version:
+          ## Upgrade old stores through schema 7 before adding the occurrence
+          ## DAG tables. Historical work occurrences cannot be backfilled.
+          if version == legacy_store_schema_version:
+            ## Schema 5's legacy artifact_file table remains unused.
+            exec_sql(result.db, "PRAGMA user_version = " &
+              $previous_store_schema_version)
+          exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN flow_key TEXT NOT NULL DEFAULT ''")
+          exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN input_artifact_id INTEGER")
+          exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN reserved_output_artifact_id INTEGER")
+          exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN output_artifact_id INTEGER")
+          exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+          exec_sql(result.db, "ALTER TABLE model_attempt ADD COLUMN effort TEXT NOT NULL DEFAULT ''")
+          exec_sql(result.db, "ALTER TABLE run_metadata ADD COLUMN active_execution_id INTEGER")
+          exec_sql(result.db, "ALTER TABLE run_metadata ADD COLUMN history_started_at_ns INTEGER NOT NULL DEFAULT 0")
+          result.db.exec(sql"UPDATE run_metadata SET history_started_at_ns = ? WHERE singleton = 1",
+            timestamp_ns())
+          create_inspectability_tables(result.db)
+          migrate_model_attempt_metadata(result.db)
+          version = inspectability_store_schema_version
+          exec_sql(result.db, "PRAGMA user_version = " & $version)
+        if version < store_schema_version:
+          create_work_dag_tables(result.db)
         exec_sql(result.db, "PRAGMA user_version = " & $store_schema_version)
         exec_sql(result.db, "COMMIT")
       except CatchableError:
@@ -912,6 +966,68 @@ proc insert_artifact(db: DbConn; artifact: StoredArtifact) =
     db.exec(sql"INSERT INTO predecessor(artifact_id, position, predecessor_id) VALUES(?, ?, ?)",
       artifact_id, position, as_sql_id(predecessor_id))
 
+proc insert_work_occurrence(db: DbConn; work: WorkOccurrence) =
+  if work.work_id <= 0 or work.flow_key.len == 0 or work.kind.len == 0 or
+      work.state notin ["queued", "running", "waiting", "completed", "failed"]:
+    raise newException(ValueError, "invalid work occurrence")
+  let exists = db.getValue(sql"SELECT EXISTS(SELECT 1 FROM work_occurrence WHERE work_id = ?)",
+    work.work_id) == "1"
+  let previous = db.getRow(sql"""SELECT flow_key, kind, input_artifact_id
+    FROM work_occurrence WHERE work_id = ?""", work.work_id)
+  if not exists:
+    if work.output_artifact_id.isSome:
+      db.exec(sql"""INSERT INTO work_occurrence(
+        work_id, flow_key, kind, state, input_artifact_id, output_artifact_id,
+        request_id, expansion_id, join_id, root_name, slot)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        work.work_id, work.flow_key, work.kind, work.state,
+        work.input_artifact_id, work.output_artifact_id.get,
+        work.request_id, work.expansion_id, work.join_id, work.root_name,
+        work.slot)
+    else:
+      db.exec(sql"""INSERT INTO work_occurrence(
+        work_id, flow_key, kind, state, input_artifact_id, output_artifact_id,
+        request_id, expansion_id, join_id, root_name, slot)
+        VALUES(?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)""",
+        work.work_id, work.flow_key, work.kind, work.state,
+        work.input_artifact_id, work.request_id, work.expansion_id,
+        work.join_id, work.root_name, work.slot)
+  else:
+    if previous[0] != work.flow_key or previous[1] != work.kind or
+      parseBiggestInt(previous[2]) != work.input_artifact_id:
+      raise newException(ValueError,
+        "work occurrence identity changed: " & $work.work_id)
+    let previous_state = db.getValue(sql"SELECT state FROM work_occurrence WHERE work_id = ?",
+      work.work_id)
+    let valid_state_change = previous_state == work.state or
+      (previous_state == "queued" and work.state in ["running", "waiting", "completed", "failed"]) or
+      (previous_state == "running" and work.state in ["waiting", "completed", "failed"]) or
+      (previous_state == "waiting" and work.state in ["running", "completed", "failed"])
+    if not valid_state_change:
+      raise newException(ValueError, "invalid work state transition: " &
+        previous_state & " -> " & work.state)
+    if work.output_artifact_id.isSome:
+      db.exec(sql"""UPDATE work_occurrence SET state = ?,
+        output_artifact_id = ?, request_id = ?, expansion_id = ?, join_id = ?,
+        root_name = ?, slot = ? WHERE work_id = ?""",
+        work.state, work.output_artifact_id.get, work.request_id,
+        work.expansion_id, work.join_id, work.root_name, work.slot,
+        work.work_id)
+    else:
+      db.exec(sql"""UPDATE work_occurrence SET state = ?,
+        request_id = ?, expansion_id = ?, join_id = ?, root_name = ?,
+        slot = ? WHERE work_id = ?""",
+        work.state, work.request_id, work.expansion_id, work.join_id,
+        work.root_name, work.slot, work.work_id)
+
+proc insert_work_edge(db: DbConn; edge: WorkEdge) =
+  if edge.source_work_id <= 0 or edge.target_work_id <= edge.source_work_id or
+      edge.relation.len == 0 or edge.position < 0:
+    raise newException(ValueError, "work DAG edges must point forward")
+  db.exec(sql"""INSERT OR IGNORE INTO work_edge(
+    source_work_id, target_work_id, relation, position) VALUES(?, ?, ?, ?)""",
+    edge.source_work_id, edge.target_work_id, edge.relation, edge.position)
+
 proc allowed_attempt_transition(previous, next: StoreAttemptState): bool =
   if previous == next:
     return true
@@ -1005,7 +1121,9 @@ proc commit_transition*(store: VecherinkaStore;
     graph_edges: openArray[WorkflowEdge] = [];
     expansions: openArray[WorkflowExpansion] = [];
     session_updates: openArray[WorkerSessionUpdate] = [];
-    execution_id: int64 = 0) =
+    execution_id: int64 = 0;
+    work_occurrences: openArray[WorkOccurrence] = [];
+    work_edges: openArray[WorkEdge] = []) =
   ## All values and this checkpoint are one SQLite commit. A duplicate ID or
   ## stale writer rolls back every row in the batch.
   require_open(store)
@@ -1037,6 +1155,10 @@ proc commit_transition*(store: VecherinkaStore;
       store.store_attempt(attempt)
     for update in session_updates:
       update_worker_session(store.db, update)
+    for work in work_occurrences:
+      insert_work_occurrence(store.db, work)
+    for edge in work_edges:
+      insert_work_edge(store.db, edge)
     store.db.exec(sql"""INSERT OR REPLACE INTO checkpoint(
         singleton, sequence, format_version, status, payload_text)
       VALUES(1, ?, ?, ?, ?)""",
@@ -1098,6 +1220,44 @@ proc attempt*(store: VecherinkaStore; request_id: string): Option[StoreAttempt] 
     output_artifact_id: if row[5].len == 0: none(int64)
       else: some(parseBiggestInt(row[5])),
     model: row[6], effort: row[7]))
+
+proc work_occurrence*(store: VecherinkaStore;
+    work_id: uint64): Option[WorkOccurrence] =
+  require_open(store)
+  let row = store.db.getRow(sql"""SELECT flow_key, kind, state,
+      input_artifact_id, output_artifact_id, request_id, expansion_id,
+      join_id, root_name, slot FROM work_occurrence WHERE work_id = ?""",
+    int64(work_id))
+  if row.len == 0 or row[0].len == 0:
+    return none(WorkOccurrence)
+  some(WorkOccurrence(work_id: int64(work_id), flow_key: row[0], kind: row[1],
+    state: row[2], input_artifact_id: parseBiggestInt(row[3]),
+    output_artifact_id: if row[4].len == 0: none(int64)
+      else: some(parseBiggestInt(row[4])),
+    request_id: row[5], expansion_id: parseBiggestInt(row[6]),
+    join_id: parseBiggestInt(row[7]), root_name: row[8], slot: parseInt(row[9])))
+
+proc work_occurrences*(store: VecherinkaStore): seq[WorkOccurrence] =
+  require_open(store)
+  for row in store.db.getAllRows(sql"""SELECT work_id, flow_key, kind,
+      state, input_artifact_id, output_artifact_id, request_id, expansion_id,
+      join_id, root_name, slot FROM work_occurrence ORDER BY work_id"""):
+    result.add WorkOccurrence(work_id: parseBiggestInt(row[0]),
+      flow_key: row[1], kind: row[2], state: row[3],
+      input_artifact_id: parseBiggestInt(row[4]),
+      output_artifact_id: if row[5].len == 0: none(int64)
+        else: some(parseBiggestInt(row[5])),
+      request_id: row[6], expansion_id: parseBiggestInt(row[7]),
+      join_id: parseBiggestInt(row[8]), root_name: row[9], slot: parseInt(row[10]))
+
+proc work_edges*(store: VecherinkaStore): seq[WorkEdge] =
+  require_open(store)
+  for row in store.db.getAllRows(sql"""SELECT source_work_id,
+      target_work_id, relation, position FROM work_edge
+      ORDER BY source_work_id, target_work_id, relation, position"""):
+    result.add WorkEdge(source_work_id: parseBiggestInt(row[0]),
+      target_work_id: parseBiggestInt(row[1]), relation: row[2],
+      position: parseInt(row[3]))
 
 proc checkpoint*(store: VecherinkaStore): Option[StoreCheckpoint] =
   require_open(store)

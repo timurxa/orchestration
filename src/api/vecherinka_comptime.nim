@@ -94,7 +94,9 @@ macro fan*(args: varargs[typed]): untyped =
         @codomain
       ]))
     doAssert sym.strVal == "FlowSpec"
-    doAssert domain == input
+    doAssert sameType(domain, input),
+      "fan branch domain mismatch: expected " & input.repr &
+      ", got " & domain.repr
     tupleArgs.add arg
     tupleType.add full
     returnType.add codomain
@@ -365,6 +367,14 @@ proc field_value(node: NimNode; name: string): NimNode =
         child[0].repr == name:
       return child[1]
   nil
+
+proc require_same_endpoint(actual, expected: NimNode;
+    boundary: string; at: NimNode) =
+  if actual.isNil or expected.isNil:
+    error(boundary & ": cannot inspect producer/consumer endpoint types", at)
+  if not sameType(actual, expected):
+    error(boundary & ": producer type " & actual.repr &
+      " does not match consumer type " & expected.repr, at)
 
 proc is_named(node: NimNode; name: string): bool =
   node.kind in {nnkIdent, nnkSym, nnkAccQuoted} and node.repr == name
@@ -746,8 +756,22 @@ proc artifact_type_inst(type_node: NimNode): NimNode =
     return copyNimTree(type_inst[1])
   copyNimTree(type_inst)
 
-proc artifact_unwrapped_type(type_node: NimNode): NimNode =
+proc artifact_resolve_alias(type_node: NimNode): NimNode =
+  ## Follow transparent type aliases, but stop at nominal declarations.
+  ## `sameType` treats aliases as the base type, so codecs and keys must too.
   result = artifact_type_inst(type_node)
+  while result.kind == nnkSym:
+    let declaration = result.getImpl
+    if declaration.kind != nnkTypeDef:
+      break
+    let base = declaration[^1]
+    if base.kind notin {nnkSym, nnkBracketExpr, nnkTupleTy,
+        nnkTupleConstr} or base.repr == result.repr:
+      break
+    result = copyNimTree(base)
+
+proc artifact_unwrapped_type(type_node: NimNode): NimNode =
+  result = artifact_resolve_alias(type_node)
   while result.kind notin {nnkTupleTy, nnkTupleConstr} and
       result.getTypeImpl.kind == nnkDistinctTy:
     result = artifact_type_inst(result.getTypeImpl[0])
@@ -1299,11 +1323,14 @@ proc artifact_json_decode_bytes*(value: JsonNode): seq[byte] =
     result.add(byte(decoded))
 
 proc artifact_type_key(type_expr: NimNode): string =
-  ## Source type spelling plus normalized shape stays independent of union arm
-  ## ordering. Callers must version this key when they intentionally evolve a
-  ## persisted type's meaning.
+  ## Preserve the declared spelling and historical normalized shape. Callers
+  ## must version this key when they intentionally evolve a persisted type's
+  ## meaning; alias resolution for walking must not silently change v1 keys.
   let declared = artifact_type_inst(type_expr)
-  let normalized = artifact_unwrapped_type(type_expr)
+  var normalized = copyNimTree(declared)
+  while normalized.kind notin {nnkTupleTy, nnkTupleConstr} and
+      normalized.getTypeImpl.kind == nnkDistinctTy:
+    normalized = artifact_type_inst(normalized.getTypeImpl[0])
   declared.repr & "|" & declared.getTypeImpl.repr & "|" &
     normalized.repr & "|" & normalized.getTypeImpl.repr
 
@@ -1763,6 +1790,7 @@ proc emit_artifact_codec(type_expr, encode_name,
   let encoded_json = artifact_json_encode(artifact, encode_value)
   let decoded_json = genSym(nskLet, "artifact_json")
   let encoded_payload = genSym(nskParam, "encoded_artifact")
+  let observed_type = genSym(nskLet, "observed_artifact_type")
   let decode_value = artifact_json_decode(artifact,
     newTree(nnkBracketExpr, copyNimTree(decoded_json), newLit("value")),
     type_node)
@@ -1785,7 +1813,12 @@ proc emit_artifact_codec(type_expr, encode_name,
         raise newException(ValueError, "unsupported artifact codec format")
       if `decoded_json`["type"].kind != JString or
           `decoded_json`["type"].getStr != `stable_key`:
-        raise newException(ValueError, "artifact type key mismatch")
+        let `observed_type` = if `decoded_json`["type"].kind == JString:
+          `decoded_json`["type"].getStr
+        else:
+          $`decoded_json`["type"].kind
+        raise newException(ValueError, "artifact type key mismatch: expected " &
+          `stable_key` & ", observed " & `observed_type`)
       `decode_value`
 
 macro declare_artifact_codec*(type_expr: typedesc; encode_name,
@@ -1897,7 +1930,7 @@ proc verify_locations_callback(
     let location_value = quote do: cast[string](`value`)
     let expect_directory = newLit(node.kind == ank_blob_tree)
     quote do:
-      let `verification_error` = verifyWorkspaceBlobPath(
+      let `verification_error` = verifyBlobOutputPath(
         `working_dir`, `location_value`, `expect_directory`)
       if `verification_error`.len != 0:
         `errors`.add(`path_copy` & ": " & `verification_error` & "\n")
@@ -2067,7 +2100,7 @@ proc artifact_wire_type(node: ArtifactNode): NimNode =
   of ank_tuple:
     let shape = node.type_expr.getTypeImpl
     doAssert shape.kind in {nnkTupleTy, nnkTupleConstr}
-    var fields = newNimNode(nnkTupleTy)
+    var fields = newNimNode(shape.kind)
     for index, source_field in shape:
       let field_node = node.fields[index].node
       if source_field.kind == nnkIdentDefs:
@@ -2100,10 +2133,11 @@ proc emit_wire_conversion(
   ## bounds prove every fixed-array assignment below is in range.
   if node.kind == ank_blob:
     let source = genSym(nskLet, "blob_output_source")
-    let path = quote do: normalizeRelativePath(cast[string](`value`))
+    let path = quote do:
+      resolveBlobOutputPath(`working_dir`, cast[string](`value`))
     let converted_blob = quote do:
       block:
-        let `source` = `working_dir` / Path(`path`)
+        let `source` = `path`
         blobFromFile(`source`)
     if node.needs_runtime_cast:
       let target = artifact_type_inst(target_type)
@@ -2111,10 +2145,11 @@ proc emit_wire_conversion(
     return converted_blob
   if node.kind == ank_blob_tree:
     let source = genSym(nskLet, "blob_tree_output_source")
-    let path = quote do: normalizeRelativePath(cast[string](`value`))
+    let path = quote do:
+      resolveBlobOutputPath(`working_dir`, cast[string](`value`))
     let converted_blob_tree = quote do:
       block:
-        let `source` = `working_dir` / Path(`path`)
+        let `source` = `path`
         blobTreeFromDirectory(`source`)
     if node.needs_runtime_cast:
       let target = artifact_type_inst(target_type)
@@ -2727,6 +2762,7 @@ proc lower_flow_expr(
   if pure_parts(node, flow_type, pure_value):
     let value_type = type_inst_or_nil(pure_value)
     doAssert not value_type.isNil, "pure value has no type"
+    require_same_endpoint(value_type, flow_type[2], "pure output", node)
     result.head = lower_raw_value(
       value_type, pure_value, context.artifact_registry)
     result.tail = result.head
@@ -2746,16 +2782,35 @@ proc lower_flow_expr(
       left_flow.tail.append_continuation(pool_flow)
       return LoweredFlow(head: left_flow.head, tail: pool_flow)
     if flow_spec_type(left).isNil:
-      ## Typed `A >>> FlowSpec[A, B]` already checked endpoint compatibility;
-      ## retain its value as a local Artifact seed, then use normal chaining.
+      ## Retain the value as a local Artifact seed. Nim accepts some tuple
+      ## label mismatches through generic inference, so verify before packing.
       let value_type = type_inst_or_nil(left)
       doAssert not value_type.isNil, "value-seeded >>> left operand has no type"
+      let right_type = flow_spec_type(right)
+      doAssert not right_type.isNil,
+        "value-seeded >>> right operand is not a FlowSpec"
+      require_same_endpoint(value_type, right_type[1],
+        "value-seeded composition", node)
+      require_same_endpoint(flow_type[1], bindSym"void",
+        "value-seeded composition input", node)
+      require_same_endpoint(flow_type[2], right_type[2],
+        "value-seeded composition output", node)
       let value_flow = lower_raw_value(
         value_type, left, context.artifact_registry)
       let right_flow = lower_flow_expr(right, context)
       value_flow.append_continuation(right_flow.head)
       return LoweredFlow(head: value_flow, tail: right_flow.tail)
 
+    let left_type = flow_spec_type(left)
+    let right_type = flow_spec_type(right)
+    doAssert not left_type.isNil and not right_type.isNil,
+      "composition operands must be FlowSpecs"
+    require_same_endpoint(left_type[2], right_type[1],
+      "flow composition", node)
+    require_same_endpoint(flow_type[1], left_type[1],
+      "flow composition input", node)
+    require_same_endpoint(flow_type[2], right_type[2],
+      "flow composition output", node)
     let left_flow = lower_flow_expr(left, context)
     let right_flow = lower_flow_expr(right, context)
     left_flow.tail.append_continuation(right_flow.head)
@@ -2966,15 +3021,15 @@ proc lower_fanout(
   for index, branch in branches:
     let branch_type = flow_spec_type(branch)
     doAssert not branch_type.isNil, "fanout branch is not a FlowSpec"
-    doAssert sameType(branch_type[1], flow_type[1]),
-      "fanout branch domain mismatch"
+    require_same_endpoint(branch_type[1], flow_type[1],
+      "fan branch input", branch)
     let output_item = output_type[index]
     let output_item_type = if output_item.kind == nnkExprColonExpr:
       output_item[1]
     else:
       output_item
-    doAssert sameType(output_item_type, branch_type[2]),
-      "fanout branch codomain mismatch"
+    require_same_endpoint(branch_type[2], output_item_type,
+      "fan branch output", branch)
     branch_types.add copyNimTree(branch_type[2])
     branch_nodes.add lower_flow_expr(branch, context).head
 
@@ -3007,8 +3062,16 @@ proc lower_so(
     "malformed so callback"
 
   let domain = flow_type[1]
-  doAssert not domain.is_void_type and sameType(input_type, domain),
-    "so callback input does not match FlowSpec domain"
+  doAssert not domain.is_void_type,
+    "so callback input cannot be void"
+  require_same_endpoint(input_type, domain, "so callback input", lambda)
+  let body_type = type_inst_or_nil(body)
+  doAssert not body_type.isNil and body_type.kind == nnkBracketExpr and
+      body_type.len == 3 and body_type[0] == flow_spec_symbol,
+    "so callback body is not a typed FlowSpec"
+  require_same_endpoint(body_type[1], bindSym"void", "so callback body input",
+    body)
+  require_same_endpoint(body_type[2], flow_type[2], "so callback output", body)
 
   let artifact_name = context.artifact_registry.artifact_name
   let artifact_input = genSym(nskParam, "so_artifact")
@@ -3253,6 +3316,9 @@ proc lower_lift(
     "lift inner flow must have non-void endpoints"
 
   let tree = parse_lift_pattern(parseExpr(pattern_node.strVal))
+  ## The typed `make_lift` constructor derives the outer FlowSpec endpoints
+  ## from this same pattern and the inner endpoints. Do not compare the
+  ## reconstructed, untyped pattern AST here: `sameType` requires typed nodes.
   discard lift_types(tree, inner_type[1], inner_type[2])
   let inner_flow = lower_flow_expr(inner, context).head
   let registry = context.artifact_registry
@@ -3505,6 +3571,7 @@ proc lower_vecherinka_runtime(
     seq[Flow[`artifact_name`]]
   let input_name = ident("input")
   let initial_budget_name = ident("initial_budget")
+  let finish_work_retry_limit_name = ident("finish_work_retry_limit")
   let prompt_templates_name = ident("prompt_templates")
   let transport_name = ident("transport")
   let database_path_param = ident("database_path")
@@ -3560,7 +3627,8 @@ proc lower_vecherinka_runtime(
       initial_budget = `initial_budget_name`,
       prompt_templates = `prompt_templates_name`,
       pool_weights = `pool_weights`,
-      transport = `transport_name`)
+      transport = `transport_name`,
+      finish_work_retry_limit = `finish_work_retry_limit_name`)
     if `work_plan_name`.output.isNone:
       if `work_plan_name`.failure_message.isSome:
         raise newException(ValueError, `work_plan_name`.failure_message.get)
@@ -3574,7 +3642,8 @@ proc lower_vecherinka_runtime(
     let `resume_work_plan_name` = `resume_sqlite_run`(`resume_data_name`,
       `database_path_param`, `resume_metadata_name`, `resume_flow_nodes_name`,
       prompt_templates = `prompt_templates_name`,
-      transport = `transport_name`)
+      transport = `transport_name`,
+      finish_work_retry_limit = `finish_work_retry_limit_name`)
     if `resume_work_plan_name`.output.isNone:
       if `resume_work_plan_name`.failure_message.isSome:
         raise newException(ValueError,
@@ -3588,12 +3657,14 @@ proc lower_vecherinka_runtime(
         `initial_budget_name`: Budget;
         `prompt_templates_name`: AgentPromptTemplates = `prompt_templates`;
         `transport_name`: LlmTransport[`artifact_name`] = nil;
-        `database_path_param`: Path = Path("")): `entry_codomain` =
+        `database_path_param`: Path = Path("");
+        `finish_work_retry_limit_name`: int = 4): `entry_codomain` =
       `proc_body`
   let generated_resume_proc = quote do:
     proc `resume_proc_name`(`database_path_param`: Path;
         `prompt_templates_name`: AgentPromptTemplates = `prompt_templates`;
-        `transport_name`: LlmTransport[`artifact_name`] = nil): `entry_codomain` =
+        `transport_name`: LlmTransport[`artifact_name`] = nil;
+        `finish_work_retry_limit_name`: int = 4): `entry_codomain` =
       `resume_proc_body`
   var generated = newStmtList()
   generated.add(generated_flows_proc)
