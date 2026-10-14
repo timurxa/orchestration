@@ -1,0 +1,22 @@
+# S2-12 integrated audit follow-up
+
+**Verdict: FAIL.** Prior findings on identity-bearing signatures, P5/P8 ownership, and single-coordinator P15 boundary are fixed. Two theorem/module ownership gaps remain: P2 and event-level P4 composition.
+
+## Confirmed fixes
+
+- **Signatures:** packet now gives `CodecIdentity` fields, `GeneratorRef` input/graph codecs, and explicit `GraphNode(key, DurableWorkRef, input_wire)` ([packet lines 45–127](../../../implementation_packet.md#2-contract-surface-and-schematic-signatures)). These match normative codec/generator/graph contracts ([spec lines 110–133, 513–655](../../../implementation_spec.md#2-minimal-typed-api)). Its narrowed omission caveat is accurate.
+- **P5/P8:** `Recovery` owns composite P5 with Journal, Durability, GraphCodec/Resolve, Generation imports; `BudgetProof` owns P8 with Allocation, Journal, Generation, Provenance/P7 imports ([packet lines 234–259](../../../implementation_packet.md#3-required-source-module-architecture)). This fits spec dependencies P5=P2/P4/P10 and P8=P3/P4/P7 ([spec lines 2673, 2676](../../../implementation_spec.md#6-required-proofs)).
+- **P15/P13:** packet now expressly makes P15 single-coordinator-per-run and requires P13 to prove concrete ownership; multi-coordinator use requires shared fencing plus theorem extension ([packet lines 210–215, 242–245](../../../implementation_packet.md#2-contract-surface-and-schematic-signatures)). Matches normative controller boundary ([spec lines 1987–1991](../../../implementation_spec.md#42-abstract-executor-and-service-contracts)).
+- **Journal codec / deployment:** selector remains fixed in `ReplayContext`, sourced from stable metadata or deployment context, never malformed journal bytes ([packet line 423](../../../implementation_packet.md#7-representation-choices-owner-and-decision-rule)). Graph language remains finite but unbounded; admission may reject before `RunStarted`, and post-start capacity is an explicit P14 premise ([packet lines 431–441](../../../implementation_packet.md#7-representation-choices-owner-and-decision-rule)). Both align with normative contracts.
+
+## Remaining blockers
+
+1. **P2 composite owner/import path absent.** `GraphCodec` row owns syntax encoding but imports only Kernel and explicitly avoids runtime package lookup; `GraphResolve` owns schema resolution; `Bundle` owns P0; no row owns P2's combined decode, same-resolver application, and exact typed-witness reconstruction ([packet lines 230–233, 274–278](../../../implementation_packet.md#3-required-source-module-architecture)). Normative P2 requires all these together ([spec line 2670](../../../implementation_spec.md#6-required-proofs)). **Fix:** name a composition theorem/module (e.g. graph codec + resolver + bundle boundary), list imports, and ensure `Bundle` does not import that composition.
+
+2. **P4 event/visibility owner mismatch.** `Generation` claims P4 “commit-before-use” but imports omit Journal and Provenance ([packet line 235](../../../implementation_packet.md#3-required-source-module-architecture)); those modules define event authorization and replay semantics. P4 requires exact graph/plan commit and children disabled before commit, not only universal generator admission and typed splice ([spec line 2672](../../../implementation_spec.md#6-required-proofs)). **Fix:** split Generation's admission/splice lemma from journal authorization/visibility lemma, assign both owners/imports, and name the P4 composition point. Avoid putting event-level theorem in Generation without adding acyclic Journal/Provenance dependencies.
+
+## Order and cycle check
+
+Proof order now matches theorem dependencies: P4/P6/P7/P10 after P3; P5/P8 after inputs; P15 after P0–P8/P10; P11/P16 after P15; P13 after P11/P12/P15; P14 last ([packet lines 323–343](../../../implementation_packet.md#5-proof-order-and-dependency-spine), [spec lines 2668–2684](../../../implementation_spec.md#6-required-proofs)). No definite cycle found in listed module edges: P2/P4 gaps are missing composition owners, not cycles. P9 stays optional and Journal depends only on packed-reference syntax below it, avoiding Artifacts↔Journal cycle ([packet lines 239, 249–259](../../../implementation_packet.md#3-required-source-module-architecture)).
+
+**Strongest objection:** P2 and P4 are required theorem targets, yet architecture assigns only their component lemmas. Without explicit composition modules/import paths, implementer must invent theorem ownership and layering; S2-12 acceptance therefore remains unmet.

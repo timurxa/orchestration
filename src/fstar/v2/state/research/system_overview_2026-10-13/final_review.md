@@ -1,0 +1,23 @@
+# Final review: F* v2 overview guide
+
+**Verdict: mostly accurate; fix two precision issues, clarify one theorem summary.** Read-only review. No guide/code edits.
+
+## Findings
+
+1. **GraphDesc keys mislabeled as occurrence keys.** Guide says descriptor records “occurrence keys” ([guide](../../../system_overview_and_reading_guide.md#L143)). Descriptor nodes carry local `NodeKey`s. `NodeOccurrence` combines graph occurrence/path with key; path is derived when graph commits. See spec's `GraphDesc`/`NodeKey` definitions ([implementation_spec.md](../../../implementation_spec.md#L489)) and occurrence lifting/commit description ([implementation_spec.md](../../../implementation_spec.md#L1745), [implementation_spec.md](../../../implementation_spec.md#L2672)). Change phrase to “local node keys”; explain occurrence paths are derived on commit if needed. This matters to graph encoding and recovery.
+
+2. **P11 summary drops exact resumable-intent case.** Guide summarizes P11 as “a started nonterminal state has an enabled action” ([guide](../../../system_overview_and_reading_guide.md#L252)). Normative result allows a legal enabled action **or same-key resumable intent** ([implementation_spec.md](../../../implementation_spec.md#L2679)). State the second case explicitly; otherwise reader may infer pending external work must already have a locally enabled event.
+
+3. **P13/P16 relationship could read as stronger than theorem dependency.** Guide says P13 “transfers those results” immediately after P10/P15/P16 discussion ([guide](../../../system_overview_and_reading_guide.md#L263)). Spec makes P13 depend on P0–P8, P10–P12, P15; P16 separately depends on P0–P8, P10, P15 ([implementation_spec.md](../../../implementation_spec.md#L2681), [implementation_spec.md](../../../implementation_spec.md#L2684)). Current wording is broadly defensible, but clarify that concrete P13 transfer does not subsume P16; a concrete end-to-end recovered-semantics claim needs both appropriate abstract result and concrete refinement.
+
+4. **Minor typo:** “Bouned concurrency” at guide line 225 ([guide](../../../system_overview_and_reading_guide.md#L225)).
+
+## Checked claims and links
+
+- All local Markdown link targets in guide exist, including four predecessor docs. Only explicit fragment target `#6-required-proofs` matches spec heading `## 6. Required proofs` ([implementation_spec.md](../../../implementation_spec.md#L2621)).
+- Current status is accurately distinguished: A00–H5 unstarted and current planning pass ran no verification ([state.md](../../../state/state.md#L10), [state.md](../../../state/state.md#L83), [work_dag.md](../../../state/work_dag.md#L1)). Guide correctly warns that older S2-active prose is stale ([guide](../../../system_overview_and_reading_guide.md#L304)); registry header and theorem guide still contain that stale status ([registry.md](../../../state/research/registry.md#L3), [key_correctness_theorems.md](../../../key_correctness_theorems.md#L364)).
+- Predecessor characterization is supported: typed-plan outline describes closure-backed combinators, manifest, and event-sourced reducer, while identifying missing continuation/runtime proof ([outline](../../../../../docs/fstar_typed_plan_workflow_api_outline.md#L3), [outline](../../../../../docs/fstar_typed_plan_workflow_api_outline.md#L18)); report calls prototype implemented but incomplete ([report](../../../../../docs/fstar_typed_plan_workflow_api_report.md#L3)). Guide accurately distinguishes these predecessors by role ([guide](../../../system_overview_and_reading_guide.md#L82)). Its caveat that v2 does not establish equivalence for every earlier `so` use is appropriate ([guide](../../../system_overview_and_reading_guide.md#L333)).
+- Source claims match source audit: builder laws include `admit()` ([Graph.fst](../../../src/WorkflowV2.Graph.fst#L906)); journal says replay is deferred ([Journal.fst](../../../src/WorkflowV2.Journal.fst#L101)); codec is syntax-level, not typed reconstruction ([source_audit.md](../../../state/research/implementation_dag_2026-10-13/source_audit.md#L16)).
+- Prior verification wording is careful: repo records a seven-module `make verify` pass but explicitly says this did not close the generic resolver or builder admissions ([run_log.md](../../../state/run_log.md#L407), [node_summaries.md](../../../state/node_summaries.md#L714)). Current DAG status still says no verification during current planning pass. No overclaim found in guide lines 402–411.
+
+No other material factual error or broken relative link found. Scope caveat: this review checked documented lineage and source evidence, not historical Git revisions.
