@@ -1,20 +1,24 @@
-# F*/Pulse Reimplementation Proposal
+# F* Workflow API Migration Proposal
 
-**Status:** Active research. The implementation language direction and project priorities are recorded; the target API, runtime boundary, and migration plan are not yet decided.
+**Status:** Active direction for the F* API design search. The target is ordinary F* only; the API and runtime design remain open to evidence.
 
-## Current direction
+## Current direction after the F*-only pivot (2026-10-09)
 
-Reimplement the orchestration API in `src/api` in F*/Pulse, with Pulse code extracted to OCaml as the initial execution target. KaRaMeL is not a target requirement and should not shape the design unless a specific research result makes it relevant. F*/Pulse with OCaml extraction is the current language hypothesis; the workflow formalism and API abstraction remain open to evidence. Workflow source should describe a structure that a separate runtime follows; declaring a model step must not itself call the model. The authoring interface should support ordinary user code alongside workflow constructs.
+Reimplement the workflow API in `src/api` using ordinary F* throughout, including dynamic `so` code. Use the normal F* extraction path, with OCaml as the preferred executable target and only small, explicit FFI kernels where unavoidable. Do not use Pulse or KaRaMeL. The specialized search remains the existing Nim/Vecherinka workflow; this proposal concerns the API/runtime it will investigate.
 
-The reimplementation should include the orchestration-side Codex interface/client needed to communicate with the Codex app-server protocol. It must not reimplement the Codex Rust app-server itself. Keep the workflow API and its usage model agnostic of Codex-specific details so the orchestration system can evolve or use other backends.
+The target API does not need to implement an LLM client, provider protocol, conversation/thread lifecycle, token accounting, or other model-state management. Preserve a small primitive kernel, ordinary-F* library composition, durable resumability, proofs of useful properties, and replaceable generic adapters for external effects. Full language availability inside `so` is a hard design constraint: do not replace user F* code with a reduced callback language or a general-F* interpreter.
 
-This is an experiment in agentic proof-oriented programming. The most important goal is to design a correct system. Take as much care as possible to make proof obligations useful, meaningful, and connected to the system's actual guarantees. Implementation difficulty should not be a major reason to weaken the desired correctness or assurance goals.
+Every part of the logical state required to resume after process termination must have a durable representation: either store its encoded value or store sufficient inspectable inputs and event history to reconstruct it under a proved rule. Do not assume serializable closures. SQLite is a suitable example, not a mandated store. The search must determine how function identities, captures, dynamic expansions, artifacts, and external operation state are recorded or safely reconstructed, and prove continuation under explicit assumptions.
 
-The runtime architecture and result structure will likely differ from the current implementation because resumability will carry greater weight. Even with those changes, retain the project's central intentions: do not block the scheduler while model calls are pending, and provide structured, straightforward ways to work with LLMs.
+The search must also evaluate whether artifact representations or richer types for codecs, provenance, validation, materialization, and I/O state add real value. Keep API primitives small; move useful ergonomic features into an ordinary F* library where possible.
 
-This proposal tracks the direction, project priorities, research evidence, and unresolved decisions; it does not authorize implementation work.
+This is an experiment in proof-oriented programming. Correctness and meaningful machine-checked proofs are central. This proposal does not authorize a production migration; the specialized search is tasked with producing design and implementation/proof evidence as specified in the linked problem statement. The authoritative task and acceptance criteria are in [the F* workflow API problem specification](fstar_pulse_workflow_api_problem_spec.md).
 
-## Research directions
+## Archived pre-pivot research directions (background only)
+
+The sections below record the earlier F*/Pulse and provider-client investigation. They may supply evidence about current API semantics, persistence, artifacts, and recovery. Their Pulse extraction/runtime and provider-specific implementation questions are superseded and are not requirements for the current search.
+
+## Superseded research questions
 
 The current orchestration implementation is in [`src/api`](../api). The directions below investigate its current semantics and possible improvements to the orchestration system. Research can range broadly across programming-language theory, workflow systems, and proof-oriented programming. The goal is to identify useful formalisms for generalizing this API, not merely to port its current syntax. Open problems below must stay narrow and request concrete, checkable results.
 
@@ -103,7 +107,9 @@ The key question is whether a formalism yields a more expressive or simpler API 
 - How should assumptions about F* extraction, OCaml libraries, foreign bindings, C compilers, and generated-code toolchains be documented and checked?
 - What small prototypes and proof or runtime checks would resolve the highest-risk questions before committing to a full rewrite?
 
-## Results
+## Historical research results
+
+The following results were produced for the pre-pivot F*/Pulse and provider-client scope. Treat source-grounded observations about the existing API, persistence, artifact handling, and recovery as evidence; do not treat the prior target-language or provider recommendations as current direction.
 
 ### Research pass status
 
@@ -213,9 +219,11 @@ This log tracks whether the required kernel is a workable research method, separ
 
 The kernel did not fail persistently, so the user's abort condition was not met. It was usable as the primary exploration method, with bounded runs, SQLite resume, and occasional fresh-database retries. Preserve the reliability record as the final section of the final research report.
 
-## Open problems
+## Superseded pre-pivot open problems
 
-Each item requests a bounded artifact with evidence. Mark an item complete only when its deliverable exists and its claims are tied to repository code, primary sources, or a runnable prototype.
+These tasks belonged to the earlier Pulse/provider-client investigation. They are retained as an audit trail and are not work items for the current F* only search. The current search criteria are defined by [the problem specification](fstar_pulse_workflow_api_problem_spec.md).
+
+Each item originally requested a bounded artifact with evidence. Mark an item complete only when its deliverable exists and its claims are tied to repository code, primary sources, or a runnable prototype.
 
 1. **Close API inventory gaps:** Extend the [completed inventory](/Users/alex/areas/temp/fstar-pulse-research/api_semantics_inventory.md) to cover exported low-level `FlowKind`/`Flow` construction and `init_work_plan`/`handle_invocation`; add concrete `it`, pending-call lifecycle, and actual resume examples; preserve the policy choice between remote reconciliation and at-least-once resubmission. The budget/checkpoint contradiction and unknown-terminal-status mapping now have source-grounded counterexamples; execute those paths only if a runtime result is needed to change the implementation decision.
 2. **Small authoring prototypes:** Implement the same representative workflows in an indexed-plan encoding and an effect-handler front end lowering to that plan: sequential typed pipeline; `fan`/projection; dynamic budgeted route; async model operation; typed validation. Include persist-before-submit, suspension, returned event, atomic cursor/checkpoint advance, and resume. Defunctionalize or eliminate the handler continuation and actually persist/reload the resolved expansion. Separately compile-check indexed `Traverse<Shape,A,B>` over `Seq`, `Option`, and nested `Seq<Option<_>>`. Record source size, compiler/typecheck outcomes, plan shape, codecs/reification, and extraction behavior. Keep prototypes isolated from production code.
@@ -237,4 +245,4 @@ Each item requests a bounded artifact with evidence. Mark an item complete only 
 18. **Direct Pulse Rust feasibility:** Using the documented Pulse-to-Rust route only (not KaRaMeL), test typecheck/extraction/compile for higher-order functions, mutable state, recursion, and workflow-like plan code under a pinned F*/Rust toolchain. Record exact version and runtime limits; treat this as an alternative-backend probe, not evidence for resumability or the Codex boundary.
 ## Proposal boundary
 
-This file records the current language direction, project priorities, research questions, and provisional research findings. Findings are evidence for later decisions, not final API choices or authorization to implement the rewrite.
+The F* only direction and current scope are stated at the top of this file and in the linked problem specification. The lower research ledger records the superseded Pulse/provider-client investigation. Its evidence can inform the new design search, but its old open problems and recommendations do not define the current target.

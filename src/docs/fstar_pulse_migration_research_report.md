@@ -1,22 +1,20 @@
-# F*/Pulse orchestration reimplementation: research synthesis
+# Historical F*/Pulse orchestration research synthesis
 
-**Research status:** The kernel research pass and local prototypes are complete. Evidence supports a provisional architecture, while concrete implementation decisions remain open around durable callback identity, external-operation recovery, and a canonical stateful Pulse/OCaml build path. The indexed-plan probe typechecked and extracted code, but did not produce a runnable executable.
+**Status:** This report records pre-pivot research. Its Pulse and provider-client recommendations are superseded by the current F* only direction in the [migration proposal](fstar_pulse_migration_proposal.md) and [problem specification](fstar_pulse_workflow_api_problem_spec.md).
 
-**Scope:** Reimplement the orchestration API in this repository. The workflow description must remain separate from execution, support ordinary user logic, keep the scheduler free while model operations are pending, resume from durable state, and expose a provider-neutral interface. Reimplement the orchestration-side Codex client; do not reimplement the Codex Rust app-server.
+**Historical scope:** The original investigation considered Pulse, OCaml extraction, a provider-neutral LLM interface, and a Codex client. The current search excludes Pulse, KaRaMeL, and provider-specific model-state management. Use this report as background evidence about the existing API, higher-order authoring, durable continuation, artifacts, generic external effects, and proof boundaries. Do not inherit old target-language or client implementation requirements.
 
-## Recommendation
+## Current relevance after the pivot
 
-Use a typed workflow plan as the durable contract, with a pure F*/Pulse transition function interpreting plan state and durable events into explicit commands. Allow an ergonomic higher-order F*/Pulse authoring layer, provided it lowers into a versioned, serializable plan before effects are dispatched. Persist dynamic expansion decisions before running children. Store code identity and encoded captures for code that must be replayed; do not treat a native closure as a durable identity.
+The new search should explore a minimal API/runtime written in ordinary F*, including ordinary F* inside and outside dynamic `so` blocks. It should target the normal F* extraction path, preferably to OCaml, and demonstrate an executable deterministic runner. No candidate API has been selected. A typed durable workflow representation, explicit expansion records, stable code identities, encoded captures, and a pure transition core are useful hypotheses from the earlier research, not required design choices.
 
-This combines the strongest findings across the indexed/free-plan, dataflow, and event-state-machine work. It preserves ordinary typed computation while giving persistence and proof obligations a finite object to reason about. A direct effect-handler or higher-order API can remain an authoring front end when its continuation can be eliminated or reified into that plan. A plain workflow callback that performs arbitrary I/O during plan construction would make inertness, replay, and crash recovery difficult to prove.
+The old indexed-plan probe gives limited evidence that ordinary F* can typecheck higher-order typed plan constructors, dynamic expansion, and a pure event reducer without Meta-F*. It generated ordinary F* OCaml, but the local build stopped at missing `Prims.cmi`/Zarith dependencies; separately generated Pulse code had its own unresolved runtime closure. The ordinary-F* build blocker and Pulse runtime blocker are distinct. The probe did not yield a runnable executable or prove durable resume. The search must establish the normal F* extraction/build/run path against actual extracted F* code. Provider protocol/session state is outside scope; generic scripted adapters remain useful to test durable operation semantics and backend substitution.
 
-Use Pulse for imperative stateful runtime code, with F* types and pure functions for typed workflow descriptions and helper computations where appropriate. The F* feature probe confirms that higher-order functions and a Pulse stateful sample can be verified and extracted. The local canonical stateful OCaml support-module build remains unresolved: the indexed-plan and Pulse outputs were generated, but compilation/linking stopped at missing F* runtime modules, so the execution target remains provisional.
+The project priority remains useful machine-checked guarantees tied to actual behavior. Treat the detailed Pulse/extraction and Codex findings below as historical evidence only. The authoritative requirements are in the problem specification.
 
-This is an architecture direction, not a claim that the system is already proved correct. The combined authoring, lowering, checkpoint, and resume path has not yet been implemented or verified. The prototype below resolves basic type expressibility, but not durable closure encoding, changed-binary resume, or execution of extracted stateful code.
+## Historical research record
 
-The project priority is to design a correct system and make proof obligations meaningful and tied to actual guarantees. Implementation difficulty is a secondary constraint for this experiment in agentic proof-oriented programming; it should not be used to weaken a needed correctness property.
-
-## What the existing API does
+### What the existing API does
 
 The current API exposes typed flows with input and output types. Compile-time Nim machinery inspects and lowers the authoring syntax into runtime flow nodes. The important distinction is between constructing a workflow and dispatching an external model request:
 
@@ -163,7 +161,7 @@ This establishes that useful typed plan constructors and a small reducer can be 
 
 The extracted OCaml erased the plan indices to `Obj.t` and inserted `Obj.magic`; runtime checks or a different representation would therefore be needed at the persistence/extraction boundary. The generated Plan module could not compile in the installed switch because `Prims.cmi` was unavailable; compiling bundled `Prims.ml` stopped at missing Zarith (`Z`). Pulse verification and OCaml generation succeeded, but its generated stateful module also could not compile/link against the available support closure. Two prototype artifacts stopped at different stages: one compiled Plan/Semantics modules but failed linking on Zarith, while another stopped compiling at `Prims`. Neither made a runnable executable. This is local toolchain evidence, not a claim that the F* release is generally unusable. No performance comparison was run.
 
-## Decision ledger
+## Historical decision ledger (pre-pivot)
 
 The provisional architecture gives enough direction for further isolated prototypes. It does not justify a full production rewrite yet.
 
